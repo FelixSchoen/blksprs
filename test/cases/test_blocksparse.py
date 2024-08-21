@@ -7,7 +7,7 @@ from blksprs.blocksparse import BlocksparseMatmulSSS, BlocksparseToDense, Blocks
     BlocksparseTranspose, BlocksparseTools
 
 # Device setup
-DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("cuda:0")
 
 # Constants
 B, M, N, K = 2, 64, 64, 64
