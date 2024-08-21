@@ -1,10 +1,10 @@
 from pathlib import Path
 import torch
-import triton
 from matplotlib import pyplot as plt
 
-from blksprs.blocksparse import BlocksparseMatmulSSS, BlocksparseToDense, BlocksparseToSparse, BlocksparseSoftmax, \
+from blksprs.ops.blocksparse import BlocksparseMatmulSSS, BlocksparseToDense, BlocksparseToSparse, BlocksparseSoftmax, \
     BlocksparseTranspose, BlocksparseTools
+from blksprs.utils.benchmarking import benchmark
 
 # Device setup
 DEVICE = torch.device("cuda:0")
@@ -17,8 +17,8 @@ BASE_PATH = Path(__file__).parent.parent.parent
 
 # Settings
 SPARSITY_PERCENTAGE = 0.75  # Percentage of non-sparse blocks
-BENCHMARK = False  # Whether to run benchmark
-BENCHMARK_DIMS = [64, 128, 256, 512, 1024, 2048, 4096, 8192]  # Dimensions to benchmark
+BENCHMARK = True  # Whether to run benchmark
+BENCHMARK_MATRIX_SIZES = [64, 128, 256, 512, 1024, 2048, 4096, 8192]  # Dimensions to benchmark
 
 # Tolerances
 ATOL = 1e-2
@@ -71,7 +71,7 @@ def test_blksprs_matmul_sss():
                                                                                blksprs_to_sparse(y, sparsity_layout),
                                                                                sparsity_layout, sparsity_layout,
                                                                                sparsity_layout)
-        _benchmark(method_labels, func_input_generator, func_test_subject_0, func_test_subject_1)
+        benchmark(method_labels, func_input_generator, BENCHMARK_MATRIX_SIZES, func_test_subject_0, func_test_subject_1)
 
 
 def test_blksprs_softmax():
@@ -165,31 +165,6 @@ def test_blocksparse_to_dense():
 
 
 # Utility
-
-def _benchmark(method_labels, func_input_generator, *funcs_test_subject):
-    quantiles = [0.5, 0.2, 0.8]
-    results = {}
-
-    for benchmark_dim in BENCHMARK_DIMS:
-        arguments = func_input_generator(benchmark_dim)
-
-        for i, func_test_subject in enumerate(funcs_test_subject):
-            func_ms_avg, func_ms_min, func_ms_max = triton.testing.do_bench(
-                lambda: func_test_subject(**arguments), quantiles=quantiles)
-            results.setdefault(i, []).append((func_ms_avg, func_ms_min, func_ms_max))
-
-    plt.figure(dpi=300)
-    for key_method, value_method in results.items():
-        ms_method_avg, ms_method_min, ms_method_max = zip(*value_method)
-        plt.plot(BENCHMARK_DIMS, ms_method_avg, label=method_labels[key_method])
-        plt.fill_between(BENCHMARK_DIMS, ms_method_min, ms_method_max, alpha=0.2)
-
-    plt.xlabel("Matrix size")
-    plt.ylabel("Time (ms)")
-    plt.ylim(bottom=0, top=None)
-    plt.grid(True)
-    plt.legend()
-    plt.show()
 
 
 def _get_blocksparse_input(b, m, n, sparsity_block_size, sparsity_percentage):
