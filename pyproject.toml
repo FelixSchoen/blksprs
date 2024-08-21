@@ -1,6 +1,6 @@
 [project]
 name = "blksprs"
-version = "0.1"
+version = "0.2-beta.1"
 authors = [{ name = "Felix Schön", email = "schoen@kr.tuwien.ac.at" }]
 description = "A lightweight library for operations on blocksparse matrices in PyTorch."
 readme = "README.md"
