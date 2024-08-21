@@ -7,7 +7,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = { file = "LICENSE.md" }
 dependencies = [
-    "pytorch"
+    "torch"
 ]
 
 [project.urls]
@@ -19,7 +19,8 @@ test = [
     "pytest",
     "pytest-xdist",
     "pytest-cov",
-    "coverage"
+    "coverage",
+    "matplotlib"
 ]
 deploy = [
     "build",
