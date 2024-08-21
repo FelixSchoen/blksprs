@@ -15,21 +15,29 @@ class BaseBlocksparse(Module, ABC):
         self.sparsity_block_size = sparsity_block_size
         self.device = device
 
-    def validate(self, *tensors: Tensor) -> None:
+    def validate(self, *tensors: Tensor, flag_dim: bool = True, flag_contiguous: bool = True, flag_dtype: bool = True,
+                 flag_device: bool = True) -> None:
         for tensor in tensors:
-            assert tensor.dim() == 3, "Input tensors must have 3 dimensions"
-            assert tensor.is_contiguous(), "Input tensors must be contiguous"
-            assert tensor.dtype == torch.float32, "Input tensors must be of type float32"
-            assert tensor.device == self.device, "Input tensors must be on the same device"
+            if flag_dim:
+                assert tensor.dim() == 3, "Input tensors must have 3 dimensions"
+            if flag_contiguous:
+                assert tensor.is_contiguous(), "Input tensors must be contiguous"
+            if flag_dtype:
+                assert tensor.dtype == torch.float32, "Input tensors must be of type float32"
+            if flag_device:
+                assert tensor.device == self.device, "Input tensors must be on the same device"
 
-    def validate_sparsity(self, *tensors: Tensor) -> None:
-        for tensor in tensors:
+    def validate_sparsity(self, *tensor_sparsity_layout_tuples: tuple[Tensor, Tensor]) -> None:
+        for tensor_sparsity_layout_tuple in tensor_sparsity_layout_tuples:
+            tensor, sparsity_layout = tensor_sparsity_layout_tuple
+
             assert tensor.size(-1) == tensor.size(
                 -2) == self.sparsity_block_size, "Tensor not conforming to sparsity specification"
+            assert tensor.size(0) == torch.sum(sparsity_layout.reshape(-1))
 
     @staticmethod
-    def get_triton_block_size(sparsity_block_size):
-        return min(sparsity_block_size, 128)
+    def get_triton_block_size(sparsity_block_size: int, limit: int = 128):
+        return min(sparsity_block_size, limit)
 
 
 # --- Matmul SSS ---
@@ -42,26 +50,29 @@ class BlocksparseMatmulSSS(BaseBlocksparse):
     def forward(self, x: Tensor, y: Tensor,
                 sparsity_layout_x: Tensor, sparsity_layout_y: Tensor, sparsity_layout_output: Tensor) -> Tensor:
         self.validate(x, y)
-        self.validate_sparsity(x, y)
+        self.validate_sparsity((x, sparsity_layout_x), (y, sparsity_layout_y))
         assert x.size(2) == y.size(1), "Inner dimensions must match"
 
-        output_n_sparse_blocks = torch.sum(sparsity_layout_output.to(torch.int)).item()
+        o_n_sparse_blocks = torch.sum(sparsity_layout_output.to(torch.int)).item()
+
         sparsity_layout_x_flat = sparsity_layout_x.reshape(-1)
         sparsity_reverse_lut_x = ((torch.cumsum(sparsity_layout_x_flat, dim=-1) - 1) *
                                   (sparsity_layout_x_flat == 1) -
                                   (1 * (sparsity_layout_x_flat == 0)))
+
         sparsity_layout_y_flat = sparsity_layout_y.reshape(-1)
         sparsity_reverse_lut_y = ((torch.cumsum(sparsity_layout_y_flat, dim=-1) - 1) *
                                   (sparsity_layout_y_flat == 1) -
                                   (1 * (sparsity_layout_y_flat == 0)))
-        sparsity_lut_output = torch.nonzero(sparsity_layout_output)
+
+        sparsity_lut_o = torch.nonzero(sparsity_layout_output)
 
         return _BlocksparseMatmulSSS.apply(x, y,
                                            sparsity_layout_x, sparsity_reverse_lut_x,
                                            sparsity_layout_y, sparsity_reverse_lut_y,
-                                           sparsity_layout_output, sparsity_lut_output,
+                                           sparsity_layout_output, sparsity_lut_o,
                                            self.sparsity_block_size,
-                                           output_n_sparse_blocks,
+                                           o_n_sparse_blocks,
                                            self.device)
 
 
@@ -71,9 +82,9 @@ class _BlocksparseMatmulSSS(torch.autograd.Function):
     def forward(ctx, x: Tensor, y: Tensor,
                 sparsity_layout_x: Tensor, sparsity_reverse_lut_x: Tensor,
                 sparsity_layout_y: Tensor, sparsity_reverse_lut_y: Tensor,
-                sparsity_layout_output: Tensor, sparsity_lut_output: Tensor,
-                sparsity_block_size: int, output_n_sparse_blocks: int, device: torch.device) -> Tensor:
-        output = torch.zeros(size=(output_n_sparse_blocks, sparsity_block_size, sparsity_block_size), device=device)
+                sparsity_layout_o: Tensor, sparsity_lut_o: Tensor,
+                sparsity_block_size: int, o_n_sparse_blocks: int, device: torch.device) -> Tensor:
+        output = torch.zeros(size=(o_n_sparse_blocks, sparsity_block_size, sparsity_block_size), device=device)
 
         x_b, x_r, x_c = x.size()
         x_b_s, x_r_s, x_c_s = x.stride()
@@ -85,8 +96,8 @@ class _BlocksparseMatmulSSS(torch.autograd.Function):
         s_l_y_b_s, s_l_y_r_s, s_l_y_c_s = sparsity_layout_y.stride()
         o_b, o_r, o_c = output.size()
         o_b_s, o_r_s, o_c_s = output.stride()
-        s_lut_o_r, s_lut_o_c = sparsity_lut_output.size()
-        s_lut_o_r_s, s_lut_o_c_s = sparsity_lut_output.stride()
+        s_lut_o_r, s_lut_o_c = sparsity_lut_o.size()
+        s_lut_o_r_s, s_lut_o_c_s = sparsity_lut_o.stride()
 
         triton_block_size = BaseBlocksparse.get_triton_block_size(sparsity_block_size)
 
@@ -94,23 +105,22 @@ class _BlocksparseMatmulSSS(torch.autograd.Function):
                                     triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),
                                     triton.cdiv(o_c, meta["TRITON_BLOCK_SIZE"])]
 
-        _BlocksparseMatmulSSS.kernel_blocksparse_matmul_sss[triton_grid](x,
-                                                                         x_b, x_b_s, x_r, x_r_s, x_c, x_c_s,
-                                                                         s_l_x_b, s_l_x_b_s,
-                                                                         s_l_x_r, s_l_x_r_s, s_l_x_c, s_l_x_c_s,
-                                                                         sparsity_reverse_lut_x,
-                                                                         y,
-                                                                         y_b, y_b_s, y_r, y_r_s, y_c, y_c_s,
-                                                                         s_l_y_b, s_l_y_b_s,
-                                                                         s_l_y_r, s_l_y_r_s, s_l_y_c, s_l_y_c_s,
-                                                                         sparsity_reverse_lut_y,
-                                                                         output,
-                                                                         o_b, o_b_s, o_r, o_r_s, o_c, o_c_s,
-                                                                         sparsity_lut_output,
-                                                                         s_lut_o_r, s_lut_o_r_s,
-                                                                         s_lut_o_c, s_lut_o_c_s,
-                                                                         sparsity_block_size,
-                                                                         triton_block_size)
+        (_BlocksparseMatmulSSS.kernel_blocksparse_matmul_sss[triton_grid]
+         (x,
+          x_b, x_b_s, x_r, x_r_s, x_c, x_c_s,
+          s_l_x_b, s_l_x_b_s, s_l_x_r, s_l_x_r_s, s_l_x_c, s_l_x_c_s,
+          sparsity_reverse_lut_x,
+          y,
+          y_b, y_b_s, y_r, y_r_s, y_c, y_c_s,
+          s_l_y_b, s_l_y_b_s, s_l_y_r, s_l_y_r_s, s_l_y_c, s_l_y_c_s,
+          sparsity_reverse_lut_y,
+          output,
+          o_b, o_b_s, o_r, o_r_s, o_c, o_c_s,
+          sparsity_lut_o,
+          s_lut_o_r, s_lut_o_r_s,
+          s_lut_o_c, s_lut_o_c_s,
+          sparsity_block_size,
+          triton_block_size))
 
         return output
 
@@ -282,14 +292,15 @@ class _BlocksparseToDense(torch.autograd.Function):
                                     triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),
                                     triton.cdiv(o_c, meta["TRITON_BLOCK_SIZE"])]
 
-        _BlocksparseToDense.kernel_blocksparse_to_dense[triton_grid](x,
-                                                                     x_b, x_b_s, x_r, x_r_s, x_c, x_c_s,
-                                                                     s_l_b, s_l_b_s, s_l_r, s_l_r_s, s_l_c, s_l_c_s,
-                                                                     sparsity_reverse_lut,
-                                                                     output,
-                                                                     o_b, o_b_s, o_r, o_r_s, o_c, o_c_s,
-                                                                     sparsity_block_size,
-                                                                     triton_block_size)
+        (_BlocksparseToDense.kernel_blocksparse_to_dense[triton_grid]
+         (x,
+          x_b, x_b_s, x_r, x_r_s, x_c, x_c_s,
+          s_l_b, s_l_b_s, s_l_r, s_l_r_s, s_l_c, s_l_c_s,
+          sparsity_reverse_lut,
+          output,
+          o_b, o_b_s, o_r, o_r_s, o_c, o_c_s,
+          sparsity_block_size,
+          triton_block_size))
 
         return output
 
@@ -377,12 +388,13 @@ class _BlocksparseToSparse(torch.autograd.Function):
                                     triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),
                                     triton.cdiv(o_c, meta["TRITON_BLOCK_SIZE"])]
 
-        _BlocksparseToSparse.kernel_blocksparse_to_sparse[triton_grid](x, x_b, x_b_s, x_r, x_r_s, x_c, x_c_s,
-                                                                       sparsity_lut, s_lut_r, s_lut_r_s, s_lut_c,
-                                                                       s_lut_c_s,
-                                                                       output, o_b_s, o_r_s, o_c_s,
-                                                                       sparsity_block_size,
-                                                                       triton_block_size)
+        (_BlocksparseToSparse.kernel_blocksparse_to_sparse[triton_grid]
+         (x, x_b, x_b_s, x_r, x_r_s, x_c, x_c_s,
+          sparsity_lut, s_lut_r, s_lut_r_s, s_lut_c,
+          s_lut_c_s,
+          output, o_b_s, o_r_s, o_c_s,
+          sparsity_block_size,
+          triton_block_size))
 
         return output
 
