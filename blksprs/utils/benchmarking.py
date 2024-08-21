@@ -5,7 +5,7 @@ from matplotlib import pyplot as plt
 
 
 def benchmark(method_labels: list[str], func_input_generator: Callable, matrix_sizes: list[int],
-              *funcs_test_subject: Callable):
+              *funcs_test_subject: Callable, y_lim_top: int = None):
     quantiles = [0.5, 0.2, 0.8]
     results = {}
 
@@ -25,7 +25,7 @@ def benchmark(method_labels: list[str], func_input_generator: Callable, matrix_s
 
     plt.xlabel("Matrix size")
     plt.ylabel("Time (ms)")
-    plt.ylim(bottom=0, top=None)
+    plt.ylim(bottom=0, top=y_lim_top)
     plt.grid(True)
     plt.legend()
     plt.show()

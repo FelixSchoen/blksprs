@@ -8,6 +8,7 @@ from torch.nn import Module
 
 
 class BaseBlocksparse(Module, ABC):
+    _validate = None
 
     def __init__(self, sparsity_block_size: int, device: torch.device) -> None:
         super().__init__()
@@ -15,8 +16,18 @@ class BaseBlocksparse(Module, ABC):
         self.sparsity_block_size = sparsity_block_size
         self.device = device
 
-    def validate(self, *tensors: Tensor, flag_dim: bool = True, flag_contiguous: bool = True, flag_dtype: bool = True,
-                 flag_device: bool = True) -> None:
+        if BaseBlocksparse._validate is None:
+            BaseBlocksparse._validate = True
+            print(
+                f"{'\033[93m'}Blocksparse validation is activated. Consider deactivating for production use.{'\033[0m'}")
+
+
+    def validate_tensors(self, *tensors: Tensor, flag_dim: bool = True, flag_contiguous: bool = True,
+                         flag_dtype: bool = True,
+                         flag_device: bool = True) -> None:
+        if not BaseBlocksparse._validate:
+            return
+
         for tensor in tensors:
             if flag_dim:
                 assert tensor.dim() == 3, "Input tensors must have 3 dimensions"
@@ -27,7 +38,11 @@ class BaseBlocksparse(Module, ABC):
             if flag_device:
                 assert tensor.device == self.device, "Input tensors must be on the same device"
 
+
     def validate_sparsity(self, *tensor_sparsity_layout_tuples: tuple[Tensor, Tensor]) -> None:
+        if not BaseBlocksparse._validate:
+            return
+
         for tensor_sparsity_layout_tuple in tensor_sparsity_layout_tuples:
             tensor, sparsity_layout = tensor_sparsity_layout_tuple
 
@@ -35,9 +50,14 @@ class BaseBlocksparse(Module, ABC):
                 -2) == self.sparsity_block_size, "Tensor not conforming to sparsity specification"
             assert tensor.size(0) == torch.sum(sparsity_layout.reshape(-1))
 
+
     @staticmethod
     def get_triton_block_size(sparsity_block_size: int, limit: int = 128):
         return min(sparsity_block_size, limit)
+
+    @staticmethod
+    def disable_validation():
+        BaseBlocksparse._validate = False
 
 
 # --- Matmul SSS ---
@@ -49,7 +69,7 @@ class BlocksparseMatmulSSS(BaseBlocksparse):
 
     def forward(self, x: Tensor, y: Tensor,
                 sparsity_layout_x: Tensor, sparsity_layout_y: Tensor, sparsity_layout_output: Tensor) -> Tensor:
-        self.validate(x, y)
+        self.validate_tensors(x, y)
         self.validate_sparsity((x, sparsity_layout_x), (y, sparsity_layout_y))
         assert x.size(2) == y.size(1), "Inner dimensions must match"
 
@@ -218,7 +238,7 @@ class BlocksparseSoftmax(BaseBlocksparse):
         self.blksprs_to_sparse = BlocksparseToSparse(sparsity_block_size, device)
 
     def forward(self, x: Tensor, sparsity_layout: Tensor) -> Tensor:
-        self.validate(x)
+        self.validate_tensors(x)
 
         x_dense = self.blksprs_to_dense(x, sparsity_layout, fill_value=float('-inf'))
         x_softmax = torch.softmax(x_dense, dim=-1)
@@ -235,7 +255,7 @@ class BlocksparseTranspose(BaseBlocksparse):
         super().__init__(sparsity_block_size, device)
 
     def forward(self, x: Tensor, sparsity_layout: Tensor, shuffle_blocks: bool = True) -> (Tensor, Tensor):
-        self.validate(x)
+        self.validate_tensors(x)
 
         x_t = x.transpose(1, 2).contiguous()
         sparsity_layout_t = sparsity_layout.transpose(-1, -2).contiguous()
@@ -257,7 +277,7 @@ class BlocksparseToDense(BaseBlocksparse):
         super().__init__(sparsity_block_size, device)
 
     def forward(self, x: Tensor, sparsity_layout: Tensor, fill_value: int = 0) -> Tensor:
-        self.validate(x)
+        self.validate_tensors(x)
 
         sparsity_layout_flat = sparsity_layout.reshape(-1)
         sparsity_reverse_lut = ((torch.cumsum(sparsity_layout_flat, dim=-1) - 1) *
@@ -357,7 +377,7 @@ class BlocksparseToSparse(BaseBlocksparse):
         super().__init__(sparsity_block_size, device)
 
     def forward(self, x: Tensor, sparsity_layout: Tensor) -> Tensor:
-        self.validate(x)
+        self.validate_tensors(x)
 
         sparsity_lut = torch.nonzero(sparsity_layout)
         n_sparse_blocks = torch.sum(sparsity_layout.to(torch.int)).item()
