@@ -11,13 +11,14 @@ DEVICE = torch.device("cuda:0")
 
 # Constants
 B, M, N, K = 2, 64, 64, 64
-SPARSITY_BLOCK_SIZE = 64
+SPARSITY_BLOCK_SIZE = 32
+TRITON_BLOCK_SIZE = 16
 SPARSITY_LAYOUT = torch.ones(size=(B, M // SPARSITY_BLOCK_SIZE, K // SPARSITY_BLOCK_SIZE), device=DEVICE)
 BASE_PATH = Path(__file__).parent.parent.parent
 
 # Settings
 SPARSITY_PERCENTAGE = 0.75  # Percentage of non-sparse blocks
-BENCHMARK = True  # Whether to run benchmark
+BENCHMARK = False  # Whether to run benchmark
 BENCHMARK_MATRIX_SIZES = [64, 128, 256, 512, 1024, 2048, 4096, 8192]  # Dimensions to benchmark
 
 # Tolerances
@@ -31,7 +32,11 @@ def test_blksprs_matmul_sss():
     x = torch.randn(size=(B, M, K), device=DEVICE)
     y = torch.randn(size=(B, N, K), device=DEVICE).transpose(-1, -2).contiguous()
 
-    blksprs_matmul_sss = BlocksparseMatmulSSS(SPARSITY_BLOCK_SIZE, DEVICE)
+    x = torch.arange(0, K, dtype=torch.float, device=DEVICE).unsqueeze(0).unsqueeze(0).expand(B, M,
+                                                                                              K).contiguous()
+    y = torch.eye(N, K, device=DEVICE).unsqueeze(0).expand(B, N, K).contiguous()
+
+    blksprs_matmul_sss = BlocksparseMatmulSSS(SPARSITY_BLOCK_SIZE, DEVICE, triton_block_size=TRITON_BLOCK_SIZE)
     blksprs_to_dense = BlocksparseToDense(SPARSITY_BLOCK_SIZE, DEVICE)
     blksprs_to_sparse = BlocksparseToSparse(SPARSITY_BLOCK_SIZE, DEVICE)
 
@@ -39,6 +44,8 @@ def test_blksprs_matmul_sss():
     blksprs_matmul = blksprs_matmul_sss(blksprs_to_sparse(x, SPARSITY_LAYOUT), blksprs_to_sparse(y, SPARSITY_LAYOUT),
                                         SPARSITY_LAYOUT, SPARSITY_LAYOUT, SPARSITY_LAYOUT)
     blksprs_dense = blksprs_to_dense(blksprs_matmul, SPARSITY_LAYOUT)
+
+    _visualise((stock_matmul, "stock_matmul"), (blksprs_dense, "blksprs_dense"))
 
     assert torch.allclose(blksprs_dense, stock_matmul, atol=ATOL, rtol=RTOL)
 
@@ -76,7 +83,8 @@ def test_blksprs_matmul_sss():
                                                                                           sparsity_layout,
                                                                                           sparsity_layout,
                                                                                           sparsity_layout)
-        benchmark(method_labels, func_input_generator, BENCHMARK_MATRIX_SIZES, func_test_subject_0, func_test_subject_1, y_lim_top=150)
+        benchmark(method_labels, func_input_generator, BENCHMARK_MATRIX_SIZES, func_test_subject_0, func_test_subject_1,
+                  y_lim_top=150)
 
 
 def test_blksprs_softmax():
@@ -125,7 +133,7 @@ def test_blksprs_transpose():
 
 def test_blocksparse_to_sparse():
     x = torch.randn(size=(B, M, K), device=DEVICE)
-    blksprs_to_sparse = BlocksparseToSparse(SPARSITY_BLOCK_SIZE, DEVICE)
+    blksprs_to_sparse = BlocksparseToSparse(SPARSITY_BLOCK_SIZE, DEVICE, triton_block_size=TRITON_BLOCK_SIZE)
 
     stock_sparse = BlocksparseTools.to_sparse(x, SPARSITY_LAYOUT, SPARSITY_BLOCK_SIZE)
 
@@ -153,12 +161,13 @@ def test_blocksparse_to_sparse():
                                                                                    mat_size // SPARSITY_BLOCK_SIZE))}
         func_test_subject_0 = lambda x, sparsity_layout: torch.matmul(x, x)
         func_test_subject_1 = lambda x, sparsity_layout: blksprs_to_sparse(x, sparsity_layout)
-        benchmark(method_labels, func_input_generator, BENCHMARK_MATRIX_SIZES, func_test_subject_0, func_test_subject_1, y_lim_top=150)
+        benchmark(method_labels, func_input_generator, BENCHMARK_MATRIX_SIZES, func_test_subject_0, func_test_subject_1,
+                  y_lim_top=150)
 
 
 def test_blocksparse_to_dense():
     x = torch.randn(size=(B, M, K), device=DEVICE)
-    blksprs_to_dense = BlocksparseToDense(SPARSITY_BLOCK_SIZE, DEVICE)
+    blksprs_to_dense = BlocksparseToDense(SPARSITY_BLOCK_SIZE, DEVICE, triton_block_size=TRITON_BLOCK_SIZE)
     blksprs_to_sparse = BlocksparseToSparse(SPARSITY_BLOCK_SIZE, DEVICE)
 
     blksprs_sparse = blksprs_to_sparse(x, SPARSITY_LAYOUT)
@@ -193,7 +202,8 @@ def test_blocksparse_to_dense():
                                                                                    mat_size // SPARSITY_BLOCK_SIZE))}
         func_test_subject_0 = lambda x, x_s, sparsity_layout: torch.matmul(x, x)
         func_test_subject_1 = lambda x, x_s, sparsity_layout: blksprs_to_dense(x_s, sparsity_layout)
-        benchmark(method_labels, func_input_generator, BENCHMARK_MATRIX_SIZES, func_test_subject_0, func_test_subject_1, y_lim_top=150)
+        benchmark(method_labels, func_input_generator, BENCHMARK_MATRIX_SIZES, func_test_subject_0, func_test_subject_1,
+                  y_lim_top=150)
 
 
 # Utility
