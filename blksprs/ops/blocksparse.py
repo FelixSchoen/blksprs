@@ -20,8 +20,8 @@ class BaseBlocksparse(Module, ABC):
 
         if BaseBlocksparse._validate is None:
             BaseBlocksparse._validate = True
-            print(
-                f"{'\033[93m'}Blocksparse validation is activated. Consider deactivating for production use.{'\033[0m'}")
+            # print(
+            #     f"{'\033[93m'}Blocksparse validation is activated. Consider deactivating for production use.{'\033[0m'}")
 
     def validate_tensors(self, *tensors: Tensor, flag_dim: bool = True, flag_contiguous: bool = True,
                          flag_dtype: bool = True,
@@ -147,6 +147,10 @@ class _BlocksparseMatmulSSS(torch.autograd.Function):
         return output
 
     @staticmethod
+    def backward(ctx, grad_output):
+        raise NotImplementedError
+
+    @staticmethod
     @triton.jit
     def kernel_blocksparse_matmul_sss(x,
                                       x_b, x_b_s, x_r, x_r_s, x_c, x_c_s,
@@ -195,7 +199,9 @@ class _BlocksparseMatmulSSS(torch.autograd.Function):
             # These are either -1 if the block is empty or equal to the index of the block in the sparse tensor
 
             # Get reverse sparsity indices for x
-            rev_idx_spa_x_idx = (spa_bat_o * s_l_x_b_s + spa_row_o * s_l_x_r_s + i_seg_spa * s_l_x_c_s)
+            rev_idx_spa_x_idx = (spa_bat_o * s_l_x_b_s +
+                                 spa_row_o * s_l_x_r_s +
+                                 i_seg_spa * s_l_x_c_s)
             rev_idx_spa_x_msk = (rev_idx_spa_x_idx < s_l_x_b * s_l_x_b_s + s_l_x_r * s_l_x_r_s + s_l_x_c * s_l_x_c_s)
             rev_idx_spa_x = tl.load(r_lut_x + rev_idx_spa_x_idx, mask=rev_idx_spa_x_msk).to(tl.int32)
 
@@ -330,11 +336,21 @@ class _BlocksparseToDense(torch.autograd.Function):
           sparsity_block_size,
           triton_block_size))
 
+        ctx.sparsity_layout = sparsity_layout
+        ctx.sparsity_block_size = sparsity_block_size
+        ctx.triton_block_size = triton_block_size
+        ctx.device = device
+
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
-        raise NotImplementedError
+        sparsity_layout = ctx.sparsity_layout
+        sparsity_block_size = ctx.sparsity_block_size
+        triton_block_size = ctx.triton_block_size
+        device = ctx.device
+
+        return BlocksparseToSparse(sparsity_block_size, device, triton_block_size)(grad_output, sparsity_layout), None, None, None, None, None, None
 
     @staticmethod
     @triton.jit
@@ -426,11 +442,25 @@ class _BlocksparseToSparse(torch.autograd.Function):
           sparsity_block_size,
           triton_block_size))
 
+        ctx.sparsity_layout = sparsity_layout
+        ctx.sparsity_block_size = sparsity_block_size
+        ctx.triton_block_size = triton_block_size
+        ctx.device = device
+
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
-        raise NotImplementedError
+        sparsity_layout = ctx.sparsity_layout
+        sparsity_block_size = ctx.sparsity_block_size
+        triton_block_size = ctx.triton_block_size
+        device = ctx.device
+
+        # return _BlocksparseToDense.apply(grad_output,
+        #                                  sparsity_layout, sparsity_lut,
+        #                                  sparsity_block_size, 0,
+        #                                  triton_block_size, device), None, None, None, None, None, None
+        return BlocksparseToDense(sparsity_block_size, device, triton_block_size)(grad_output, sparsity_layout), None, None, None, None, None, None
 
     @staticmethod
     @triton.jit
