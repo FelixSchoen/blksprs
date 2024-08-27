@@ -144,11 +144,43 @@ class _BlocksparseMatmulSSS(torch.autograd.Function):
           sparsity_block_size,
           triton_block_size))
 
+        ctx.save_for_backward(x, y)
+        ctx.sparsity_layout_x = sparsity_layout_x
+        ctx.sparsity_reverse_lut_x = sparsity_reverse_lut_x
+        ctx.sparsity_layout_y = sparsity_layout_y
+        ctx.sparsity_reverse_lut_y = sparsity_reverse_lut_y
+        ctx.sparsity_layout_o = sparsity_layout_o
+        ctx.sparsity_lut_o = sparsity_lut_o
+        ctx.sparsity_block_size = sparsity_block_size
+        ctx.o_n_sparse_blocks = o_n_sparse_blocks
+        ctx.triton_block_size = triton_block_size
+        ctx.device = device
+
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
-        raise NotImplementedError
+        x, y = ctx.saved_tensors
+        sparsity_layout_x = ctx.sparsity_layout_x
+        sparsity_reverse_lut_x = ctx.sparsity_reverse_lut_x
+        sparsity_layout_y = ctx.sparsity_layout_y
+        sparsity_reverse_lut_y = ctx.sparsity_reverse_lut_y
+        sparsity_layout_o = ctx.sparsity_layout_o
+        sparsity_lut_o = ctx.sparsity_lut_o
+        sparsity_block_size = ctx.sparsity_block_size
+        o_n_sparse_blocks = ctx.o_n_sparse_blocks
+        triton_block_size = ctx.triton_block_size
+        device = ctx.device
+
+        blksprs_transpose = BlocksparseTranspose(sparsity_block_size, device, triton_block_size)
+
+        x_t, sparsity_layout_x_t = blksprs_transpose(x, sparsity_layout_x)
+        y_t, sparsity_layout_y_t = blksprs_transpose(y, sparsity_layout_y)
+
+        grad_x = BlocksparseMatmulSSS(sparsity_block_size, device, triton_block_size)(grad_output, y_t, sparsity_layout_o, sparsity_layout_y_t, sparsity_layout_x)
+        grad_y = BlocksparseMatmulSSS(sparsity_block_size, device, triton_block_size)(x_t, grad_output, sparsity_layout_x_t, sparsity_layout_o, sparsity_layout_y)
+
+        return grad_x, grad_y, None, None, None, None, None, None, None, None, None, None
 
     @staticmethod
     @triton.jit
