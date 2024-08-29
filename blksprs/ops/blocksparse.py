@@ -46,8 +46,8 @@ class BaseBlocksparse(Module, ABC):
         for tensor_sparsity_layout_tuple in tensor_sparsity_layout_tuples:
             tensor, sparsity_layout = tensor_sparsity_layout_tuple
 
-            assert tensor.size(-1) == tensor.size(
-                -2) == self.sparsity_block_size, "Tensor not conforming to sparsity specification"
+            assert tensor.size(-1) == tensor.size(-2) == self.sparsity_block_size, \
+                "Tensor not conforming to sparsity specification"
             assert tensor.size(0) == torch.sum(sparsity_layout.reshape(-1))
 
     @staticmethod
@@ -278,10 +278,10 @@ class BlocksparseSoftmax(BaseBlocksparse):
         self.blksprs_to_dense = BlocksparseToDense(sparsity_block_size, device)
         self.blksprs_to_sparse = BlocksparseToSparse(sparsity_block_size, device)
 
-    def forward(self, x: Tensor, sparsity_layout: Tensor) -> Tensor:
+    def forward(self, x: Tensor, sparsity_layout: Tensor, fill_value:float=float("-inf")) -> Tensor:
         self.validate_tensors(x)
 
-        x_dense = self.blksprs_to_dense(x, sparsity_layout, fill_value=float('-inf'))
+        x_dense = self.blksprs_to_dense(x, sparsity_layout, fill_value=fill_value)
         x_softmax = torch.softmax(x_dense, dim=-1)
         x_sparse = self.blksprs_to_sparse(x_softmax, sparsity_layout)
 
@@ -301,11 +301,15 @@ class BlocksparseTranspose(BaseBlocksparse):
         x_t = x.transpose(1, 2).contiguous()
         sparsity_layout_t = sparsity_layout.transpose(-1, -2).contiguous()
 
-        shuffle_layout = (torch.cumsum(sparsity_layout.reshape(-1), dim=-1)
-                          .reshape(sparsity_layout.size()).transpose(-1, -2)
-                          .reshape(-1).to(torch.int) - 1)
-
-        x_t = x_t[shuffle_layout, :, :]
+        if shuffle_blocks:
+            sparsity_layout_t_flat = sparsity_layout.reshape(-1)
+            shuffle_layout = ((torch.cumsum(sparsity_layout_t_flat, dim=-1) - 1) *
+                              (sparsity_layout_t_flat == 1) -
+                              (1 * (sparsity_layout_t_flat == 0)))
+            shuffle_layout = (shuffle_layout.reshape(sparsity_layout.size()).transpose(-1, -2).contiguous()
+                              .reshape(-1).to(torch.int))
+            shuffle_layout = shuffle_layout[shuffle_layout >= 0]
+            x_t = x_t[shuffle_layout, :, :]
 
         return x_t, sparsity_layout_t
 
