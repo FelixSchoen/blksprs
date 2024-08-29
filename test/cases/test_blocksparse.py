@@ -117,7 +117,7 @@ def test_blocksparse_to_sparse():
 
         blksprs_to_sparse = BlocksparseToSparse(SPARSITY_BLOCK_SIZE, DEVICE, triton_block_size=TRITON_BLOCK_SIZE)
 
-        stock_to_sparse_out = BlocksparseTools.to_sparse(x_stock, SPARSITY_LAYOUT, SPARSITY_BLOCK_SIZE)
+        stock_to_sparse_out = BlocksparseTools.slow_to_sparse(x_stock, SPARSITY_LAYOUT, SPARSITY_BLOCK_SIZE)
 
         blksprs_to_sparse_out = blksprs_to_sparse(x_blksprs, SPARSITY_LAYOUT)
 
@@ -147,8 +147,8 @@ def test_blocksparse_to_dense():
         blksprs_to_dense = BlocksparseToDense(SPARSITY_BLOCK_SIZE, DEVICE, triton_block_size=TRITON_BLOCK_SIZE)
         blksprs_to_sparse = BlocksparseToSparse(SPARSITY_BLOCK_SIZE, DEVICE, triton_block_size=TRITON_BLOCK_SIZE)
 
-        stock_to_sparse_out = BlocksparseTools.to_sparse(x_stock, SPARSITY_LAYOUT, SPARSITY_BLOCK_SIZE)
-        stock_to_dense_out = BlocksparseTools.to_dense(stock_to_sparse_out, SPARSITY_LAYOUT, SPARSITY_BLOCK_SIZE)
+        stock_to_sparse_out = BlocksparseTools.slow_to_sparse(x_stock, SPARSITY_LAYOUT, SPARSITY_BLOCK_SIZE)
+        stock_to_dense_out = BlocksparseTools.slow_to_dense(stock_to_sparse_out, SPARSITY_LAYOUT, SPARSITY_BLOCK_SIZE)
 
         blksprs_to_sparse_out = blksprs_to_sparse(x_blksprs, SPARSITY_LAYOUT)
         blksprs_to_dense_out = blksprs_to_dense(blksprs_to_sparse_out, SPARSITY_LAYOUT)
