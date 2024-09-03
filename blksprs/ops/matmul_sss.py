@@ -3,7 +3,7 @@ import triton
 from torch import Tensor
 from triton import language as tl
 
-from blksprs.ops.blocksparse import BaseBlocksparse
+from blksprs.ops.tools import BaseBlocksparse
 from blksprs.ops.transpose import BlocksparseTranspose
 
 

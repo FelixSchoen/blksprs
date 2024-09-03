@@ -1,7 +1,7 @@
 import torch
 from torch import Tensor
 
-from blksprs.ops.blocksparse import BaseBlocksparse
+from blksprs.ops.tools import BaseBlocksparse
 
 
 class BlocksparseTranspose(BaseBlocksparse):

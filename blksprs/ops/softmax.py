@@ -3,9 +3,8 @@ import triton
 from torch import Tensor
 from triton import language as tl
 
-from blksprs.ops.blocksparse import BaseBlocksparse
-from blksprs.ops.to_dense import BlocksparseToDense
-from blksprs.ops.to_sparse import BlocksparseToSparse
+from blksprs.ops.tools import BaseBlocksparse
+from blksprs.ops.conversion import BlocksparseToDense, BlocksparseToSparse
 
 
 class BlocksparseSoftmax(BaseBlocksparse):

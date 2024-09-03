@@ -7,8 +7,7 @@ from matplotlib import pyplot as plt
 from blksprs.ops.tools import BlocksparseTools
 from blksprs.ops.softmax import BlocksparseSoftmax
 from blksprs.ops.transpose import BlocksparseTranspose
-from blksprs.ops.to_sparse import BlocksparseToSparse
-from blksprs.ops.to_dense import BlocksparseToDense
+from blksprs.ops.conversion import BlocksparseToDense, BlocksparseToSparse
 from blksprs.ops.matmul_sss import BlocksparseMatmulSSS
 
 # Device setup
