@@ -3,10 +3,13 @@ from pathlib import Path
 import pytest
 import torch
 from matplotlib import pyplot as plt
-from torch.xpu import device
 
-from blksprs.ops.blocksparse import BlocksparseMatmulSSS, BlocksparseToDense, BlocksparseToSparse, BlocksparseSoftmax, \
-    BlocksparseTranspose, BlocksparseTools, BlocksparseRowWiseMax
+from blksprs.ops.tools import BlocksparseTools
+from blksprs.ops.softmax import BlocksparseSoftmax
+from blksprs.ops.transpose import BlocksparseTranspose
+from blksprs.ops.to_sparse import BlocksparseToSparse
+from blksprs.ops.to_dense import BlocksparseToDense
+from blksprs.ops.matmul_sss import BlocksparseMatmulSSS
 
 # Device setup
 DEVICE = torch.device("cuda:0")
@@ -193,24 +196,6 @@ def test_blocksparse_to_dense():
 
         assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
 
-
-def test_blocksparse_row_wise_max():
-    x = torch.randn(size=(B, M, K), device=DEVICE)
-    x = torch.arange(0, B * M * K, device=DEVICE, dtype=torch.float).reshape(B, M, K)
-
-    x_s, sparsity_layout_x = _get_blocksparse_input(B, M, K, SPARSITY_BLOCK_SIZE, SPARSITY_PERCENTAGE)
-
-    for x, sparsity_layout_x in [(x, SPARSITY_LAYOUT_FULL), (x_s, sparsity_layout_x)]:
-        x_stock = x.clone().requires_grad_(True)
-        x_blksprs = x.clone().requires_grad_(True)
-
-        blksprs_row_wise_max = BlocksparseRowWiseMax(SPARSITY_BLOCK_SIZE, DEVICE, triton_block_size=TRITON_BLOCK_SIZE)
-        blksprs_to_sparse = BlocksparseToSparse(SPARSITY_BLOCK_SIZE, DEVICE, triton_block_size=TRITON_BLOCK_SIZE)
-
-        blksprs_row_wise_max_out = blksprs_row_wise_max(blksprs_to_sparse(x_blksprs, sparsity_layout_x),
-                                                        sparsity_layout_x)
-
-        pass
 
 
 # Utility
