@@ -123,7 +123,6 @@ class _BlocksparseSoftmax(torch.autograd.Function):
 
             # If block is present commence operations
             if rev_idx_spa >= 0:
-                # TODO Remove pid_row % for all other kernels also
                 blk_idx = (rev_idx_spa * o_b_s +
                            (((pid_row % (sparsity_block_size // TRITON_BLOCK_SIZE)) * TRITON_BLOCK_SIZE +
                              tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +

@@ -4,6 +4,7 @@ import pytest
 import torch
 from matplotlib import pyplot as plt
 
+from blksprs.ops.row_wise_sum import BlocksparseRowWiseSum
 from blksprs.ops.tools import BlocksparseTools
 from blksprs.ops.softmax import BlocksparseSoftmax
 from blksprs.ops.transpose import BlocksparseTranspose
@@ -196,6 +197,28 @@ def test_blocksparse_to_dense():
         assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
 
 
+def test_blocksparse_row_wise_sum():
+    x = torch.randn(size=(B, M, K), device=DEVICE)
+
+    x_s, sparsity_layout_x = _get_blocksparse_input(B, M, K, SPARSITY_BLOCK_SIZE, SPARSITY_PERCENTAGE)
+
+    for x, sparsity_layout_x in [(x, SPARSITY_LAYOUT_FULL), (x_s, sparsity_layout_x)]:
+        x_stock = x.clone().requires_grad_(True)
+        x_blksprs = x.clone().requires_grad_(True)
+
+        blksprs_row_wise_sum = BlocksparseRowWiseSum(SPARSITY_BLOCK_SIZE, DEVICE, triton_block_size=TRITON_BLOCK_SIZE)
+        blksprs_to_sparse = BlocksparseToSparse(SPARSITY_BLOCK_SIZE, DEVICE, triton_block_size=TRITON_BLOCK_SIZE)
+        blksprs_to_dense = BlocksparseToDense(SPARSITY_BLOCK_SIZE, DEVICE, triton_block_size=TRITON_BLOCK_SIZE)
+
+        stock_out = torch.sum(x_stock, dim=-1)
+        blksprs_row_wise_sum_out, sparsity_layout_output = blksprs_row_wise_sum(
+            blksprs_to_sparse(x_blksprs, sparsity_layout_x), sparsity_layout_x)
+        blksprs_row_wise_sum_out_dense = blksprs_to_dense(blksprs_row_wise_sum_out, sparsity_layout_output)
+
+        blksprs_row_wise_sum_out_slice = blksprs_row_wise_sum_out_dense[..., 0]
+
+        assert torch.allclose(blksprs_row_wise_sum_out_slice, stock_out, atol=ATOL, rtol=RTOL)
+
 
 # Utility
 
@@ -211,8 +234,8 @@ def _get_blocksparse_input(b, m, n, sparsity_block_size, sparsity_percentage):
         indices = torch.randperm(m_s * n_s)[:num_zero_elements]
         sparsity_layout[b_i, indices // n_s, indices % n_s] = 0
 
-    blksprs_to_sparse = BlocksparseToSparse(SPARSITY_BLOCK_SIZE, DEVICE)
-    blksprs_to_dense = BlocksparseToDense(SPARSITY_BLOCK_SIZE, DEVICE)
+    blksprs_to_sparse = BlocksparseToSparse(sparsity_block_size, DEVICE)
+    blksprs_to_dense = BlocksparseToDense(sparsity_block_size, DEVICE)
 
     return blksprs_to_dense(blksprs_to_sparse(x, sparsity_layout), sparsity_layout), sparsity_layout
 

@@ -18,8 +18,6 @@ class BlocksparseMatmulSSS(BaseBlocksparse):
         self.validate_sparsity((x, sparsity_layout_x), (y, sparsity_layout_y))
         assert x.size(2) == y.size(1), "Inner dimensions must match"
 
-        o_n_sparse_blocks = torch.sum(sparsity_layout_output.to(torch.int)).item()
-
         sparsity_layout_x_flat = sparsity_layout_x.reshape(-1)
         sparsity_reverse_lut_x = ((torch.cumsum(sparsity_layout_x_flat, dim=-1) - 1) *
                                   (sparsity_layout_x_flat == 1) -
@@ -31,6 +29,8 @@ class BlocksparseMatmulSSS(BaseBlocksparse):
                                   (1 * (sparsity_layout_y_flat == 0)))
 
         sparsity_lut_o = torch.nonzero(sparsity_layout_output)
+
+        o_n_sparse_blocks = torch.sum(sparsity_layout_output.to(torch.int)).item()
 
         return _BlocksparseMatmulSSS.apply(x, y,
                                            sparsity_layout_x, sparsity_reverse_lut_x,

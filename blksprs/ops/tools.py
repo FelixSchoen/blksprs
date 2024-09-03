@@ -4,6 +4,8 @@ import torch
 from torch import Tensor, Size
 from torch.nn import Module
 
+# TODO Add type hints for all methods
+# TODO Remove pid_row % where it is not needed
 
 class BaseBlocksparse(Module, ABC):
     _validate = None
