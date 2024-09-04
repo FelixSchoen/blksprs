@@ -7,6 +7,8 @@ from torch.nn import Module
 # TODO Add type hints for all methods
 # TODO Remove pid_row % where it is not needed
 # TODO Remove code duplication
+# TODO Documentation
+# TODO Remove object creation from conversion and matmul backwards?
 
 class BaseBlocksparse(Module, ABC):
     _validate = None

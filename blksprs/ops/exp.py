@@ -7,6 +7,14 @@ from blksprs.ops.tools import BaseBlocksparse
 
 
 class BlocksparseExp(BaseBlocksparse):
+    """Applies the element-wise exponential function to the input tensor.
+
+    Returns a new tensor with the exponential of the elements of the input tensor.
+
+    Note:
+        This operation does not consider sparse blocks, i.e., these will not be set to ``e^0``.
+        Consider this when converting back to dense tensors.
+    """
 
     def __init__(self, sparsity_block_size: int, device: torch.device, triton_block_size: int = None) -> None:
         super().__init__(sparsity_block_size, device, triton_block_size=triton_block_size)
@@ -20,7 +28,7 @@ class BlocksparseExp(BaseBlocksparse):
 class _BlocksparseExp(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, x, sparsity_block_size: int, triton_block_size: int, device: torch.device):
+    def forward(ctx, x: Tensor, sparsity_block_size: int, triton_block_size: int, device: torch.device):
         output = torch.zeros_like(x)
 
         x_b, x_r, x_c = x.shape
