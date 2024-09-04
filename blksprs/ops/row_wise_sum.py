@@ -1,9 +1,7 @@
-from typing import Tuple, Any
-
 import torch
 import triton
-from triton import language as tl
 from torch import Tensor
+from triton import language as tl
 
 from blksprs.ops.tools import BaseBlocksparse
 
