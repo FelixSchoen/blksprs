@@ -9,6 +9,9 @@ from torch.nn import Module
 # TODO Remove code duplication
 # TODO Documentation
 # TODO Remove object creation from conversion and matmul backwards?
+# TODO Triton kernels for transpose?
+# TODO Object creation in backward passes?
+# TODO Fix masking: b*b + r*r + c*c reduce to only b*b
 
 class BaseBlocksparse(Module, ABC):
     _validate = None
@@ -98,8 +101,8 @@ class BlocksparseTools:
 
     @staticmethod
     def slow_to_sparse(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int):
-        indices_sparse_blocks = torch.sum(sparsity_layout.to(torch.int)).item()
-        output = torch.zeros(size=(indices_sparse_blocks, sparsity_block_size, sparsity_block_size), device=x.device)
+        num_sparse_blocks = torch.sum(sparsity_layout.to(torch.int)).item()
+        output = torch.zeros(size=(num_sparse_blocks, sparsity_block_size, sparsity_block_size), device=x.device)
         indices_sparse_blocks = sparsity_layout.nonzero(as_tuple=True)
 
         for idx, (b, r, c) in enumerate(zip(*indices_sparse_blocks)):

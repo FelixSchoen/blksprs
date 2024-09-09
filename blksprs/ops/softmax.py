@@ -1,8 +1,10 @@
 import torch
 import triton
+from sympy.codegen.cnodes import static
 from torch import Tensor
 from triton import language as tl
 
+from blksprs.ops.conversion import BlocksparseToDense, BlocksparseToSparse
 from blksprs.ops.exp import BlocksparseExp
 from blksprs.ops.row_wise_sum import BlocksparseRowWiseSum
 from blksprs.ops.tools import BaseBlocksparse
@@ -80,7 +82,64 @@ class _BlocksparseSoftmax(torch.autograd.Function):
           output,
           triton_block_size))
 
+        # Save for backward pass
+        ctx.save_for_backward(output)
+        ctx.sparsity_layout = sparsity_layout
+        ctx.sparsity_lut = sparsity_lut
+        ctx.sparsity_block_size = sparsity_block_size
+        ctx.triton_block_size = triton_block_size
+        ctx.device = device
+
         return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        o = ctx.saved_tensors[0]
+        sparsity_layout = ctx.sparsity_layout
+        sparsity_lut = ctx.sparsity_lut
+        sparsity_block_size = ctx.sparsity_block_size
+        triton_block_size = ctx.triton_block_size
+        device = ctx.device
+
+        blksprs_row_wise_sum = BlocksparseRowWiseSum(sparsity_block_size, device, flag_slice_only=True)
+        s, sparsity_layout_s = blksprs_row_wise_sum(grad_output * o, sparsity_layout)
+
+        sparsity_layout_s_flat = sparsity_layout_s.reshape(-1)
+        sparsity_reverse_lut_s = ((torch.cumsum(sparsity_layout_s_flat, dim=-1) - 1) *
+                                  (sparsity_layout_s_flat == 1) -
+                                  (1 * (sparsity_layout_s_flat == 0)))
+
+        o_b, o_r, o_c = o.size()
+        o_b_s, o_r_s, o_c_s = o.stride()
+        s_lut_r, s_lut_c = sparsity_lut.size()
+        s_lut_r_s, s_lut_c_s = sparsity_lut.stride()
+        s_b, s_r, s_c = s.size()
+        s_b_s, s_r_s, s_c_s = s.stride()
+        s_l_s_b, s_l_s_r, s_l_s_c = sparsity_layout_s.size()
+        s_l_s_b_s, s_l_s_r_s, s_l_s_c_s = sparsity_layout_s.stride()
+
+        grad_x = torch.zeros_like(o)
+
+        triton_grid = lambda meta: [o_b,
+                                    triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),
+                                    triton.cdiv(o_c, meta["TRITON_BLOCK_SIZE"])]
+
+        (_BlocksparseSoftmax.kernel_blocksparse_softmax_grad_x[triton_grid]
+         (grad_output,
+          o_b, o_b_s, o_r_s, o_c_s,
+          o,
+          o_b, o_b_s, o_r_s, o_c_s,
+          sparsity_lut, s_lut_r, s_lut_r_s, s_lut_c, s_lut_c_s,
+          s,
+          s_b, s_b_s, s_r_s, s_c_s,
+          s_l_s_b, s_l_s_b_s, s_l_s_r_s,
+          sparsity_reverse_lut_s,
+          grad_x,
+          o_b, o_b_s, o_r_s, o_c_s,
+          triton_block_size
+          ))
+
+        return grad_x, None, None, None, None, None, None, None, None
 
     @staticmethod
     @triton.jit
@@ -134,3 +193,66 @@ class _BlocksparseSoftmax(torch.autograd.Function):
 
         # Store output
         tl.store(o + blk_x_idx, buf, mask=blk_x_msk)
+
+    @staticmethod
+    @triton.jit
+    def kernel_blocksparse_softmax_grad_x(g,
+                                          g_b, g_b_s, g_r_s, g_c_s,
+                                          x,
+                                          x_b, x_b_s, x_r_s, x_c_s,
+                                          s_lut, s_lut_r, s_lut_r_s, s_lut_c, s_lut_c_s,
+                                          s,
+                                          s_b, s_b_s, s_r_s, s_c_s,
+                                          s_l_s_b, s_l_s_b_s, s_l_s_r_s,
+                                          r_lut_s,
+                                          o,
+                                          o_b, o_b_s, o_r_s, o_c_s,
+                                          TRITON_BLOCK_SIZE: tl.constexpr) -> None:
+        # Get triton block indices
+        pid_blk = tl.program_id(axis=0)
+        pid_row = tl.program_id(axis=1)
+        pid_col = tl.program_id(axis=2)
+
+        # Get position of current sparsity block consisting of its batch and row index
+        spa_bat_idx = (pid_blk * s_lut_r_s + 0 * s_lut_c_s)
+        spa_bat_msk = (spa_bat_idx < s_lut_r * s_lut_r_s + s_lut_c * s_lut_c_s)
+        spa_bat = tl.load(s_lut + spa_bat_idx, mask=spa_bat_msk)
+
+        spa_row_idx = (pid_blk * s_lut_r_s + 1 * s_lut_c_s)
+        spa_row_msk = (spa_row_idx < s_lut_r * s_lut_r_s + s_lut_c * s_lut_c_s)
+        spa_row = tl.load(s_lut + spa_row_idx, mask=spa_row_msk)
+
+        spa_col_idx = (pid_blk * s_lut_r_s + 2 * s_lut_c_s)
+        spa_col_msk = (spa_col_idx < s_lut_r * s_lut_r_s + s_lut_c * s_lut_c_s)
+        spa_col = tl.load(s_lut + spa_col_idx, mask=spa_col_msk)
+
+        rev_idx_spa_s_idx = (spa_bat * s_l_s_b_s +
+                             spa_row * s_l_s_r_s)
+        rev_idx_spa_s_msk = (rev_idx_spa_s_idx < s_l_s_b * s_l_s_b_s)
+        rev_idx_spa_s = tl.load(r_lut_s + rev_idx_spa_s_idx, mask=rev_idx_spa_s_msk).to(tl.int32)
+
+        blk_s_idx = (rev_idx_spa_s * s_b_s +
+                     ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * s_r_s)[:, None] +
+                     (tl.arange(0, 1) * s_c_s)[None, :])
+        blk_s_msk = (blk_s_idx < s_b * s_b_s)
+        blk_s = tl.load(s + blk_s_idx, mask=blk_s_msk)
+
+        blk_g_idx = ((pid_blk * g_b_s) +
+                     ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * g_r_s)[:, None] +
+                     ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * g_c_s)[None, :])
+        blk_g_msk = (blk_g_idx < g_b * g_b_s)
+        blk_g = tl.load(g + blk_g_idx, mask=blk_g_msk)
+
+        blk_x_idx = ((pid_blk * x_b_s) +
+                     ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
+                     ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
+        blk_x_msk = (blk_x_idx < x_b * x_b_s)
+        blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
+
+        buf = blk_x * (blk_g - blk_s)
+
+        blk_o_idx = ((pid_blk * o_b_s) +
+                        ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
+                        ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
+        blk_o_msk = (blk_o_idx < o_b * o_b_s)
+        tl.store(o + blk_o_idx, buf, mask=blk_o_msk)
