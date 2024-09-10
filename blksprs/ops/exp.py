@@ -29,7 +29,7 @@ class BlocksparseExp(BaseBlocksparse):
 class _BlocksparseExp(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, x: Tensor, sparsity_block_size: int, triton_block_size: int, device: torch.device):
+    def forward(ctx, x: Tensor, sparsity_block_size: int, triton_block_size: int, device: torch.device) -> Tensor:
         validate_contiguous(x)
 
         output = torch.zeros_like(x)

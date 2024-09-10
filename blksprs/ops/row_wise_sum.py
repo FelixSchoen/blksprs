@@ -122,7 +122,7 @@ class _BlocksparseRowWiseSum(torch.autograd.Function):
                                         o_b, o_b_s, o_r, o_r_s, o_c, o_c_s,
                                         s_lut_o, s_lut_o_r, s_lut_o_r_s, s_lut_o_c, s_lut_o_c_s,
                                         sparsity_block_size,
-                                        TRITON_BLOCK_SIZE: tl.constexpr):
+                                        TRITON_BLOCK_SIZE: tl.constexpr) -> None:
         pid_blk = tl.program_id(axis=0)
         pid_row = tl.program_id(axis=1)
 
@@ -177,7 +177,7 @@ class _BlocksparseRowWiseSum(torch.autograd.Function):
                                                    o_b, o_b_s, o_r, o_r_s, o_c, o_c_s,
                                                    s_l_o_b, s_l_o_b_s, s_l_o_r, s_l_o_r_s, s_l_o_c, s_l_o_c_s,
                                                    r_lut_o,
-                                                   TRITON_BLOCK_SIZE: tl.constexpr):
+                                                   TRITON_BLOCK_SIZE: tl.constexpr) -> None:
         pid_blk = tl.program_id(axis=0)
         pid_row = tl.program_id(axis=1)
         pid_col = tl.program_id(axis=2)

@@ -5,9 +5,8 @@ from torch import Tensor, Size
 from torch.nn import Module
 
 # TODO Add type hints for all methods
-# TODO Remove pid_row % where it is not needed
 # TODO Remove code duplication
-# TODO Documentation
+# TODO Add Documentation
 # TODO Remove object creation from conversion and matmul backwards?
 # TODO Triton kernels for transpose?
 # TODO Object creation in backward passes?

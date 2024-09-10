@@ -89,7 +89,7 @@ class _BlocksparseToDense(torch.autograd.Function):
                                     o,
                                     o_b, o_b_s, o_r, o_r_s, o_c, o_c_s,
                                     sparsity_block_size,
-                                    TRITON_BLOCK_SIZE: tl.constexpr):
+                                    TRITON_BLOCK_SIZE: tl.constexpr) -> None:
         # Get triton block indices
         pid_blk = tl.program_id(axis=0)
         pid_row = tl.program_id(axis=1)
@@ -195,7 +195,7 @@ class _BlocksparseToSparse(torch.autograd.Function):
                                      o,
                                      o_b_s, o_r_s, o_c_s,
                                      sparsity_block_size,
-                                     TRITON_BLOCK_SIZE: tl.constexpr):
+                                     TRITON_BLOCK_SIZE: tl.constexpr) -> None:
         # Get triton block indices
         pid_blk = tl.program_id(axis=0)
         pid_row = tl.program_id(axis=1)

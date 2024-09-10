@@ -47,7 +47,7 @@ class _BlocksparseSoftmax(torch.autograd.Function):
                 sparsity_reverse_lut_rws: Tensor,
                 sparsity_block_size: int, triton_block_size: int,
                 blocksparse_exp: BlocksparseExp, blocksparse_row_wise_sum: BlocksparseRowWiseSum,
-                device: torch.device):
+                device: torch.device) -> Tensor:
         validate_contiguous(x, sparsity_layout, sparsity_lut, sparsity_reverse_lut_rws)
 
         output = torch.zeros_like(x)
