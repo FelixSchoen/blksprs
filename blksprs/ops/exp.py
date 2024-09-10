@@ -4,6 +4,7 @@ from triton import language as tl
 from torch import Tensor
 
 from blksprs.ops.tools import BaseBlocksparse
+from blksprs.utils.validation import validate_contiguous
 
 
 class BlocksparseExp(BaseBlocksparse):
@@ -29,6 +30,8 @@ class _BlocksparseExp(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x: Tensor, sparsity_block_size: int, triton_block_size: int, device: torch.device):
+        validate_contiguous(x)
+
         output = torch.zeros_like(x)
 
         x_b, x_r, x_c = x.shape
@@ -78,7 +81,7 @@ class _BlocksparseExp(torch.autograd.Function):
         blk_x_idx = ((pid_blk * x_b_s) +
                      ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
                      ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-        blk_x_msk = (blk_x_idx < x_b * x_b_s + x_r * x_r_s + x_c * x_c_s)
+        blk_x_msk = (blk_x_idx < x_b * x_b_s)
         blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
 
         # Compute exp
@@ -88,5 +91,5 @@ class _BlocksparseExp(torch.autograd.Function):
         blk_o_idx = ((pid_blk * o_b_s) +
                      ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
                      ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
-        blk_o_msk = (blk_o_idx < o_b * o_b_s + o_r * o_r_s + o_c * o_c_s)
+        blk_o_msk = (blk_o_idx < o_b * o_b_s)
         tl.store(o + blk_o_idx, buf, mask=blk_o_msk)

@@ -4,6 +4,7 @@ from torch import Tensor
 from triton import language as tl
 
 from blksprs.ops.tools import BaseBlocksparse
+from blksprs.utils.validation import validate_contiguous
 
 
 class BlocksparseToDense(BaseBlocksparse):
@@ -32,6 +33,8 @@ class _BlocksparseToDense(torch.autograd.Function):
                 sparsity_layout: Tensor, sparsity_reverse_lut: Tensor,
                 sparsity_block_size: int, fill_value: int,
                 triton_block_size: int, device: torch.device) -> Tensor:
+        validate_contiguous(x, sparsity_layout, sparsity_reverse_lut)
+
         output = torch.full(size=(sparsity_layout.size(0), sparsity_layout.size(1) * sparsity_block_size,
                                   sparsity_layout.size(2) * sparsity_block_size), fill_value=fill_value,
                             dtype=x.dtype, device=device)
@@ -98,7 +101,7 @@ class _BlocksparseToDense(torch.autograd.Function):
 
         # Get reverse sparsity index for current block
         rev_idx_spa_idx = (pid_blk * s_l_b_s + spa_row * s_l_r_s + spa_col * s_l_c_s)
-        rev_idx_spa_msk = (rev_idx_spa_idx < s_l_b * s_l_b_s + s_l_r * s_l_r_s + s_l_c * s_l_c_s)
+        rev_idx_spa_msk = (rev_idx_spa_idx < s_l_b * s_l_b_s)
         rev_idx_spa = tl.load(sparsity_reverse_lut + rev_idx_spa_idx, mask=rev_idx_spa_msk).to(tl.int32)
 
         # If block is present commence operations
@@ -108,13 +111,13 @@ class _BlocksparseToDense(torch.autograd.Function):
                          tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
                        (((pid_col % (sparsity_block_size // TRITON_BLOCK_SIZE)) * TRITON_BLOCK_SIZE +
                          tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-            blk_msk = (blk_idx < x_b * x_b_s + x_r * x_r_s + x_c * x_c_s)
+            blk_msk = (blk_idx < x_b * x_b_s)
             blk = tl.load(x + blk_idx, mask=blk_msk)
 
             o_idx = (pid_blk * o_b_s +
                      ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
                      ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
-            o_msk = (o_idx < o_b * o_b_s + o_r * o_r_s + o_c * o_c_s)
+            o_msk = (o_idx < o_b * o_b_s)
             tl.store(o + o_idx, blk, o_msk)
 
 
@@ -126,7 +129,7 @@ class BlocksparseToSparse(BaseBlocksparse):
     def forward(self, x: Tensor, sparsity_layout: Tensor) -> Tensor:
         self.validate_tensors(x)
 
-        sparsity_lut = torch.nonzero(sparsity_layout)
+        sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
         n_sparse_blocks = torch.sum(sparsity_layout.to(torch.int)).item()
 
         return _BlocksparseToSparse.apply(x,
@@ -141,6 +144,8 @@ class _BlocksparseToSparse(torch.autograd.Function):
     def forward(ctx, x: Tensor,
                 sparsity_layout: Tensor, sparsity_lut: Tensor,
                 sparsity_block_size: int, n_sparse_blocks: int, triton_block_size: int, device: torch.device) -> Tensor:
+        validate_contiguous(x, sparsity_layout, sparsity_lut)
+
         output = torch.zeros(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size), device=device)
 
         x_b, x_r, x_c = x.size()
@@ -198,15 +203,15 @@ class _BlocksparseToSparse(torch.autograd.Function):
 
         # Get sparsity index of current output block consisting of its batch, row, and column index
         spa_bat_idx = (pid_blk * s_lut_r_s + 0 * s_lut_c_s)
-        spa_bat_msk = (spa_bat_idx < s_lut_r * s_lut_r_s + s_lut_c * s_lut_c_s)
+        spa_bat_msk = (spa_bat_idx < s_lut_r * s_lut_r_s)
         spa_bat = tl.load(s_lut + spa_bat_idx, mask=spa_bat_msk)
 
         spa_row_idx = (pid_blk * s_lut_r_s + 1 * s_lut_c_s)
-        spa_row_msk = (spa_row_idx < s_lut_r * s_lut_r_s + s_lut_c * s_lut_c_s)
+        spa_row_msk = (spa_row_idx < s_lut_r * s_lut_r_s)
         spa_row = tl.load(s_lut + spa_row_idx, mask=spa_row_msk)
 
         spa_col_idx = (pid_blk * s_lut_r_s + 2 * s_lut_c_s)
-        spa_col_msk = (spa_col_idx < s_lut_r * s_lut_r_s + s_lut_c * s_lut_c_s)
+        spa_col_msk = (spa_col_idx < s_lut_r * s_lut_r_s)
         spa_col = tl.load(s_lut + spa_col_idx, mask=spa_col_msk)
 
         # Load block from dense tensor
@@ -215,7 +220,7 @@ class _BlocksparseToSparse(torch.autograd.Function):
                        tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
                      ((spa_col * sparsity_block_size + pid_col * TRITON_BLOCK_SIZE +
                        tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-        blk_d_msk = (blk_d_idx < x_b * x_b_s + x_r * x_r_s + x_c * x_c_s)
+        blk_d_msk = (blk_d_idx < x_b * x_b_s)
         blk_d = tl.load(x + blk_d_idx, mask=blk_d_msk)
 
         # Store block in sparse tensor

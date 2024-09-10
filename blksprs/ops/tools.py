@@ -11,7 +11,6 @@ from torch.nn import Module
 # TODO Remove object creation from conversion and matmul backwards?
 # TODO Triton kernels for transpose?
 # TODO Object creation in backward passes?
-# TODO Fix masking: b*b + r*r + c*c reduce to only b*b
 
 class BaseBlocksparse(Module, ABC):
     _validate = None

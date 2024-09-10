@@ -1,13 +1,12 @@
 import torch
 import triton
-from sympy.codegen.cnodes import static
 from torch import Tensor
 from triton import language as tl
 
-from blksprs.ops.conversion import BlocksparseToDense, BlocksparseToSparse
 from blksprs.ops.exp import BlocksparseExp
 from blksprs.ops.row_wise_sum import BlocksparseRowWiseSum
 from blksprs.ops.tools import BaseBlocksparse
+from blksprs.utils.validation import validate_contiguous
 
 
 class BlocksparseSoftmax(BaseBlocksparse):
@@ -25,7 +24,7 @@ class BlocksparseSoftmax(BaseBlocksparse):
         max_val = torch.max(x).item()
         x_scaled = x - max_val
 
-        sparsity_lut = torch.nonzero(sparsity_layout)
+        sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
 
         sparsity_layout_rws, _ = torch.max(sparsity_layout, dim=-1, keepdim=True)
         sparsity_layout_rws_flat = sparsity_layout_rws.reshape(-1)
@@ -49,6 +48,8 @@ class _BlocksparseSoftmax(torch.autograd.Function):
                 sparsity_block_size: int, triton_block_size: int,
                 blocksparse_exp: BlocksparseExp, blocksparse_row_wise_sum: BlocksparseRowWiseSum,
                 device: torch.device):
+        validate_contiguous(x, sparsity_layout, sparsity_lut, sparsity_reverse_lut_rws)
+
         output = torch.zeros_like(x)
 
         x_b, x_r, x_c = x.shape
@@ -158,17 +159,17 @@ class _BlocksparseSoftmax(torch.autograd.Function):
 
         # Get position of current sparsity block consisting of its batch and row index
         spa_bat_idx = (pid_blk * s_lut_r_s + 0 * s_lut_c_s)
-        spa_bat_msk = (spa_bat_idx < s_lut_r * s_lut_r_s + s_lut_c * s_lut_c_s)
+        spa_bat_msk = (spa_bat_idx < s_lut_r * s_lut_r_s)
         spa_bat = tl.load(s_lut + spa_bat_idx, mask=spa_bat_msk)
 
         spa_row_idx = (pid_blk * s_lut_r_s + 1 * s_lut_c_s)
-        spa_row_msk = (spa_row_idx < s_lut_r * s_lut_r_s + s_lut_c * s_lut_c_s)
+        spa_row_msk = (spa_row_idx < s_lut_r * s_lut_r_s)
         spa_row = tl.load(s_lut + spa_row_idx, mask=spa_row_msk)
 
         # Get reverse sparsity indices for x
         rev_idx_spa_s_idx = (spa_bat * s_l_s_b_s +
                              spa_row * s_l_s_r_s)
-        rev_idx_spa_s_msk = (rev_idx_spa_s_idx < s_l_s_b * s_l_s_b_s + s_l_s_r * s_l_s_r_s)
+        rev_idx_spa_s_msk = (rev_idx_spa_s_idx < s_l_s_b * s_l_s_b_s)
         rev_idx_spa_s = tl.load(r_lut_s + rev_idx_spa_s_idx, mask=rev_idx_spa_s_msk).to(tl.int32)
 
         if rev_idx_spa_s == -1:
@@ -178,14 +179,14 @@ class _BlocksparseSoftmax(torch.autograd.Function):
         blk_x_idx = ((pid_blk * x_b_s) +
                      ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
                      ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-        blk_x_msk = (blk_x_idx < x_b * x_b_s + x_r * x_r_s + x_c * x_c_s)
+        blk_x_msk = (blk_x_idx < x_b * x_b_s)
         blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
 
         # Load sum block
         blk_s_idx = (rev_idx_spa_s * s_b_s +
                      ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * s_r_s)[:, None] +
                      (tl.arange(0, 1) * s_c_s)[None, :])
-        blk_s_msk = (blk_s_idx < s_b * s_b_s + s_r * s_r_s)
+        blk_s_msk = (blk_s_idx < s_b * s_b_s)
         blk_s = tl.load(s + blk_s_idx, mask=blk_s_msk)
 
         # Compute softmax
@@ -215,15 +216,15 @@ class _BlocksparseSoftmax(torch.autograd.Function):
 
         # Get position of current sparsity block consisting of its batch and row index
         spa_bat_idx = (pid_blk * s_lut_r_s + 0 * s_lut_c_s)
-        spa_bat_msk = (spa_bat_idx < s_lut_r * s_lut_r_s + s_lut_c * s_lut_c_s)
+        spa_bat_msk = (spa_bat_idx < s_lut_r * s_lut_r_s)
         spa_bat = tl.load(s_lut + spa_bat_idx, mask=spa_bat_msk)
 
         spa_row_idx = (pid_blk * s_lut_r_s + 1 * s_lut_c_s)
-        spa_row_msk = (spa_row_idx < s_lut_r * s_lut_r_s + s_lut_c * s_lut_c_s)
+        spa_row_msk = (spa_row_idx < s_lut_r * s_lut_r_s)
         spa_row = tl.load(s_lut + spa_row_idx, mask=spa_row_msk)
 
         spa_col_idx = (pid_blk * s_lut_r_s + 2 * s_lut_c_s)
-        spa_col_msk = (spa_col_idx < s_lut_r * s_lut_r_s + s_lut_c * s_lut_c_s)
+        spa_col_msk = (spa_col_idx < s_lut_r * s_lut_r_s)
         spa_col = tl.load(s_lut + spa_col_idx, mask=spa_col_msk)
 
         rev_idx_spa_s_idx = (spa_bat * s_l_s_b_s +

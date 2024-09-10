@@ -4,6 +4,7 @@ from torch import Tensor
 from triton import language as tl
 
 from blksprs.ops.tools import BaseBlocksparse
+from blksprs.utils.validation import validate_contiguous
 
 
 class BlocksparseRowWiseSum(BaseBlocksparse):
@@ -17,14 +18,14 @@ class BlocksparseRowWiseSum(BaseBlocksparse):
     def forward(self, x: Tensor, sparsity_layout: Tensor) -> tuple[Tensor, Tensor]:
         self.validate_tensors(x)
 
-        sparsity_lut = torch.nonzero(sparsity_layout)
+        sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
         sparsity_layout_flat = sparsity_layout.reshape(-1)
         sparsity_reverse_lut = ((torch.cumsum(sparsity_layout_flat, dim=-1) - 1) *
                                 (sparsity_layout_flat == 1) -
                                 (1 * (sparsity_layout_flat == 0)))
 
         sparsity_layout_output, _ = torch.max(sparsity_layout, dim=-1, keepdim=True)
-        sparsity_lut_output = torch.nonzero(sparsity_layout_output)
+        sparsity_lut_output = torch.nonzero(sparsity_layout_output).contiguous()
         sparsity_layout_output_flat = sparsity_layout_output.reshape(-1)
         sparsity_reverse_lut_output = ((torch.cumsum(sparsity_layout_output_flat, dim=-1) - 1) *
                                        (sparsity_layout_output_flat == 1) -
@@ -52,6 +53,9 @@ class _BlocksparseRowWiseSum(torch.autograd.Function):
                 flag_slice_only: bool,
                 sparsity_block_size: int, triton_block_size: int,
                 device: torch.device) -> Tensor:
+        validate_contiguous(x, sparsity_layout, sparsity_lut, sparsity_reverse_lut,
+                            sparsity_layout_output, sparsity_lut_output, sparsity_reverse_lut_output)
+
         output = torch.zeros(size=(o_n_sparsity_blocks_output,
                                    sparsity_block_size,
                                    1 if flag_slice_only else sparsity_block_size),
@@ -124,11 +128,11 @@ class _BlocksparseRowWiseSum(torch.autograd.Function):
 
         # Get position of current sparsity block consisting of its batch and row index
         spa_bat_idx = (pid_blk * s_lut_o_r_s + 0 * s_lut_o_c_s)
-        spa_bat_msk = (spa_bat_idx < s_lut_o_r * s_lut_o_r_s + s_lut_o_c * s_lut_o_c_s)
+        spa_bat_msk = (spa_bat_idx < s_lut_o_r * s_lut_o_r_s)
         spa_bat = tl.load(s_lut_o + spa_bat_idx, mask=spa_bat_msk)
 
         spa_row_idx = (pid_blk * s_lut_o_r_s + 1 * s_lut_o_c_s)
-        spa_row_msk = (spa_row_idx < s_lut_o_r * s_lut_o_r_s + s_lut_o_c * s_lut_o_c_s)
+        spa_row_msk = (spa_row_idx < s_lut_o_r * s_lut_o_r_s)
         spa_row = tl.load(s_lut_o + spa_row_idx, mask=spa_row_msk)
 
         buf = tl.zeros(shape=(TRITON_BLOCK_SIZE, 1), dtype=tl.float32)
@@ -144,7 +148,7 @@ class _BlocksparseRowWiseSum(torch.autograd.Function):
             rev_idx_spa_idx = (spa_bat * s_l_x_b_s +
                                spa_row * s_l_x_r_s +
                                i_seg_spa * s_l_x_c_s)
-            rev_idx_spa_msk = (rev_idx_spa_idx < s_l_x_b * s_l_x_b_s + s_l_x_r * s_l_x_r_s + s_l_x_c * s_l_x_c_s)
+            rev_idx_spa_msk = (rev_idx_spa_idx < s_l_x_b * s_l_x_b_s)
             rev_idx_spa = tl.load(r_lut_x + rev_idx_spa_idx, mask=rev_idx_spa_msk).to(tl.int32)
 
             # If block is present commence operations
@@ -153,7 +157,7 @@ class _BlocksparseRowWiseSum(torch.autograd.Function):
                            ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
                            ((i_seg_tri_mod * TRITON_BLOCK_SIZE +
                              tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-                blk_msk = (blk_idx < x_b * x_b_s + x_r * x_r_s + x_c * x_c_s)
+                blk_msk = (blk_idx < x_b * x_b_s)
                 blk = tl.load(x + blk_idx, mask=blk_msk)
 
                 buf = buf + tl.reshape(tl.sum(blk, axis=-1), (TRITON_BLOCK_SIZE, 1))
@@ -161,7 +165,7 @@ class _BlocksparseRowWiseSum(torch.autograd.Function):
         o_idx = (pid_blk * o_b_s +
                  ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
                  (tl.arange(0, 1))[None, :])
-        o_msk = (o_idx < o_b * o_b_s + o_r * o_r_s + o_c * o_c_s)
+        o_msk = (o_idx < o_b * o_b_s)
         tl.store(o + o_idx, buf, o_msk)
 
     @staticmethod
@@ -180,23 +184,23 @@ class _BlocksparseRowWiseSum(torch.autograd.Function):
 
         # Get position of current sparsity block consisting of its batch and row index
         spa_bat_idx = (pid_blk * s_lut_x_r_s + 0 * s_lut_x_c_s)
-        spa_bat_msk = (spa_bat_idx < s_lut_x_r * s_lut_x_r_s + s_lut_x_c * s_lut_x_c_s)
+        spa_bat_msk = (spa_bat_idx < s_lut_x_r * s_lut_x_r_s)
         spa_bat = tl.load(s_lut_x + spa_bat_idx, mask=spa_bat_msk)
 
         spa_row_idx = (pid_blk * s_lut_x_r_s + 1 * s_lut_x_c_s)
-        spa_row_msk = (spa_row_idx < s_lut_x_r * s_lut_x_r_s + s_lut_x_c * s_lut_x_c_s)
+        spa_row_msk = (spa_row_idx < s_lut_x_r * s_lut_x_r_s)
         spa_row = tl.load(s_lut_x + spa_row_idx, mask=spa_row_msk)
 
         # Load reverse sparsity index for current block
         rev_idx_spa_idx = (spa_bat * s_l_o_b_s +
                            spa_row * s_l_o_r_s)
-        rev_idx_spa_msk = (rev_idx_spa_idx < s_l_o_b * s_l_o_b_s + s_l_o_r * s_l_o_r_s + s_l_o_c * s_l_o_c_s)
+        rev_idx_spa_msk = (rev_idx_spa_idx < s_l_o_b * s_l_o_b_s)
         rev_idx_spa = tl.load(r_lut_o + rev_idx_spa_idx, mask=rev_idx_spa_msk).to(tl.int32)
 
         blk_idx = ((pid_blk * x_b_s) +
                    ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
                    ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-        blk_msk = (blk_idx < x_b * x_b_s + x_r * x_r_s + x_c * x_c_s)
+        blk_msk = (blk_idx < x_b * x_b_s)
         blk = tl.load(x + blk_idx, mask=blk_msk)
 
         buf = tl.reshape(tl.sum(blk, axis=-1), (TRITON_BLOCK_SIZE, 1))
@@ -204,5 +208,5 @@ class _BlocksparseRowWiseSum(torch.autograd.Function):
         o_idx = (rev_idx_spa * o_b_s +
                  ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
                  (tl.arange(0, 1))[None, :])
-        o_msk = (o_idx < o_b * o_b_s + o_r * o_r_s + o_c * o_c_s)
+        o_msk = (o_idx < o_b * o_b_s)
         tl.atomic_add(o + o_idx, buf, o_msk)

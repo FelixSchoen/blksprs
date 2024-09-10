@@ -23,10 +23,9 @@ SPARSITY_LAYOUT_FULL = torch.ones(size=(B, M // SPARSITY_BLOCK_SIZE, K // SPARSI
 BASE_PATH = Path(__file__).parent.parent.parent
 
 TEST_CONFIGURATIONS = [
-    (2,64,64,64,32,16),
-    (2,64,64,64,64,64)
-    ]
-
+    (2, 64, 64, 64, 32, 16),
+    (2, 64, 64, 64, 64, 64)
+]
 
 # Settings
 SPARSITY_PERCENTAGE = 0.75  # Percentage of non-sparse blocks
@@ -93,36 +92,6 @@ def test_blksprs_matmul_sss():
         assert torch.allclose(y_blksprs.grad, y_stock.grad, atol=ATOL, rtol=RTOL)
 
 
-def test_blksprs_softmax_old():
-    M = 4
-    K = 4
-    SPARSITY_BLOCK_SIZE = 2
-    TRITON_BLOCK_SIZE = 1
-
-    x = torch.randn(size=(B, M, K), device=DEVICE)
-    x = torch.arange(0, K).unsqueeze(0).expand(M, K).unsqueeze(0).expand(B, M, K).to(DEVICE).float()
-    x = torch.arange(0, B * M * K, device=DEVICE, dtype=torch.float).reshape(B, M, K)
-
-    x_s, sparsity_layout_x = _get_blocksparse_input(B, M, K, SPARSITY_BLOCK_SIZE, SPARSITY_PERCENTAGE)
-
-    for x, sparsity_layout_x in [(x, SPARSITY_LAYOUT_FULL), (x_s, sparsity_layout_x)]:
-        blksprs_softmax = BlocksparseSoftmax(SPARSITY_BLOCK_SIZE, DEVICE, triton_block_size=TRITON_BLOCK_SIZE)
-        blksprs_to_sparse = BlocksparseToSparse(SPARSITY_BLOCK_SIZE, DEVICE)
-        blksprs_to_dense = BlocksparseToDense(SPARSITY_BLOCK_SIZE, DEVICE)
-
-        stock_softmax_out = torch.softmax(x, dim=-1)
-        stock_softmax_out_t = blksprs_to_dense(blksprs_to_sparse(stock_softmax_out, sparsity_layout_x),
-                                               sparsity_layout_x, fill_value=float("-inf"))
-
-        blksprs_softmax_out = blksprs_softmax(blksprs_to_sparse(x, sparsity_layout_x), sparsity_layout_x,
-                                              fill_value_output=0)
-        blksprs_to_dense_out = blksprs_to_dense(blksprs_softmax_out, sparsity_layout_x, fill_value=float("-inf"))
-
-        _visualise((blksprs_to_dense_out, "blksprs_softmax_out"), (stock_softmax_out, "stock_softmax_out"))
-
-        # assert torch.allclose(blksprs_to_dense_out, stock_softmax_out_t, atol=ATOL, rtol=RTOL)
-
-
 def test_blksprs_softmax():
     B, M, N, K = 2, 16, 16, 16
     SPARSITY_BLOCK_SIZE = 16
@@ -141,7 +110,8 @@ def test_blksprs_softmax():
         blksprs_to_sparse = BlocksparseToSparse(SPARSITY_BLOCK_SIZE, DEVICE, triton_block_size=TRITON_BLOCK_SIZE)
         blksprs_to_dense = BlocksparseToDense(SPARSITY_BLOCK_SIZE, DEVICE, triton_block_size=TRITON_BLOCK_SIZE)
 
-        stock_out = blksprs_to_dense(blksprs_to_sparse(torch.softmax(x_stock, dim=-1), sparsity_layout_x), sparsity_layout_x)
+        stock_out = blksprs_to_dense(blksprs_to_sparse(torch.softmax(x_stock, dim=-1), sparsity_layout_x),
+                                     sparsity_layout_x)
         blksprs_softmax_out = blksprs_softmax(blksprs_to_sparse(x_blksprs, sparsity_layout_x), sparsity_layout_x)
         blksprs_softmax_dense_out = blksprs_to_dense(blksprs_softmax_out, sparsity_layout_x)
 
@@ -229,7 +199,8 @@ def test_blksprs_to_dense():
             blksprs_to_sparse = BlocksparseToSparse(sparsity_block_size, DEVICE, triton_block_size=triton_block_size)
 
             stock_to_sparse_out = BlocksparseTools.slow_to_sparse(x_stock, sparsity_layout_x_s, sparsity_block_size)
-            stock_to_dense_out = BlocksparseTools.slow_to_dense(stock_to_sparse_out, sparsity_layout_x_s, sparsity_block_size)
+            stock_to_dense_out = BlocksparseTools.slow_to_dense(stock_to_sparse_out, sparsity_layout_x_s,
+                                                                sparsity_block_size)
 
             blksprs_to_sparse_out = blksprs_to_sparse(x_blksprs, sparsity_layout_x_s)
             blksprs_to_dense_out = blksprs_to_dense(blksprs_to_sparse_out, sparsity_layout_x_s)
