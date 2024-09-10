@@ -4,12 +4,9 @@ import torch
 from torch import Tensor, Size
 from torch.nn import Module
 
-# TODO Add type hints for all methods
-# TODO Remove code duplication
-# TODO Add Documentation
 # TODO Remove object creation from conversion and matmul backwards?
-# TODO Triton kernels for transpose?
-# TODO Object creation in backward passes?
+# TODO Implement Triton kernels for transpose?
+# TODO Replace object creation in backward passes?
 
 class BaseBlocksparse(Module, ABC):
     _validate = None

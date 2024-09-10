@@ -9,6 +9,11 @@ from blksprs.utils.validation import validate_contiguous
 
 
 class BlocksparseMatmulSSS(BaseBlocksparse):
+    """Performs matrix multiplication between two blocksparse tensors.
+
+    The desired sparsity layout of the output tensor is used to only calculate blocks that will be present in the output.
+
+    """
 
     def __init__(self, sparsity_block_size: int, device: torch.device, triton_block_size: int = None) -> None:
         super().__init__(sparsity_block_size, device, triton_block_size=triton_block_size)

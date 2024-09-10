@@ -8,6 +8,14 @@ from blksprs.utils.validation import validate_contiguous
 
 
 class BlocksparseRowWiseSum(BaseBlocksparse):
+    """Computes the row-wise sum of a blocksparse tensor.
+
+    Returns a blocksparse tensor with only one block per row, where the first entry is the sum of the corresponding row.
+
+    Note:
+        If ``flag_slice_only`` is set the output will be of shape ``[batch_size, row_size, 1]``.
+
+    """
 
     def __init__(self, sparsity_block_size: int, device: torch.device, triton_block_size: int = None,
                  flag_slice_only: bool = False) -> None:

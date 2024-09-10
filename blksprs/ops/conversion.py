@@ -8,6 +8,12 @@ from blksprs.utils.validation import validate_contiguous
 
 
 class BlocksparseToDense(BaseBlocksparse):
+    """Converts a blocksparse tensor to a dense tensor based on the given sparsity layout.
+
+    The ``fill_value`` is used to fill the resulting dense tensor with a specific value (default ``0``) where the
+     blocksparse tensor is not present.
+
+    """
 
     def __init__(self, sparsity_block_size: int, device: torch.device, triton_block_size: int = None) -> None:
         super().__init__(sparsity_block_size, device, triton_block_size=triton_block_size)
@@ -83,8 +89,8 @@ class _BlocksparseToDense(torch.autograd.Function):
     @staticmethod
     @triton.jit
     def kernel_blocksparse_to_dense(x,
-                                    x_b, x_b_s,  x_r_s,  x_c_s,
-                                    s_l_b, s_l_b_s,  s_l_r_s, s_l_c_s,
+                                    x_b, x_b_s, x_r_s, x_c_s,
+                                    s_l_b, s_l_b_s, s_l_r_s, s_l_c_s,
                                     sparsity_reverse_lut,
                                     o,
                                     o_b, o_b_s, o_r_s, o_c_s,
@@ -122,6 +128,9 @@ class _BlocksparseToDense(torch.autograd.Function):
 
 
 class BlocksparseToSparse(BaseBlocksparse):
+    """Converts a dense tensor to a blocksparse tensor based on the given sparsity layout.
+
+    """
 
     def __init__(self, sparsity_block_size: int, device: torch.device, triton_block_size: int = None) -> None:
         super().__init__(sparsity_block_size, device, triton_block_size=triton_block_size)

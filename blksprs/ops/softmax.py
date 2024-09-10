@@ -10,6 +10,9 @@ from blksprs.utils.validation import validate_contiguous
 
 
 class BlocksparseSoftmax(BaseBlocksparse):
+    """Computes the softmax of a blocksparse tensor.
+
+    """
 
     def __init__(self, sparsity_block_size: int, device: torch.device, triton_block_size: int = None) -> None:
         super().__init__(sparsity_block_size, device, triton_block_size=triton_block_size)

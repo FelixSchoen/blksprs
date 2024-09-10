@@ -5,6 +5,12 @@ from blksprs.ops.tools import BaseBlocksparse
 
 
 class BlocksparseTranspose(BaseBlocksparse):
+    """Transposes a blocksparse tensor.
+
+    Note:
+         Returns the transposed tensor and the sparsity layout of the transposed tensor.
+
+    """
 
     def __init__(self, sparsity_block_size: int, device: torch.device, triton_block_size: int = None) -> None:
         super().__init__(sparsity_block_size, device, triton_block_size=triton_block_size)
