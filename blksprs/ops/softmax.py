@@ -25,6 +25,8 @@ class BlocksparseSoftmax(BaseBlocksparse):
         self.validate_tensors(x)
 
         max_val = torch.max(x).item()
+        # TODO
+        max_val = 0
         x_scaled = x - max_val
 
         sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
