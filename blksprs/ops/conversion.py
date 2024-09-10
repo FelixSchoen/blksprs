@@ -55,11 +55,11 @@ class _BlocksparseToDense(torch.autograd.Function):
 
         (_BlocksparseToDense.kernel_blocksparse_to_dense[triton_grid]
          (x,
-          x_b, x_b_s, x_r, x_r_s, x_c, x_c_s,
-          s_l_b, s_l_b_s, s_l_r, s_l_r_s, s_l_c, s_l_c_s,
+          x_b, x_b_s, x_r_s, x_c_s,
+          s_l_b, s_l_b_s, s_l_r_s, s_l_c_s,
           sparsity_reverse_lut,
           output,
-          o_b, o_b_s, o_r, o_r_s, o_c, o_c_s,
+          o_b, o_b_s, o_r_s, o_c_s,
           sparsity_block_size,
           triton_block_size))
 
@@ -83,11 +83,11 @@ class _BlocksparseToDense(torch.autograd.Function):
     @staticmethod
     @triton.jit
     def kernel_blocksparse_to_dense(x,
-                                    x_b, x_b_s, x_r, x_r_s, x_c, x_c_s,
-                                    s_l_b, s_l_b_s, s_l_r, s_l_r_s, s_l_c, s_l_c_s,
+                                    x_b, x_b_s,  x_r_s,  x_c_s,
+                                    s_l_b, s_l_b_s,  s_l_r_s, s_l_c_s,
                                     sparsity_reverse_lut,
                                     o,
-                                    o_b, o_b_s, o_r, o_r_s, o_c, o_c_s,
+                                    o_b, o_b_s, o_r_s, o_c_s,
                                     sparsity_block_size,
                                     TRITON_BLOCK_SIZE: tl.constexpr) -> None:
         # Get triton block indices
@@ -163,9 +163,8 @@ class _BlocksparseToSparse(torch.autograd.Function):
                                     triton.cdiv(o_c, meta["TRITON_BLOCK_SIZE"])]
 
         (_BlocksparseToSparse.kernel_blocksparse_to_sparse[triton_grid]
-         (x, x_b, x_b_s, x_r, x_r_s, x_c, x_c_s,
-          sparsity_lut, s_lut_r, s_lut_r_s, s_lut_c,
-          s_lut_c_s,
+         (x, x_b, x_b_s, x_r_s, x_c_s,
+          sparsity_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
           output, o_b_s, o_r_s, o_c_s,
           sparsity_block_size,
           triton_block_size))
@@ -190,8 +189,8 @@ class _BlocksparseToSparse(torch.autograd.Function):
     @staticmethod
     @triton.jit
     def kernel_blocksparse_to_sparse(x,
-                                     x_b, x_b_s, x_r, x_r_s, x_c: tl.constexpr, x_c_s,
-                                     s_lut, s_lut_r, s_lut_r_s, s_lut_c, s_lut_c_s,
+                                     x_b, x_b_s, x_r_s, x_c_s,
+                                     s_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
                                      o,
                                      o_b_s, o_r_s, o_c_s,
                                      sparsity_block_size,

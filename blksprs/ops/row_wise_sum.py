@@ -98,11 +98,11 @@ class _BlocksparseRowWiseSum(torch.autograd.Function):
 
             (_BlocksparseRowWiseSum.kernel_blocksparse_row_wise_sum_atomic_add[triton_grid]
              (x,
-              x_b, x_b_s, x_r, x_r_s, x_c, x_c_s,
-              sparsity_lut, s_lut_x_r, s_lut_x_r_s, s_lut_x_c, s_lut_x_c_s,
+              x_b, x_b_s, x_r_s, x_c_s,
+              sparsity_lut, s_lut_x_r, s_lut_x_r_s, s_lut_x_c_s,
               output,
-              o_b, o_b_s, o_r, o_r_s, o_c, o_c_s,
-              s_l_o_b, s_l_o_b_s, s_l_o_r, s_l_o_r_s, s_l_o_c, s_l_o_c_s,
+              o_b, o_b_s, o_r_s,
+              s_l_o_b, s_l_o_b_s, s_l_o_r_s,
               sparsity_reverse_lut_output,
               triton_block_size))
 
@@ -171,11 +171,11 @@ class _BlocksparseRowWiseSum(torch.autograd.Function):
     @staticmethod
     @triton.jit
     def kernel_blocksparse_row_wise_sum_atomic_add(x,
-                                                   x_b, x_b_s, x_r, x_r_s, x_c, x_c_s,
-                                                   s_lut_x, s_lut_x_r, s_lut_x_r_s, s_lut_x_c, s_lut_x_c_s,
+                                                   x_b, x_b_s, x_r_s, x_c_s,
+                                                   s_lut_x, s_lut_x_r, s_lut_x_r_s, s_lut_x_c_s,
                                                    o,
-                                                   o_b, o_b_s, o_r, o_r_s, o_c, o_c_s,
-                                                   s_l_o_b, s_l_o_b_s, s_l_o_r, s_l_o_r_s, s_l_o_c, s_l_o_c_s,
+                                                   o_b, o_b_s, o_r_s,
+                                                   s_l_o_b, s_l_o_b_s, s_l_o_r_s,
                                                    r_lut_o,
                                                    TRITON_BLOCK_SIZE: tl.constexpr) -> None:
         pid_blk = tl.program_id(axis=0)

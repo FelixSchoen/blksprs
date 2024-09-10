@@ -81,18 +81,17 @@ class _BlocksparseMatmulSSS(torch.autograd.Function):
 
         (_BlocksparseMatmulSSS.kernel_blocksparse_matmul_sss[triton_grid]
          (x,
-          x_b, x_b_s, x_r, x_r_s, x_c, x_c_s,
-          s_l_x_b, s_l_x_b_s, s_l_x_r, s_l_x_r_s, s_l_x_c, s_l_x_c_s,
+          x_b, x_b_s, x_r_s, x_c_s,
+          s_l_x_b, s_l_x_b_s, s_l_x_r_s, s_l_x_c, s_l_x_c_s,
           sparsity_reverse_lut_x,
           y,
-          y_b, y_b_s, y_r, y_r_s, y_c, y_c_s,
-          s_l_y_b, s_l_y_b_s, s_l_y_r, s_l_y_r_s, s_l_y_c, s_l_y_c_s,
+          y_b, y_b_s, y_r_s, y_c_s,
+          s_l_y_b, s_l_y_b_s, s_l_y_r_s, s_l_y_c_s,
           sparsity_reverse_lut_y,
           output,
-          o_b, o_b_s, o_r, o_r_s, o_c, o_c_s,
+          o_b, o_b_s, o_r_s, o_c_s,
           sparsity_lut_o,
-          s_lut_o_r, s_lut_o_r_s,
-          s_lut_o_c, s_lut_o_c_s,
+          s_lut_o_r, s_lut_o_r_s, s_lut_o_c_s,
           sparsity_block_size,
           triton_block_size))
 
@@ -135,18 +134,18 @@ class _BlocksparseMatmulSSS(torch.autograd.Function):
     @staticmethod
     @triton.jit
     def kernel_blocksparse_matmul_sss(x,
-                                      x_b, x_b_s, x_r, x_r_s, x_c, x_c_s,
-                                      s_l_x_b, s_l_x_b_s, s_l_x_r, s_l_x_r_s, s_l_x_c, s_l_x_c_s,
+                                      x_b, x_b_s, x_r_s, x_c_s,
+                                      s_l_x_b, s_l_x_b_s, s_l_x_r_s, s_l_x_c, s_l_x_c_s,
                                       r_lut_x,
                                       y,
-                                      y_b, y_b_s, y_r, y_r_s, y_c, y_c_s,
-                                      s_l_y_b, s_l_y_b_s, s_l_y_r, s_l_y_r_s, s_l_y_c, s_l_y_c_s,
+                                      y_b, y_b_s, y_r_s, y_c_s,
+                                      s_l_y_b, s_l_y_b_s, s_l_y_r_s, s_l_y_c_s,
                                       r_lut_y,
                                       o,
-                                      o_b, o_b_s, o_r, o_r_s, o_c, o_c_s,
+                                      o_b, o_b_s, o_r_s, o_c_s,
                                       s_lut_o,
                                       s_lut_o_r, s_lut_o_r_s,
-                                      s_lut_o_c, s_lut_o_c_s,
+                                      s_lut_o_c_s,
                                       sparsity_block_size,
                                       TRITON_BLOCK_SIZE: tl.constexpr) -> None:
         # Get triton block indices

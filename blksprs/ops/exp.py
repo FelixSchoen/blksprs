@@ -48,9 +48,9 @@ class _BlocksparseExp(torch.autograd.Function):
 
         (_BlocksparseExp.kernel_blocksparse_exp[triton_grid]
          (x,
-          x_b, x_b_s, x_r, x_r_s, x_c, x_c_s,
+          x_b, x_b_s, x_r_s, x_c_s,
           output,
-          o_b, o_b_s, o_r, o_r_s, o_c, o_c_s,
+          o_b, o_b_s, o_r_s, o_c_s,
           triton_block_size))
 
         ctx.save_for_backward(output)
@@ -68,9 +68,9 @@ class _BlocksparseExp(torch.autograd.Function):
     @staticmethod
     @triton.jit
     def kernel_blocksparse_exp(x,
-                               x_b, x_b_s, x_r, x_r_s, x_c, x_c_s,
+                               x_b, x_b_s, x_r_s, x_c_s,
                                o,
-                               o_b, o_b_s, o_r, o_r_s, o_c, o_c_s,
+                               o_b, o_b_s, o_r_s, o_c_s,
                                TRITON_BLOCK_SIZE: tl.constexpr) -> None:
         # Get triton block indices
         pid_blk = tl.program_id(axis=0)

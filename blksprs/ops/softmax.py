@@ -75,10 +75,10 @@ class _BlocksparseSoftmax(torch.autograd.Function):
 
         (_BlocksparseSoftmax.kernel_blocksparse_softmax[triton_grid]
          (x_exp,
-          x_b, x_b_s, x_r, x_r_s, x_c, x_c_s,
-          sparsity_lut, s_lut_r, s_lut_r_s, s_lut_c, s_lut_c_s,
-          x_exp_row_wise_sum, s_b, s_b_s, s_r, s_r_s, s_c_s,
-          s_l_s_b, s_l_s_b_s, s_l_s_r, s_l_s_r_s,
+          x_b, x_b_s, x_r_s, x_c_s,
+          sparsity_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
+          x_exp_row_wise_sum, s_b, s_b_s, s_r_s, s_c_s,
+          s_l_s_b, s_l_s_b_s, s_l_s_r,
           sparsity_reverse_lut_rws,
           output,
           triton_block_size))
@@ -130,7 +130,7 @@ class _BlocksparseSoftmax(torch.autograd.Function):
           o_b, o_b_s, o_r_s, o_c_s,
           o,
           o_b, o_b_s, o_r_s, o_c_s,
-          sparsity_lut, s_lut_r, s_lut_r_s, s_lut_c, s_lut_c_s,
+          sparsity_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
           s,
           s_b, s_b_s, s_r_s, s_c_s,
           s_l_s_b, s_l_s_b_s, s_l_s_r_s,
@@ -145,10 +145,10 @@ class _BlocksparseSoftmax(torch.autograd.Function):
     @staticmethod
     @triton.jit
     def kernel_blocksparse_softmax(x,
-                                   x_b, x_b_s, x_r, x_r_s, x_c, x_c_s,
-                                   s_lut, s_lut_r, s_lut_r_s, s_lut_c, s_lut_c_s,
-                                   s, s_b, s_b_s, s_r, s_r_s, s_c_s,
-                                   s_l_s_b, s_l_s_b_s, s_l_s_r, s_l_s_r_s,
+                                   x_b, x_b_s, x_r_s, x_c_s,
+                                   s_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
+                                   s, s_b, s_b_s, s_r_s, s_c_s,
+                                   s_l_s_b, s_l_s_b_s, s_l_s_r_s,
                                    r_lut_s,
                                    o,
                                    TRITON_BLOCK_SIZE: tl.constexpr) -> None:
@@ -201,7 +201,7 @@ class _BlocksparseSoftmax(torch.autograd.Function):
                                           g_b, g_b_s, g_r_s, g_c_s,
                                           x,
                                           x_b, x_b_s, x_r_s, x_c_s,
-                                          s_lut, s_lut_r, s_lut_r_s, s_lut_c, s_lut_c_s,
+                                          s_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
                                           s,
                                           s_b, s_b_s, s_r_s, s_c_s,
                                           s_l_s_b, s_l_s_b_s, s_l_s_r_s,
@@ -253,7 +253,7 @@ class _BlocksparseSoftmax(torch.autograd.Function):
         buf = blk_x * (blk_g - blk_s)
 
         blk_o_idx = ((pid_blk * o_b_s) +
-                        ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
-                        ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
+                     ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
+                     ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
         blk_o_msk = (blk_o_idx < o_b * o_b_s)
         tl.store(o + blk_o_idx, buf, mask=blk_o_msk)
