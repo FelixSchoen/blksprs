@@ -3,37 +3,32 @@ import triton
 from torch import Tensor
 from triton import language as tl
 
-from blksprs.ops.tools import BaseBlocksparse
 from blksprs.utils.tools import get_triton_block_size
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_dtype_float, validate_device
 
 
-class BlocksparseToDense(BaseBlocksparse):
+def to_dense(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, fill_value: float = 0,
+             triton_block_size: int = None) -> Tensor:
     """Converts a blocksparse tensor to a dense tensor based on the given sparsity layout.
 
     The ``fill_value`` is used to fill the resulting dense tensor with a specific value (default ``0``) where the
      blocksparse tensor is not present.
 
     """
+    validate_dimensions(x)
+    validate_contiguous(x)
+    validate_dtype_float(x)
+    validate_device(x)
 
-    def __init__(self, sparsity_block_size: int, device: torch.device, triton_block_size: int = None) -> None:
-        super().__init__(sparsity_block_size, device, triton_block_size=triton_block_size)
+    sparsity_layout_flat = sparsity_layout.reshape(-1)
+    sparsity_reverse_lut = ((torch.cumsum(sparsity_layout_flat, dim=-1) - 1) *
+                            (sparsity_layout_flat == 1) -
+                            (1 * (sparsity_layout_flat == 0)))
 
-    def forward(self, x: Tensor, sparsity_layout: Tensor, fill_value: int = 0) -> Tensor:
-        validate_dimensions(x)
-        validate_contiguous(x)
-        validate_dtype_float(x)
-        validate_device(x)
-
-        sparsity_layout_flat = sparsity_layout.reshape(-1)
-        sparsity_reverse_lut = ((torch.cumsum(sparsity_layout_flat, dim=-1) - 1) *
-                                (sparsity_layout_flat == 1) -
-                                (1 * (sparsity_layout_flat == 0)))
-
-        return _BlocksparseToDense.apply(x,
-                                         sparsity_layout, sparsity_reverse_lut,
-                                         self.sparsity_block_size, fill_value,
-                                         self.triton_block_size, self.device)
+    return _BlocksparseToDense.apply(x,
+                                     sparsity_layout, sparsity_reverse_lut,
+                                     sparsity_block_size, fill_value,
+                                     triton_block_size)
 
 
 class _BlocksparseToDense(torch.autograd.Function):
@@ -41,13 +36,13 @@ class _BlocksparseToDense(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x: Tensor,
                 sparsity_layout: Tensor, sparsity_reverse_lut: Tensor,
-                sparsity_block_size: int, fill_value: int,
-                triton_block_size: int, device: torch.device) -> Tensor:
+                sparsity_block_size: int, fill_value: float,
+                triton_block_size: int) -> Tensor:
         validate_contiguous(x, sparsity_layout, sparsity_reverse_lut)
 
         output = torch.full(size=(sparsity_layout.size(0), sparsity_layout.size(1) * sparsity_block_size,
                                   sparsity_layout.size(2) * sparsity_block_size), fill_value=fill_value,
-                            dtype=x.dtype, device=device)
+                            dtype=x.dtype, device=x.device)
 
         x_b, x_r, x_c = x.shape
         x_b_s, x_r_s, x_c_s = x.stride()
@@ -76,7 +71,6 @@ class _BlocksparseToDense(torch.autograd.Function):
         ctx.sparsity_layout = sparsity_layout
         ctx.sparsity_block_size = sparsity_block_size
         ctx.triton_block_size = triton_block_size
-        ctx.device = device
 
         return output
 
@@ -85,10 +79,8 @@ class _BlocksparseToDense(torch.autograd.Function):
         sparsity_layout = ctx.sparsity_layout
         sparsity_block_size = ctx.sparsity_block_size
         triton_block_size = ctx.triton_block_size
-        device = ctx.device
 
-        return BlocksparseToSparse(sparsity_block_size, device, triton_block_size)(grad_output,
-                                                                                   sparsity_layout), None, None, None, None, None, None
+        return to_sparse(grad_output, sparsity_layout, sparsity_block_size, triton_block_size), None, None, None, None, None
 
     @staticmethod
     @triton.jit
@@ -131,27 +123,22 @@ class _BlocksparseToDense(torch.autograd.Function):
             tl.store(o + o_idx, blk, o_msk)
 
 
-class BlocksparseToSparse(BaseBlocksparse):
+def to_sparse(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
     """Converts a dense tensor to a blocksparse tensor based on the given sparsity layout.
 
     """
+    validate_dimensions(x)
+    validate_contiguous(x)
+    validate_dtype_float(x)
+    validate_device(x)
 
-    def __init__(self, sparsity_block_size: int, device: torch.device, triton_block_size: int = None) -> None:
-        super().__init__(sparsity_block_size, device, triton_block_size=triton_block_size)
+    sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
+    n_sparse_blocks = torch.sum(sparsity_layout.to(torch.int)).item()
 
-    def forward(self, x: Tensor, sparsity_layout: Tensor) -> Tensor:
-        validate_dimensions(x)
-        validate_contiguous(x)
-        validate_dtype_float(x)
-        validate_device(x)
-
-        sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
-        n_sparse_blocks = torch.sum(sparsity_layout.to(torch.int)).item()
-
-        return _BlocksparseToSparse.apply(x,
-                                          sparsity_layout, sparsity_lut,
-                                          self.sparsity_block_size, n_sparse_blocks,
-                                          self.triton_block_size, self.device)
+    return _BlocksparseToSparse.apply(x,
+                                      sparsity_layout, sparsity_lut,
+                                      sparsity_block_size, n_sparse_blocks,
+                                      triton_block_size)
 
 
 class _BlocksparseToSparse(torch.autograd.Function):
@@ -159,10 +146,10 @@ class _BlocksparseToSparse(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x: Tensor,
                 sparsity_layout: Tensor, sparsity_lut: Tensor,
-                sparsity_block_size: int, n_sparse_blocks: int, triton_block_size: int, device: torch.device) -> Tensor:
+                sparsity_block_size: int, n_sparse_blocks: int, triton_block_size: int) -> Tensor:
         validate_contiguous(x, sparsity_layout, sparsity_lut)
 
-        output = torch.zeros(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size), device=device)
+        output = torch.zeros(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size), device=x.device)
 
         x_b, x_r, x_c = x.size()
         x_b_s, x_r_s, x_c_s = x.stride()
@@ -188,7 +175,6 @@ class _BlocksparseToSparse(torch.autograd.Function):
         ctx.sparsity_layout = sparsity_layout
         ctx.sparsity_block_size = sparsity_block_size
         ctx.triton_block_size = triton_block_size
-        ctx.device = device
 
         return output
 
@@ -197,10 +183,9 @@ class _BlocksparseToSparse(torch.autograd.Function):
         sparsity_layout = ctx.sparsity_layout
         sparsity_block_size = ctx.sparsity_block_size
         triton_block_size = ctx.triton_block_size
-        device = ctx.device
 
-        return BlocksparseToDense(sparsity_block_size, device, triton_block_size)(grad_output,
-                                                                                  sparsity_layout), None, None, None, None, None, None
+        return to_dense(grad_output, sparsity_layout, sparsity_block_size,
+                        triton_block_size=triton_block_size), None, None, None, None, None
 
     @staticmethod
     @triton.jit

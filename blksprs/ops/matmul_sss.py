@@ -10,9 +10,14 @@ from blksprs.utils.validation import validate_contiguous, validate_dimensions, v
     validate_sparsity
 
 
-def blocksparse_matmul_sss(x: Tensor, y: Tensor,
-                            sparsity_layout_x: Tensor, sparsity_layout_y: Tensor, sparsity_layout_output: Tensor,
-                            sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
+def matmul_sss(x: Tensor, y: Tensor,
+               sparsity_layout_x: Tensor, sparsity_layout_y: Tensor, sparsity_layout_output: Tensor,
+               sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
+    """Performs matrix multiplication between two blocksparse tensors.
+
+    The desired sparsity layout of the output tensor is used to only calculate blocks that will be present in the output.
+
+    """
     validate_dimensions(x, y)
     validate_contiguous(x, y)
     validate_dtype_float(x, y)
@@ -42,49 +47,6 @@ def blocksparse_matmul_sss(x: Tensor, y: Tensor,
                                        sparsity_block_size,
                                        o_n_sparse_blocks,
                                        triton_block_size)
-
-
-class BlocksparseMatmulSSS(BaseBlocksparse):
-    """Performs matrix multiplication between two blocksparse tensors.
-
-    The desired sparsity layout of the output tensor is used to only calculate blocks that will be present in the output.
-
-    """
-
-    def __init__(self, sparsity_block_size: int, device: torch.device, triton_block_size: int = None) -> None:
-        super().__init__(sparsity_block_size, device, triton_block_size=triton_block_size)
-
-    def forward(self, x: Tensor, y: Tensor,
-                sparsity_layout_x: Tensor, sparsity_layout_y: Tensor, sparsity_layout_output: Tensor) -> Tensor:
-        validate_dimensions(x, y)
-        validate_contiguous(x, y)
-        validate_dtype_float(x, y)
-        validate_device(x, y)
-        validate_sparsity(self.sparsity_block_size, (x, sparsity_layout_x), (y, sparsity_layout_y))
-        if sparsity_layout_x.size(-1) != sparsity_layout_y.size(-2):
-            raise ValueError("Inner dimensions of tensors must match")
-
-        sparsity_layout_x_flat = sparsity_layout_x.reshape(-1)
-        sparsity_reverse_lut_x = ((torch.cumsum(sparsity_layout_x_flat, dim=-1) - 1) *
-                                  (sparsity_layout_x_flat == 1) -
-                                  (1 * (sparsity_layout_x_flat == 0)))
-
-        sparsity_layout_y_flat = sparsity_layout_y.reshape(-1)
-        sparsity_reverse_lut_y = ((torch.cumsum(sparsity_layout_y_flat, dim=-1) - 1) *
-                                  (sparsity_layout_y_flat == 1) -
-                                  (1 * (sparsity_layout_y_flat == 0)))
-
-        sparsity_lut_o = torch.nonzero(sparsity_layout_output).contiguous()
-
-        o_n_sparse_blocks = torch.sum(sparsity_layout_output.to(torch.int)).item()
-
-        return _BlocksparseMatmulSSS.apply(x, y,
-                                           sparsity_layout_x, sparsity_reverse_lut_x,
-                                           sparsity_layout_y, sparsity_reverse_lut_y,
-                                           sparsity_layout_output, sparsity_lut_o,
-                                           self.sparsity_block_size,
-                                           o_n_sparse_blocks,
-                                           self.triton_block_size)
 
 
 class _BlocksparseMatmulSSS(torch.autograd.Function):
@@ -162,16 +124,18 @@ class _BlocksparseMatmulSSS(torch.autograd.Function):
         x_t, sparsity_layout_x_t = blksprs_transpose(x, sparsity_layout_x)
         y_t, sparsity_layout_y_t = blksprs_transpose(y, sparsity_layout_y)
 
-        grad_x = BlocksparseMatmulSSS(sparsity_block_size, device, triton_block_size)(grad_output, y_t,
-                                                                                      sparsity_layout_o,
-                                                                                      sparsity_layout_y_t,
-                                                                                      sparsity_layout_x)
-        grad_y = BlocksparseMatmulSSS(sparsity_block_size, device, triton_block_size)(x_t, grad_output,
-                                                                                      sparsity_layout_x_t,
-                                                                                      sparsity_layout_o,
-                                                                                      sparsity_layout_y)
+        grad_x = matmul_sss(grad_output, y_t,
+                            sparsity_layout_o,
+                            sparsity_layout_y_t,
+                            sparsity_layout_x,
+                            sparsity_block_size, triton_block_size)
+        grad_y = matmul_sss(x_t, grad_output,
+                            sparsity_layout_x_t,
+                            sparsity_layout_o,
+                            sparsity_layout_y,
+                            sparsity_block_size, triton_block_size)
 
-        return grad_x, grad_y, None, None, None, None, None, None, None, None, None, None
+        return grad_x, grad_y, None, None, None, None, None, None, None, None, None
 
     @staticmethod
     @triton.jit
