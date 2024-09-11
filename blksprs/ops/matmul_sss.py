@@ -10,6 +10,40 @@ from blksprs.utils.validation import validate_contiguous, validate_dimensions, v
     validate_sparsity
 
 
+def blocksparse_matmul_sss(x: Tensor, y: Tensor,
+                            sparsity_layout_x: Tensor, sparsity_layout_y: Tensor, sparsity_layout_output: Tensor,
+                            sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
+    validate_dimensions(x, y)
+    validate_contiguous(x, y)
+    validate_dtype_float(x, y)
+    validate_device(x, y)
+    validate_sparsity(sparsity_block_size, (x, sparsity_layout_x), (y, sparsity_layout_y))
+    if sparsity_layout_x.size(-1) != sparsity_layout_y.size(-2):
+        raise ValueError("Inner dimensions of tensors must match")
+
+    sparsity_layout_x_flat = sparsity_layout_x.reshape(-1)
+    sparsity_reverse_lut_x = ((torch.cumsum(sparsity_layout_x_flat, dim=-1) - 1) *
+                              (sparsity_layout_x_flat == 1) -
+                              (1 * (sparsity_layout_x_flat == 0)))
+
+    sparsity_layout_y_flat = sparsity_layout_y.reshape(-1)
+    sparsity_reverse_lut_y = ((torch.cumsum(sparsity_layout_y_flat, dim=-1) - 1) *
+                              (sparsity_layout_y_flat == 1) -
+                              (1 * (sparsity_layout_y_flat == 0)))
+
+    sparsity_lut_o = torch.nonzero(sparsity_layout_output).contiguous()
+
+    o_n_sparse_blocks = torch.sum(sparsity_layout_output.to(torch.int)).item()
+
+    return _BlocksparseMatmulSSS.apply(x, y,
+                                       sparsity_layout_x, sparsity_reverse_lut_x,
+                                       sparsity_layout_y, sparsity_reverse_lut_y,
+                                       sparsity_layout_output, sparsity_lut_o,
+                                       sparsity_block_size,
+                                       o_n_sparse_blocks,
+                                       triton_block_size)
+
+
 class BlocksparseMatmulSSS(BaseBlocksparse):
     """Performs matrix multiplication between two blocksparse tensors.
 
@@ -50,8 +84,7 @@ class BlocksparseMatmulSSS(BaseBlocksparse):
                                            sparsity_layout_output, sparsity_lut_o,
                                            self.sparsity_block_size,
                                            o_n_sparse_blocks,
-                                           self.triton_block_size,
-                                           self.device)
+                                           self.triton_block_size)
 
 
 class _BlocksparseMatmulSSS(torch.autograd.Function):
@@ -61,14 +94,13 @@ class _BlocksparseMatmulSSS(torch.autograd.Function):
                 sparsity_layout_x: Tensor, sparsity_reverse_lut_x: Tensor,
                 sparsity_layout_y: Tensor, sparsity_reverse_lut_y: Tensor,
                 sparsity_layout_o: Tensor, sparsity_lut_o: Tensor,
-                sparsity_block_size: int, o_n_sparse_blocks: int, triton_block_size: int,
-                device: torch.device) -> Tensor:
+                sparsity_block_size: int, o_n_sparse_blocks: int, triton_block_size: int) -> Tensor:
         validate_contiguous(x, y,
                             sparsity_layout_x, sparsity_reverse_lut_x,
                             sparsity_layout_y, sparsity_reverse_lut_y,
                             sparsity_layout_o, sparsity_lut_o)
 
-        output = torch.zeros(size=(o_n_sparse_blocks, sparsity_block_size, sparsity_block_size), device=device)
+        output = torch.zeros(size=(o_n_sparse_blocks, sparsity_block_size, sparsity_block_size), device=x.device)
 
         x_b, x_r, x_c = x.size()
         x_b_s, x_r_s, x_c_s = x.stride()
@@ -112,7 +144,6 @@ class _BlocksparseMatmulSSS(torch.autograd.Function):
         ctx.sparsity_layout_o = sparsity_layout_o
         ctx.sparsity_block_size = sparsity_block_size
         ctx.triton_block_size = triton_block_size
-        ctx.device = device
 
         return output
 
@@ -124,7 +155,7 @@ class _BlocksparseMatmulSSS(torch.autograd.Function):
         sparsity_layout_o = ctx.sparsity_layout_o
         sparsity_block_size = ctx.sparsity_block_size
         triton_block_size = ctx.triton_block_size
-        device = ctx.device
+        device = x.device
 
         blksprs_transpose = BlocksparseTranspose(sparsity_block_size, device, triton_block_size)
 

@@ -9,7 +9,7 @@ from blksprs.ops.row_wise_sum import BlocksparseRowWiseSum
 from blksprs.ops.softmax import BlocksparseSoftmax
 from blksprs.ops.transpose import BlocksparseTranspose
 from blksprs.ops.conversion import BlocksparseToDense, BlocksparseToSparse
-from blksprs.ops.matmul_sss import BlocksparseMatmulSSS
+from blksprs.ops.matmul_sss import BlocksparseMatmulSSS, blocksparse_matmul_sss
 from blksprs.utils.tools import slow_to_sparse, slow_to_dense
 
 # Device setup
@@ -100,9 +100,10 @@ def test_blksprs_matmul_sss():
             y_blksprs = y.clone().requires_grad_(True)
 
             stock_matmul_out = torch.matmul(x_stock, y_stock)
-            blksprs_matmul_out = blksprs_matmul_sss(blksprs_to_sparse(x_blksprs, sparsity_layout_x),
-                                                    blksprs_to_sparse(y_blksprs, sparsity_layout_y),
-                                                    sparsity_layout_x, sparsity_layout_y, sparsity_layout_o)
+            blksprs_matmul_out = blocksparse_matmul_sss(blksprs_to_sparse(x_blksprs, sparsity_layout_x),
+                                                        blksprs_to_sparse(y_blksprs, sparsity_layout_y),
+                                                        sparsity_layout_x, sparsity_layout_y, sparsity_layout_o,
+                                                        sparsity_block_size)
             blksprs_matmul_out_dense = blksprs_to_dense(blksprs_matmul_out, sparsity_layout_o)
 
             assert torch.allclose(blksprs_matmul_out_dense, stock_matmul_out, atol=ATOL, rtol=RTOL)
@@ -228,7 +229,7 @@ def test_blksprs_to_dense():
 
             stock_to_sparse_out = slow_to_sparse(x_stock, sparsity_layout_x_s, sparsity_block_size)
             stock_to_dense_out = slow_to_dense(stock_to_sparse_out, sparsity_layout_x_s,
-                                                                sparsity_block_size)
+                                               sparsity_block_size)
 
             blksprs_to_sparse_out = blksprs_to_sparse(x_blksprs, sparsity_layout_x_s)
             blksprs_to_dense_out = blksprs_to_dense(blksprs_to_sparse_out, sparsity_layout_x_s)
