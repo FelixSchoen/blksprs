@@ -12,6 +12,9 @@ from blksprs.utils.validation import validate_contiguous
 class BlocksparseSoftmax(BaseBlocksparse):
     """Computes the softmax of a blocksparse tensor.
 
+    Note:
+        Sparse blocks are not considered for the calculation of the softmax, i.e., assumed to be ``-inf``.
+
     """
 
     def __init__(self, sparsity_block_size: int, device: torch.device, triton_block_size: int = None) -> None:
@@ -25,8 +28,6 @@ class BlocksparseSoftmax(BaseBlocksparse):
         self.validate_tensors(x)
 
         max_val = torch.max(x).item()
-        # TODO
-        max_val = 0
         x_scaled = x - max_val
 
         sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
@@ -83,7 +84,7 @@ class _BlocksparseSoftmax(torch.autograd.Function):
           x_b, x_b_s, x_r_s, x_c_s,
           sparsity_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
           x_exp_row_wise_sum, s_b, s_b_s, s_r_s, s_c_s,
-          s_l_s_b, s_l_s_b_s, s_l_s_r,
+          s_l_s_b, s_l_s_b_s, s_l_s_r_s,
           sparsity_reverse_lut_rws,
           output,
           triton_block_size))
@@ -227,10 +228,6 @@ class _BlocksparseSoftmax(torch.autograd.Function):
         spa_row_idx = (pid_blk * s_lut_r_s + 1 * s_lut_c_s)
         spa_row_msk = (spa_row_idx < s_lut_r * s_lut_r_s)
         spa_row = tl.load(s_lut + spa_row_idx, mask=spa_row_msk)
-
-        spa_col_idx = (pid_blk * s_lut_r_s + 2 * s_lut_c_s)
-        spa_col_msk = (spa_col_idx < s_lut_r * s_lut_r_s)
-        spa_col = tl.load(s_lut + spa_col_idx, mask=spa_col_msk)
 
         rev_idx_spa_s_idx = (spa_bat * s_l_s_b_s +
                              spa_row * s_l_s_r_s)
