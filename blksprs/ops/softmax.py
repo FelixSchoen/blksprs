@@ -3,8 +3,8 @@ import triton
 from torch import Tensor
 from triton import language as tl
 
-from blksprs.ops.exp import BlocksparseExp
-from blksprs.ops.row_wise_sum import BlocksparseRowWiseSum
+from blksprs.ops.exp import exp
+from blksprs.ops.row_wise_sum import row_wise_sum
 from blksprs.ops.tools import BaseBlocksparse
 from blksprs.utils.tools import get_triton_block_size
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_dtype_float, validate_device
@@ -20,10 +20,6 @@ class BlocksparseSoftmax(BaseBlocksparse):
 
     def __init__(self, sparsity_block_size: int, device: torch.device, triton_block_size: int = None) -> None:
         super().__init__(sparsity_block_size, device, triton_block_size=triton_block_size)
-
-        self.blocksparse_exp = BlocksparseExp(sparsity_block_size, device, triton_block_size=triton_block_size)
-        self.blocksparse_row_wise_sum = BlocksparseRowWiseSum(sparsity_block_size, device,
-                                                              triton_block_size=triton_block_size, flag_slice_only=True)
 
     def forward(self, x: Tensor, sparsity_layout: Tensor) -> Tensor:
         validate_dimensions(x)
@@ -46,7 +42,7 @@ class BlocksparseSoftmax(BaseBlocksparse):
                                          sparsity_lut,
                                          sparsity_reverse_lut_rws,
                                          self.sparsity_block_size, self.triton_block_size,
-                                         self.blocksparse_exp, self.blocksparse_row_wise_sum, self.device)
+                                         self.device)
 
 
 class _BlocksparseSoftmax(torch.autograd.Function):
@@ -56,7 +52,6 @@ class _BlocksparseSoftmax(torch.autograd.Function):
                 sparsity_lut: Tensor,
                 sparsity_reverse_lut_rws: Tensor,
                 sparsity_block_size: int, triton_block_size: int,
-                blocksparse_exp: BlocksparseExp, blocksparse_row_wise_sum: BlocksparseRowWiseSum,
                 device: torch.device) -> Tensor:
         validate_contiguous(x, sparsity_layout, sparsity_lut, sparsity_reverse_lut_rws)
 
@@ -68,8 +63,10 @@ class _BlocksparseSoftmax(torch.autograd.Function):
         s_lut_r_s, s_lut_c_s = sparsity_lut.stride()
         o_b, o_r, o_c = output.shape
 
-        x_exp = blocksparse_exp(x)
-        x_exp_row_wise_sum, sparsity_layout_rws = blocksparse_row_wise_sum(x_exp, sparsity_layout)
+        x_exp = exp(x, sparsity_block_size, triton_block_size=triton_block_size)
+        x_exp_row_wise_sum, sparsity_layout_rws = row_wise_sum(x_exp, sparsity_layout, sparsity_block_size,
+                                                               flag_slice_only=True,
+                                                               triton_block_size=triton_block_size)
 
         s_b, s_r, s_c = x_exp_row_wise_sum.shape
         s_b_s, s_r_s, s_c_s = x_exp_row_wise_sum.stride()
@@ -99,7 +96,6 @@ class _BlocksparseSoftmax(torch.autograd.Function):
         ctx.sparsity_lut = sparsity_lut
         ctx.sparsity_block_size = sparsity_block_size
         ctx.triton_block_size = triton_block_size
-        ctx.device = device
 
         return output
 
@@ -110,10 +106,9 @@ class _BlocksparseSoftmax(torch.autograd.Function):
         sparsity_lut = ctx.sparsity_lut
         sparsity_block_size = ctx.sparsity_block_size
         triton_block_size = ctx.triton_block_size
-        device = ctx.device
 
-        blksprs_row_wise_sum = BlocksparseRowWiseSum(sparsity_block_size, device, flag_slice_only=True)
-        s, sparsity_layout_s = blksprs_row_wise_sum(grad_output * o, sparsity_layout)
+        s, sparsity_layout_s = row_wise_sum(grad_output * o, sparsity_layout, sparsity_block_size, flag_slice_only=True,
+                                            triton_block_size=triton_block_size)
 
         sparsity_layout_s_flat = sparsity_layout_s.reshape(-1)
         sparsity_reverse_lut_s = ((torch.cumsum(sparsity_layout_s_flat, dim=-1) - 1) *

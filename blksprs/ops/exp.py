@@ -3,37 +3,31 @@ import triton
 from triton import language as tl
 from torch import Tensor
 
-from blksprs.ops.tools import BaseBlocksparse
 from blksprs.utils.tools import get_triton_block_size
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_dtype_float, validate_device
 
 
-class BlocksparseExp(BaseBlocksparse):
+def exp(x: Tensor, sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
     """Applies the element-wise exponential function to the input tensor.
 
-    Returns a new tensor with the exponential of the elements of the input tensor.
+        Returns a new tensor with the exponential of the elements of the input tensor.
 
-    Note:
-        This operation does not consider sparse blocks, i.e., these will not be set to ``e^0``.
-        Consider this when converting back to dense tensors.
+        Note:
+            This operation does not consider sparse blocks, i.e., these will not be set to ``e^0``.
+            Consider this when converting back to dense tensors.
     """
+    validate_dimensions(x)
+    validate_contiguous(x)
+    validate_dtype_float(x)
+    validate_device(x)
 
-    def __init__(self, sparsity_block_size: int, device: torch.device, triton_block_size: int = None) -> None:
-        super().__init__(sparsity_block_size, device, triton_block_size=triton_block_size)
-
-    def forward(self, x: Tensor) -> Tensor:
-        validate_dimensions(x)
-        validate_contiguous(x)
-        validate_dtype_float(x)
-        validate_device(x)
-
-        return _BlocksparseExp.apply(x, self.sparsity_block_size, self.triton_block_size, self.device)
+    return _BlocksparseExp.apply(x, sparsity_block_size, triton_block_size)
 
 
 class _BlocksparseExp(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, x: Tensor, sparsity_block_size: int, triton_block_size: int, device: torch.device) -> Tensor:
+    def forward(ctx, x: Tensor, sparsity_block_size: int, triton_block_size: int) -> Tensor:
         validate_contiguous(x)
 
         output = torch.zeros_like(x)
@@ -67,7 +61,7 @@ class _BlocksparseExp(torch.autograd.Function):
 
         grad_x = torch.mul(grad_output, o)
 
-        return grad_x, None, None, None, None
+        return grad_x, None, None, None
 
     @staticmethod
     @triton.jit

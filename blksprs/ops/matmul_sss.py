@@ -3,7 +3,6 @@ import triton
 from torch import Tensor
 from triton import language as tl
 
-from blksprs.ops.tools import BaseBlocksparse
 from blksprs.ops.transpose import BlocksparseTranspose
 from blksprs.utils.tools import get_triton_block_size
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_dtype_float, validate_device, \

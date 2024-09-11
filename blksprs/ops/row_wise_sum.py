@@ -3,12 +3,12 @@ import triton
 from torch import Tensor
 from triton import language as tl
 
-from blksprs.ops.tools import BaseBlocksparse
 from blksprs.utils.tools import get_triton_block_size
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_dtype_float, validate_device
 
 
-class BlocksparseRowWiseSum(BaseBlocksparse):
+def row_wise_sum(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int,
+                 flag_slice_only: bool = False, triton_block_size: int = None) -> tuple[Tensor, Tensor]:
     """Computes the row-wise sum of a blocksparse tensor.
 
     Returns a blocksparse tensor with only one block per row, where the first entry is the sum of the corresponding row.
@@ -17,41 +17,33 @@ class BlocksparseRowWiseSum(BaseBlocksparse):
         If ``flag_slice_only`` is set the output will be of shape ``[batch_size, row_size, 1]``.
 
     """
+    validate_dimensions(x)
+    validate_contiguous(x)
+    validate_dtype_float(x)
+    validate_device(x)
 
-    def __init__(self, sparsity_block_size: int, device: torch.device, triton_block_size: int = None,
-                 flag_slice_only: bool = False) -> None:
-        super().__init__(sparsity_block_size, device, triton_block_size=triton_block_size)
+    sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
+    sparsity_layout_flat = sparsity_layout.reshape(-1)
+    sparsity_reverse_lut = ((torch.cumsum(sparsity_layout_flat, dim=-1) - 1) *
+                            (sparsity_layout_flat == 1) -
+                            (1 * (sparsity_layout_flat == 0)))
 
-        self.flag_slice_only = flag_slice_only
+    sparsity_layout_output, _ = torch.max(sparsity_layout, dim=-1, keepdim=True)
+    sparsity_lut_output = torch.nonzero(sparsity_layout_output).contiguous()
+    sparsity_layout_output_flat = sparsity_layout_output.reshape(-1)
+    sparsity_reverse_lut_output = ((torch.cumsum(sparsity_layout_output_flat, dim=-1) - 1) *
+                                   (sparsity_layout_output_flat == 1) -
+                                   (1 * (sparsity_layout_output_flat == 0)))
 
-    def forward(self, x: Tensor, sparsity_layout: Tensor) -> tuple[Tensor, Tensor]:
-        validate_dimensions(x)
-        validate_contiguous(x)
-        validate_dtype_float(x)
-        validate_device(x)
+    o_n_sparsity_blocks_output = torch.sum(sparsity_layout_output.to(torch.int)).item()
 
-        sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
-        sparsity_layout_flat = sparsity_layout.reshape(-1)
-        sparsity_reverse_lut = ((torch.cumsum(sparsity_layout_flat, dim=-1) - 1) *
-                                (sparsity_layout_flat == 1) -
-                                (1 * (sparsity_layout_flat == 0)))
-
-        sparsity_layout_output, _ = torch.max(sparsity_layout, dim=-1, keepdim=True)
-        sparsity_lut_output = torch.nonzero(sparsity_layout_output).contiguous()
-        sparsity_layout_output_flat = sparsity_layout_output.reshape(-1)
-        sparsity_reverse_lut_output = ((torch.cumsum(sparsity_layout_output_flat, dim=-1) - 1) *
-                                       (sparsity_layout_output_flat == 1) -
-                                       (1 * (sparsity_layout_output_flat == 0)))
-
-        o_n_sparsity_blocks_output = torch.sum(sparsity_layout_output.to(torch.int)).item()
-
-        return (_BlocksparseRowWiseSum.apply(x,
-                                             sparsity_layout, sparsity_lut, sparsity_reverse_lut,
-                                             sparsity_layout_output, sparsity_lut_output, sparsity_reverse_lut_output,
-                                             o_n_sparsity_blocks_output,
-                                             self.flag_slice_only,
-                                             self.sparsity_block_size, self.triton_block_size, self.device),
-                sparsity_layout_output)
+    return (_BlocksparseRowWiseSum.apply(x,
+                                         sparsity_layout, sparsity_lut, sparsity_reverse_lut,
+                                         sparsity_layout_output, sparsity_lut_output, sparsity_reverse_lut_output,
+                                         o_n_sparsity_blocks_output,
+                                         flag_slice_only,
+                                         sparsity_block_size, triton_block_size),
+            sparsity_layout_output)
 
 
 class _BlocksparseRowWiseSum(torch.autograd.Function):
@@ -63,15 +55,14 @@ class _BlocksparseRowWiseSum(torch.autograd.Function):
                 sparsity_layout_output: Tensor, sparsity_lut_output: Tensor, sparsity_reverse_lut_output: Tensor,
                 o_n_sparsity_blocks_output: int,
                 flag_slice_only: bool,
-                sparsity_block_size: int, triton_block_size: int,
-                device: torch.device) -> Tensor:
+                sparsity_block_size: int, triton_block_size: int) -> Tensor:
         validate_contiguous(x, sparsity_layout, sparsity_lut, sparsity_reverse_lut,
                             sparsity_layout_output, sparsity_lut_output, sparsity_reverse_lut_output)
 
         output = torch.zeros(size=(o_n_sparsity_blocks_output,
                                    sparsity_block_size,
                                    1 if flag_slice_only else sparsity_block_size),
-                             device=device)
+                             device=x.device)
 
         x_b, x_r, x_c = x.size()
         x_b_s, x_r_s, x_c_s = x.stride()
@@ -95,12 +86,12 @@ class _BlocksparseRowWiseSum(torch.autograd.Function):
 
             (_BlocksparseRowWiseSum.kernel_blocksparse_row_wise_sum[triton_grid]
              (x,
-              x_b, x_b_s, x_r, x_r_s, x_c, x_c_s,
-              s_l_x_b, s_l_x_b_s, s_l_x_r, s_l_x_r_s, s_l_x_c, s_l_x_c_s,
+              x_b, x_b_s, x_r_s, x_c_s,
+              s_l_x_b, s_l_x_b_s, s_l_x_r_s, s_l_x_c, s_l_x_c_s,
               sparsity_reverse_lut,
               output,
-              o_b, o_b_s, o_r, o_r_s, o_c, o_c_s,
-              sparsity_lut_output, s_lut_o_r, s_lut_o_r_s, s_lut_o_c, s_lut_o_c_s,
+              o_b, o_b_s, o_r_s,
+              sparsity_lut_output, s_lut_o_r, s_lut_o_r_s, s_lut_o_c_s,
               sparsity_block_size,
               triton_block_size))
         elif _BlocksparseRowWiseSum.IMPLEMENTATION == "atomic_add":
@@ -127,12 +118,12 @@ class _BlocksparseRowWiseSum(torch.autograd.Function):
     @staticmethod
     @triton.jit
     def kernel_blocksparse_row_wise_sum(x,
-                                        x_b, x_b_s, x_r, x_r_s, x_c, x_c_s,
-                                        s_l_x_b, s_l_x_b_s, s_l_x_r, s_l_x_r_s, s_l_x_c, s_l_x_c_s,
+                                        x_b, x_b_s, x_r_s, x_c_s,
+                                        s_l_x_b, s_l_x_b_s, s_l_x_r_s, s_l_x_c, s_l_x_c_s,
                                         r_lut_x,
                                         o,
-                                        o_b, o_b_s, o_r, o_r_s, o_c, o_c_s,
-                                        s_lut_o, s_lut_o_r, s_lut_o_r_s, s_lut_o_c, s_lut_o_c_s,
+                                        o_b, o_b_s, o_r_s,
+                                        s_lut_o, s_lut_o_r, s_lut_o_r_s, s_lut_o_c_s,
                                         sparsity_block_size,
                                         TRITON_BLOCK_SIZE: tl.constexpr) -> None:
         pid_blk = tl.program_id(axis=0)

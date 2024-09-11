@@ -4,9 +4,9 @@ import pytest
 import torch
 from matplotlib import pyplot as plt
 
-from blksprs.ops.exp import BlocksparseExp
+from blksprs.ops.exp import exp
 from blksprs.ops.matmul_sss import matmul_sss
-from blksprs.ops.row_wise_sum import BlocksparseRowWiseSum
+from blksprs.ops.row_wise_sum import row_wise_sum
 from blksprs.ops.softmax import BlocksparseSoftmax
 from blksprs.ops.transpose import BlocksparseTranspose
 from blksprs.ops.conversion import to_dense, to_sparse
@@ -238,9 +238,6 @@ def test_blksprs_to_dense():
 
 def test_blksprs_row_wise_sum():
     for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
-        blksprs_row_wise_sum = BlocksparseRowWiseSum(sparsity_block_size, DEVICE,
-                                                     triton_block_size=triton_block_size)
-
         x = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
@@ -251,8 +248,8 @@ def test_blksprs_row_wise_sum():
             x_blksprs = x.clone().requires_grad_(True)
 
             stock_out = torch.sum(x_stock, dim=-1)
-            blksprs_row_wise_sum_out, sparsity_layout_output = blksprs_row_wise_sum(
-                to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size), sparsity_layout_x)
+            blksprs_row_wise_sum_out, sparsity_layout_output = row_wise_sum(
+                to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size), sparsity_layout_x, sparsity_block_size)
             blksprs_row_wise_sum_out_dense = to_dense(blksprs_row_wise_sum_out, sparsity_layout_output,
                                                       sparsity_block_size)
 
@@ -263,8 +260,6 @@ def test_blksprs_row_wise_sum():
 
 def test_blksprs_exp():
     for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
-        blksprs_exp = BlocksparseExp(sparsity_block_size, DEVICE, triton_block_size=triton_block_size)
-
         x = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
@@ -276,7 +271,7 @@ def test_blksprs_exp():
 
             stock_out = to_dense(to_sparse(torch.exp(x_stock), sparsity_layout_x, sparsity_block_size),
                                  sparsity_layout_x, sparsity_block_size)
-            blksprs_exp_out = blksprs_exp(to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size))
+            blksprs_exp_out = exp(to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size), sparsity_block_size)
             blksprs_exp_dense_out = to_dense(blksprs_exp_out, sparsity_layout_x, sparsity_block_size)
 
             assert torch.allclose(blksprs_exp_dense_out, stock_out, atol=ATOL, rtol=RTOL)
