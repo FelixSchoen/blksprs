@@ -4,7 +4,8 @@ from torch import Tensor
 from triton import language as tl
 
 from blksprs.ops.tools import BaseBlocksparse
-from blksprs.utils.validation import validate_contiguous
+from blksprs.utils.tools import get_triton_block_size
+from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_dtype_float, validate_device
 
 
 class BlocksparseRowWiseSum(BaseBlocksparse):
@@ -24,7 +25,10 @@ class BlocksparseRowWiseSum(BaseBlocksparse):
         self.flag_slice_only = flag_slice_only
 
     def forward(self, x: Tensor, sparsity_layout: Tensor) -> tuple[Tensor, Tensor]:
-        self.validate_tensors(x)
+        validate_dimensions(x)
+        validate_contiguous(x)
+        validate_dtype_float(x)
+        validate_device(x)
 
         sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
         sparsity_layout_flat = sparsity_layout.reshape(-1)
@@ -83,7 +87,7 @@ class _BlocksparseRowWiseSum(torch.autograd.Function):
         s_lut_o_r_s, s_lut_o_c_s = sparsity_lut_output.stride()
 
         if triton_block_size is None:
-            triton_block_size = BaseBlocksparse.get_triton_block_size(sparsity_block_size)
+            triton_block_size = get_triton_block_size(sparsity_block_size)
 
         if _BlocksparseRowWiseSum.IMPLEMENTATION == "basic":
             triton_grid = lambda meta: [o_b,

@@ -4,7 +4,8 @@ from torch import Tensor
 from triton import language as tl
 
 from blksprs.ops.tools import BaseBlocksparse
-from blksprs.utils.validation import validate_contiguous
+from blksprs.utils.tools import get_triton_block_size
+from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_dtype_float, validate_device
 
 
 class BlocksparseToDense(BaseBlocksparse):
@@ -19,7 +20,10 @@ class BlocksparseToDense(BaseBlocksparse):
         super().__init__(sparsity_block_size, device, triton_block_size=triton_block_size)
 
     def forward(self, x: Tensor, sparsity_layout: Tensor, fill_value: int = 0) -> Tensor:
-        self.validate_tensors(x)
+        validate_dimensions(x)
+        validate_contiguous(x)
+        validate_dtype_float(x)
+        validate_device(x)
 
         sparsity_layout_flat = sparsity_layout.reshape(-1)
         sparsity_reverse_lut = ((torch.cumsum(sparsity_layout_flat, dim=-1) - 1) *
@@ -53,7 +57,7 @@ class _BlocksparseToDense(torch.autograd.Function):
         o_b_s, o_r_s, o_c_s = output.stride()
 
         if triton_block_size is None:
-            triton_block_size = BaseBlocksparse.get_triton_block_size(sparsity_block_size)
+            triton_block_size = get_triton_block_size(sparsity_block_size)
 
         triton_grid = lambda meta: [o_b,
                                     triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),
@@ -136,7 +140,10 @@ class BlocksparseToSparse(BaseBlocksparse):
         super().__init__(sparsity_block_size, device, triton_block_size=triton_block_size)
 
     def forward(self, x: Tensor, sparsity_layout: Tensor) -> Tensor:
-        self.validate_tensors(x)
+        validate_dimensions(x)
+        validate_contiguous(x)
+        validate_dtype_float(x)
+        validate_device(x)
 
         sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
         n_sparse_blocks = torch.sum(sparsity_layout.to(torch.int)).item()
@@ -165,7 +172,7 @@ class _BlocksparseToSparse(torch.autograd.Function):
         s_lut_r_s, s_lut_c_s = sparsity_lut.stride()
 
         if triton_block_size is None:
-            triton_block_size = BaseBlocksparse.get_triton_block_size(sparsity_block_size)
+            triton_block_size = get_triton_block_size(sparsity_block_size)
 
         triton_grid = lambda meta: [o_b,
                                     triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),

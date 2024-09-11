@@ -6,11 +6,11 @@ from matplotlib import pyplot as plt
 
 from blksprs.ops.exp import BlocksparseExp
 from blksprs.ops.row_wise_sum import BlocksparseRowWiseSum
-from blksprs.ops.tools import BlocksparseTools
 from blksprs.ops.softmax import BlocksparseSoftmax
 from blksprs.ops.transpose import BlocksparseTranspose
 from blksprs.ops.conversion import BlocksparseToDense, BlocksparseToSparse
 from blksprs.ops.matmul_sss import BlocksparseMatmulSSS
+from blksprs.utils.tools import slow_to_sparse, slow_to_dense
 
 # Device setup
 DEVICE = torch.device("cuda:0")
@@ -23,22 +23,31 @@ TEST_CONFIGURATIONS = [
     (2, 16, 16, 16, 16, 16, 0.75),
     (2, 32, 32, 32, 32, 32, 0.75),
     (2, 64, 64, 64, 64, 64, 0.75),
-    # Same sparsity_block_size and triton_block_size
+    # Same dimensions, sparsity_block_size, and triton_block_size
     (2, 64, 64, 64, 16, 16, 0.75),
     (2, 64, 64, 64, 32, 32, 0.75),
     (2, 128, 128, 128, 16, 16, 0.75),
     (2, 128, 128, 128, 32, 32, 0.75),
     (2, 128, 128, 128, 64, 64, 0.75),
-    # All different
+    (2, 2048, 2048, 128, 64, 64, 0.75),
+    # Same dimensions
     (2, 64, 64, 64, 32, 16, 0.75),
     (2, 128, 128, 128, 32, 16, 0.75),
     (2, 128, 128, 128, 64, 16, 0.75),
     (2, 128, 128, 128, 64, 32, 0.75),
+    # All different
+    (2, 64, 32, 64, 32, 16, 0.75),
+    (2, 32, 64, 64, 32, 16, 0.75),
+    (2, 128, 64, 128, 64, 32, 0.75),
+    (2, 64, 128, 128, 64, 32, 0.75),
+    (2, 256, 128, 128, 64, 32, 0.75),
+    (2, 128, 256, 128, 64, 32, 0.75),
+    (2, 4096, 1024, 128, 64, 32, 0.75),
+    (2, 1024, 4096, 128, 64, 32, 0.75),
     # Different sparsity
     (2, 128, 128, 128, 64, 32, 0.5),
     (2, 128, 128, 128, 64, 32, 0.25),
     (2, 128, 128, 128, 64, 32, 0.1),
-    (2, 128, 128, 128, 64, 32, 0),
 ]
 
 # Settings
@@ -185,7 +194,7 @@ def test_blksprs_to_sparse():
             x_stock = x.clone().requires_grad_(True)
             x_blksprs = x.clone().requires_grad_(True)
 
-            stock_to_sparse_out = BlocksparseTools.slow_to_sparse(x_stock, sparsity_layout_x_s, sparsity_block_size)
+            stock_to_sparse_out = slow_to_sparse(x_stock, sparsity_layout_x_s, sparsity_block_size)
 
             blksprs_to_sparse_out = blksprs_to_sparse(x_blksprs, sparsity_layout_x_s)
 
@@ -217,8 +226,8 @@ def test_blksprs_to_dense():
             x_stock = x.clone().requires_grad_(True)
             x_blksprs = x.clone().requires_grad_(True)
 
-            stock_to_sparse_out = BlocksparseTools.slow_to_sparse(x_stock, sparsity_layout_x_s, sparsity_block_size)
-            stock_to_dense_out = BlocksparseTools.slow_to_dense(stock_to_sparse_out, sparsity_layout_x_s,
+            stock_to_sparse_out = slow_to_sparse(x_stock, sparsity_layout_x_s, sparsity_block_size)
+            stock_to_dense_out = slow_to_dense(stock_to_sparse_out, sparsity_layout_x_s,
                                                                 sparsity_block_size)
 
             blksprs_to_sparse_out = blksprs_to_sparse(x_blksprs, sparsity_layout_x_s)

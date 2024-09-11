@@ -4,7 +4,8 @@ from triton import language as tl
 from torch import Tensor
 
 from blksprs.ops.tools import BaseBlocksparse
-from blksprs.utils.validation import validate_contiguous
+from blksprs.utils.tools import get_triton_block_size
+from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_dtype_float, validate_device
 
 
 class BlocksparseExp(BaseBlocksparse):
@@ -21,7 +22,10 @@ class BlocksparseExp(BaseBlocksparse):
         super().__init__(sparsity_block_size, device, triton_block_size=triton_block_size)
 
     def forward(self, x: Tensor) -> Tensor:
-        self.validate_tensors(x)
+        validate_dimensions(x)
+        validate_contiguous(x)
+        validate_dtype_float(x)
+        validate_device(x)
 
         return _BlocksparseExp.apply(x, self.sparsity_block_size, self.triton_block_size, self.device)
 
@@ -40,7 +44,7 @@ class _BlocksparseExp(torch.autograd.Function):
         o_b_s, o_r_s, o_c_s = output.stride()
 
         if triton_block_size is None:
-            triton_block_size = BaseBlocksparse.get_triton_block_size(sparsity_block_size)
+            triton_block_size = get_triton_block_size(sparsity_block_size)
 
         triton_grid = lambda meta: [o_b,
                                     triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),

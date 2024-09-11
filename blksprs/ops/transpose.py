@@ -2,6 +2,7 @@ import torch
 from torch import Tensor
 
 from blksprs.ops.tools import BaseBlocksparse
+from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_dtype_float, validate_device
 
 
 class BlocksparseTranspose(BaseBlocksparse):
@@ -16,7 +17,10 @@ class BlocksparseTranspose(BaseBlocksparse):
         super().__init__(sparsity_block_size, device, triton_block_size=triton_block_size)
 
     def forward(self, x: Tensor, sparsity_layout: Tensor, shuffle_blocks: bool = True) -> (Tensor, Tensor):
-        self.validate_tensors(x)
+        validate_dimensions(x)
+        validate_contiguous(x)
+        validate_dtype_float(x)
+        validate_device(x)
 
         x_t = x.transpose(1, 2).contiguous()
         sparsity_layout_t = sparsity_layout.transpose(-1, -2).contiguous()

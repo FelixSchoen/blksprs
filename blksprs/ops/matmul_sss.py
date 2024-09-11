@@ -5,7 +5,9 @@ from triton import language as tl
 
 from blksprs.ops.tools import BaseBlocksparse
 from blksprs.ops.transpose import BlocksparseTranspose
-from blksprs.utils.validation import validate_contiguous
+from blksprs.utils.tools import get_triton_block_size
+from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_dtype_float, validate_device, \
+    validate_sparsity
 
 
 class BlocksparseMatmulSSS(BaseBlocksparse):
@@ -20,9 +22,13 @@ class BlocksparseMatmulSSS(BaseBlocksparse):
 
     def forward(self, x: Tensor, y: Tensor,
                 sparsity_layout_x: Tensor, sparsity_layout_y: Tensor, sparsity_layout_output: Tensor) -> Tensor:
-        self.validate_tensors(x, y)
-        self.validate_sparsity((x, sparsity_layout_x), (y, sparsity_layout_y))
-        assert x.size(2) == y.size(1), "Inner dimensions must match"
+        validate_dimensions(x, y)
+        validate_contiguous(x, y)
+        validate_dtype_float(x, y)
+        validate_device(x, y)
+        validate_sparsity(self.sparsity_block_size, (x, sparsity_layout_x), (y, sparsity_layout_y))
+        if sparsity_layout_x.size(-1) != sparsity_layout_y.size(-2):
+            raise ValueError("Inner dimensions of tensors must match")
 
         sparsity_layout_x_flat = sparsity_layout_x.reshape(-1)
         sparsity_reverse_lut_x = ((torch.cumsum(sparsity_layout_x_flat, dim=-1) - 1) *
@@ -78,7 +84,7 @@ class _BlocksparseMatmulSSS(torch.autograd.Function):
         s_lut_o_r_s, s_lut_o_c_s = sparsity_lut_o.stride()
 
         if triton_block_size is None:
-            triton_block_size = BaseBlocksparse.get_triton_block_size(sparsity_block_size)
+            triton_block_size = get_triton_block_size(sparsity_block_size)
 
         triton_grid = lambda meta: [o_b,
                                     triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),

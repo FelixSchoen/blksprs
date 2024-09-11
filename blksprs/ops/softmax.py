@@ -6,7 +6,8 @@ from triton import language as tl
 from blksprs.ops.exp import BlocksparseExp
 from blksprs.ops.row_wise_sum import BlocksparseRowWiseSum
 from blksprs.ops.tools import BaseBlocksparse
-from blksprs.utils.validation import validate_contiguous
+from blksprs.utils.tools import get_triton_block_size
+from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_dtype_float, validate_device
 
 
 class BlocksparseSoftmax(BaseBlocksparse):
@@ -25,7 +26,10 @@ class BlocksparseSoftmax(BaseBlocksparse):
                                                               triton_block_size=triton_block_size, flag_slice_only=True)
 
     def forward(self, x: Tensor, sparsity_layout: Tensor) -> Tensor:
-        self.validate_tensors(x)
+        validate_dimensions(x)
+        validate_contiguous(x)
+        validate_dtype_float(x)
+        validate_device(x)
 
         max_val = torch.max(x).item()
         x_scaled = x - max_val
@@ -73,7 +77,7 @@ class _BlocksparseSoftmax(torch.autograd.Function):
         s_l_s_b_s, s_l_s_r_s, s_l_s_c_s = sparsity_layout_rws.stride()
 
         if triton_block_size is None:
-            triton_block_size = BaseBlocksparse.get_triton_block_size(sparsity_block_size)
+            triton_block_size = get_triton_block_size(sparsity_block_size)
 
         triton_grid = lambda meta: [o_b,
                                     triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),
