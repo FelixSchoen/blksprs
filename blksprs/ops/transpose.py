@@ -98,7 +98,7 @@ class _BlocksparseTranspose(torch.autograd.Function):
                                      r_lut,
                                      o,
                                      o_b, o_b_s,
-                                     TRITON_BLOCK_SIZE: tl.constexpr):
+                                     TRITON_BLOCK_SIZE: tl.constexpr) -> None:
         # Get triton block indices
         pid_blk = tl.program_id(axis=0)
         pid_row = tl.program_id(axis=1)

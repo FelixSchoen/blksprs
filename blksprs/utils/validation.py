@@ -39,3 +39,7 @@ def validate_sparsity(sparsity_block_size: int, *tensor_sparsity_layout_tuples: 
             raise ValueError("Blocks not conforming to sparsity block size")
         if not tensor.size(0) == torch.sum(sparsity_layout.reshape(-1)):
             raise ValueError("Mismatch between sparsity layout and blocks")
+
+def validate_triton_block_size(triton_block_size: int, sparsity_block_size: int):
+    if triton_block_size > sparsity_block_size:
+        raise ValueError("Triton block size cannot be larger than sparsity block size")
