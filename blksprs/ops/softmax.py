@@ -5,44 +5,39 @@ from triton import language as tl
 
 from blksprs.ops.exp import exp
 from blksprs.ops.row_wise_sum import row_wise_sum
-from blksprs.ops.tools import BaseBlocksparse
 from blksprs.utils.tools import get_triton_block_size
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_dtype_float, validate_device
 
 
-class BlocksparseSoftmax(BaseBlocksparse):
+def softmax(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
     """Computes the softmax of a blocksparse tensor.
 
     Note:
         Sparse blocks are not considered for the calculation of the softmax, i.e., assumed to be ``-inf``.
 
     """
+    validate_dimensions(x)
+    validate_contiguous(x)
+    validate_dtype_float(x)
+    validate_device(x)
 
-    def __init__(self, sparsity_block_size: int, device: torch.device, triton_block_size: int = None) -> None:
-        super().__init__(sparsity_block_size, device, triton_block_size=triton_block_size)
+    max_val = torch.max(x).item()
+    x_scaled = x - max_val
 
-    def forward(self, x: Tensor, sparsity_layout: Tensor) -> Tensor:
-        validate_dimensions(x)
-        validate_contiguous(x)
-        validate_dtype_float(x)
-        validate_device(x)
+    sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
 
-        max_val = torch.max(x).item()
-        x_scaled = x - max_val
+    sparsity_layout_rws, _ = torch.max(sparsity_layout, dim=-1, keepdim=True)
+    sparsity_layout_rws_flat = sparsity_layout_rws.reshape(-1)
+    sparsity_reverse_lut_rws = ((torch.cumsum(sparsity_layout_rws_flat, dim=-1) - 1) *
+                                (sparsity_layout_rws_flat == 1) -
+                                (1 * (sparsity_layout_rws_flat == 0)))
 
-        sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
+    validate_contiguous(sparsity_layout, sparsity_lut, sparsity_reverse_lut_rws)
 
-        sparsity_layout_rws, _ = torch.max(sparsity_layout, dim=-1, keepdim=True)
-        sparsity_layout_rws_flat = sparsity_layout_rws.reshape(-1)
-        sparsity_reverse_lut_rws = ((torch.cumsum(sparsity_layout_rws_flat, dim=-1) - 1) *
-                                    (sparsity_layout_rws_flat == 1) -
-                                    (1 * (sparsity_layout_rws_flat == 0)))
-
-        return _BlocksparseSoftmax.apply(x_scaled, sparsity_layout,
-                                         sparsity_lut,
-                                         sparsity_reverse_lut_rws,
-                                         self.sparsity_block_size, self.triton_block_size,
-                                         self.device)
+    return _BlocksparseSoftmax.apply(x_scaled, sparsity_layout,
+                                     sparsity_lut,
+                                     sparsity_reverse_lut_rws,
+                                     sparsity_block_size, triton_block_size)
 
 
 class _BlocksparseSoftmax(torch.autograd.Function):
@@ -51,10 +46,7 @@ class _BlocksparseSoftmax(torch.autograd.Function):
     def forward(ctx, x: Tensor, sparsity_layout: Tensor,
                 sparsity_lut: Tensor,
                 sparsity_reverse_lut_rws: Tensor,
-                sparsity_block_size: int, triton_block_size: int,
-                device: torch.device) -> Tensor:
-        validate_contiguous(x, sparsity_layout, sparsity_lut, sparsity_reverse_lut_rws)
-
+                sparsity_block_size: int, triton_block_size: int) -> Tensor:
         output = torch.zeros_like(x)
 
         x_b, x_r, x_c = x.shape
@@ -145,7 +137,7 @@ class _BlocksparseSoftmax(torch.autograd.Function):
           triton_block_size
           ))
 
-        return grad_x, None, None, None, None, None, None, None, None
+        return grad_x, None, None, None, None, None
 
     @staticmethod
     @triton.jit

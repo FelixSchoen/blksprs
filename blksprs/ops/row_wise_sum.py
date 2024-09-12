@@ -35,12 +35,15 @@ def row_wise_sum(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int,
                                    (sparsity_layout_output_flat == 1) -
                                    (1 * (sparsity_layout_output_flat == 0)))
 
-    o_n_sparsity_blocks_output = torch.sum(sparsity_layout_output.to(torch.int)).item()
+    n_sparse_blocks_output = torch.sum(sparsity_layout_output.to(torch.int)).item()
+
+    validate_contiguous(sparsity_layout, sparsity_lut, sparsity_reverse_lut,
+                        sparsity_layout_output, sparsity_lut_output, sparsity_reverse_lut_output)
 
     return (_BlocksparseRowWiseSum.apply(x,
                                          sparsity_layout, sparsity_lut, sparsity_reverse_lut,
                                          sparsity_layout_output, sparsity_lut_output, sparsity_reverse_lut_output,
-                                         o_n_sparsity_blocks_output,
+                                         n_sparse_blocks_output,
                                          flag_slice_only,
                                          sparsity_block_size, triton_block_size),
             sparsity_layout_output)
@@ -53,13 +56,10 @@ class _BlocksparseRowWiseSum(torch.autograd.Function):
     def forward(ctx, x: Tensor,
                 sparsity_layout: Tensor, sparsity_lut: Tensor, sparsity_reverse_lut: Tensor,
                 sparsity_layout_output: Tensor, sparsity_lut_output: Tensor, sparsity_reverse_lut_output: Tensor,
-                o_n_sparsity_blocks_output: int,
+                n_sparse_blocks_output: int,
                 flag_slice_only: bool,
                 sparsity_block_size: int, triton_block_size: int) -> Tensor:
-        validate_contiguous(x, sparsity_layout, sparsity_lut, sparsity_reverse_lut,
-                            sparsity_layout_output, sparsity_lut_output, sparsity_reverse_lut_output)
-
-        output = torch.zeros(size=(o_n_sparsity_blocks_output,
+        output = torch.zeros(size=(n_sparse_blocks_output,
                                    sparsity_block_size,
                                    1 if flag_slice_only else sparsity_block_size),
                              device=x.device)

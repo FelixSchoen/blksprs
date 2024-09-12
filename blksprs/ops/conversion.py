@@ -16,7 +16,7 @@ def to_dense(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, fill_
 
     """
     validate_dimensions(x)
-    validate_contiguous(x)
+    validate_contiguous(x, sparsity_layout)
     validate_dtype_float(x)
     validate_device(x)
 
@@ -24,6 +24,8 @@ def to_dense(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, fill_
     sparsity_reverse_lut = ((torch.cumsum(sparsity_layout_flat, dim=-1) - 1) *
                             (sparsity_layout_flat == 1) -
                             (1 * (sparsity_layout_flat == 0)))
+
+    validate_contiguous(sparsity_reverse_lut)
 
     return _BlocksparseToDense.apply(x,
                                      sparsity_layout, sparsity_reverse_lut,
@@ -38,8 +40,6 @@ class _BlocksparseToDense(torch.autograd.Function):
                 sparsity_layout: Tensor, sparsity_reverse_lut: Tensor,
                 sparsity_block_size: int, fill_value: float,
                 triton_block_size: int) -> Tensor:
-        validate_contiguous(x, sparsity_layout, sparsity_reverse_lut)
-
         output = torch.full(size=(sparsity_layout.size(0), sparsity_layout.size(1) * sparsity_block_size,
                                   sparsity_layout.size(2) * sparsity_block_size), fill_value=fill_value,
                             dtype=x.dtype, device=x.device)
@@ -128,12 +128,14 @@ def to_sparse(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, trit
 
     """
     validate_dimensions(x)
-    validate_contiguous(x)
+    validate_contiguous(x, sparsity_layout)
     validate_dtype_float(x)
     validate_device(x)
 
     sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
     n_sparse_blocks = torch.sum(sparsity_layout.to(torch.int)).item()
+
+    validate_contiguous(sparsity_lut)
 
     return _BlocksparseToSparse.apply(x,
                                       sparsity_layout, sparsity_lut,
@@ -147,8 +149,6 @@ class _BlocksparseToSparse(torch.autograd.Function):
     def forward(ctx, x: Tensor,
                 sparsity_layout: Tensor, sparsity_lut: Tensor,
                 sparsity_block_size: int, n_sparse_blocks: int, triton_block_size: int) -> Tensor:
-        validate_contiguous(x, sparsity_layout, sparsity_lut)
-
         output = torch.zeros(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size), device=x.device)
 
         x_b, x_r, x_c = x.size()

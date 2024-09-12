@@ -3,14 +3,18 @@ from pathlib import Path
 import pytest
 import torch
 from matplotlib import pyplot as plt
+from torch.xpu import device
 
 from blksprs.ops.exp import exp
 from blksprs.ops.matmul_sss import matmul_sss
 from blksprs.ops.row_wise_sum import row_wise_sum
-from blksprs.ops.softmax import BlocksparseSoftmax
-from blksprs.ops.transpose import BlocksparseTranspose
+from blksprs.ops.softmax import softmax
 from blksprs.ops.conversion import to_dense, to_sparse
+from blksprs.ops.transpose import transpose
 from blksprs.utils.tools import slow_to_sparse, slow_to_dense
+
+# TODO Benchmarking
+# TODO Implement Triton kernels for transpose?
 
 # Device setup
 DEVICE = torch.device("cuda:0")
@@ -119,8 +123,6 @@ def test_blksprs_matmul_sss():
 
 def test_blksprs_softmax():
     for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
-        blksprs_softmax = BlocksparseSoftmax(sparsity_block_size, DEVICE, triton_block_size=triton_block_size)
-
         x = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
@@ -132,8 +134,8 @@ def test_blksprs_softmax():
             x_blksprs = x.clone().requires_grad_(True)
 
             stock_out = torch.softmax(x_stock, dim=-1)
-            blksprs_softmax_out = blksprs_softmax(to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
-                                                  sparsity_layout_x)
+            blksprs_softmax_out = softmax(to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
+                                          sparsity_layout_x, sparsity_block_size)
             blksprs_softmax_dense_out = to_dense(blksprs_softmax_out, sparsity_layout_x, sparsity_block_size)
 
             # _visualise((stock_out, "stock_softmax_out"), (blksprs_softmax_dense_out, "blksprs_softmax_out"))
@@ -156,23 +158,34 @@ def test_blksprs_softmax():
 
 def test_blksprs_transpose():
     for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
-        blksprs_transpose = BlocksparseTranspose(sparsity_block_size, DEVICE, triton_block_size=triton_block_size)
-
         x = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
         x_s, sparsity_layout_x_s = _get_blocksparse_input(b, m, k, sparsity_block_size, sparsity_percentage)
 
-        for x, sparsity_layout_x in [(x, sparsity_layout_x), (x_s, sparsity_layout_x_s)]:
-            blksprs_to_sparse_out = to_sparse(x, sparsity_layout_x, sparsity_block_size)
-            stock_transpose_out = x.transpose(1, 2)
+        for x, sparsity_layout_x in [(x_s, sparsity_layout_x), (x, sparsity_layout_x), (x_s, sparsity_layout_x_s)]:
+            x_stock = x.clone().requires_grad_(True)
+            x_blksprs = x.clone().requires_grad_(True)
 
-            blksprs_transpose_out, blksprs_sparsity_layout_t = blksprs_transpose(blksprs_to_sparse_out,
-                                                                                 sparsity_layout_x)
+            stock_transpose_out = x_stock.transpose(1, 2)
+            blksprs_transpose_out, blksprs_sparsity_layout_t = transpose(
+                to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
+                sparsity_layout_x, sparsity_block_size, triton_block_size)
+            blksprs_transpose_dense_out = to_dense(blksprs_transpose_out, blksprs_sparsity_layout_t,
+                                                   sparsity_block_size)
 
-            blksprs_to_dense_out_t = to_dense(blksprs_transpose_out, blksprs_sparsity_layout_t, sparsity_block_size)
+            assert torch.allclose(blksprs_transpose_dense_out, stock_transpose_out, atol=ATOL, rtol=RTOL)
 
-            assert torch.allclose(blksprs_to_dense_out_t, stock_transpose_out, atol=ATOL, rtol=RTOL)
+            target = torch.randn_like(stock_transpose_out)
+            stock_loss = torch.nn.L1Loss()
+            blksprs_loss = torch.nn.L1Loss()
+            stock_loss = stock_loss(stock_transpose_out, target)
+            blksprs_loss = blksprs_loss(blksprs_transpose_dense_out, target)
+
+            stock_loss.backward()
+            blksprs_loss.backward()
+
+            assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
 
 
 def test_blksprs_to_sparse():
@@ -269,17 +282,17 @@ def test_blksprs_exp():
             x_stock = x.clone().requires_grad_(True)
             x_blksprs = x.clone().requires_grad_(True)
 
-            stock_out = to_dense(to_sparse(torch.exp(x_stock), sparsity_layout_x, sparsity_block_size),
-                                 sparsity_layout_x, sparsity_block_size)
+            stock_exp_out = to_dense(to_sparse(torch.exp(x_stock), sparsity_layout_x, sparsity_block_size),
+                                     sparsity_layout_x, sparsity_block_size)
             blksprs_exp_out = exp(to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size), sparsity_block_size)
             blksprs_exp_dense_out = to_dense(blksprs_exp_out, sparsity_layout_x, sparsity_block_size)
 
-            assert torch.allclose(blksprs_exp_dense_out, stock_out, atol=ATOL, rtol=RTOL)
+            assert torch.allclose(blksprs_exp_dense_out, stock_exp_out, atol=ATOL, rtol=RTOL)
 
-            target = torch.randn_like(stock_out)
+            target = torch.randn_like(stock_exp_out)
             stock_loss = torch.nn.L1Loss()
             blksprs_loss = torch.nn.L1Loss()
-            stock_loss = stock_loss(stock_out, target)
+            stock_loss = stock_loss(stock_exp_out, target)
             blksprs_loss = blksprs_loss(blksprs_exp_dense_out, target)
 
             stock_loss.backward()

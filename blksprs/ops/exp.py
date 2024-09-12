@@ -28,8 +28,6 @@ class _BlocksparseExp(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x: Tensor, sparsity_block_size: int, triton_block_size: int) -> Tensor:
-        validate_contiguous(x)
-
         output = torch.zeros_like(x)
 
         x_b, x_r, x_c = x.shape
@@ -61,7 +59,7 @@ class _BlocksparseExp(torch.autograd.Function):
 
         grad_x = torch.mul(grad_output, o)
 
-        return grad_x, None, None, None
+        return grad_x, None, None
 
     @staticmethod
     @triton.jit

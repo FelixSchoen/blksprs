@@ -3,7 +3,7 @@ import triton
 from torch import Tensor
 from triton import language as tl
 
-from blksprs.ops.transpose import BlocksparseTranspose
+from blksprs.ops.transpose import transpose
 from blksprs.utils.tools import get_triton_block_size
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_dtype_float, validate_device, \
     validate_sparsity
@@ -37,14 +37,18 @@ def matmul_sss(x: Tensor, y: Tensor,
 
     sparsity_lut_o = torch.nonzero(sparsity_layout_output).contiguous()
 
-    o_n_sparse_blocks = torch.sum(sparsity_layout_output.to(torch.int)).item()
+    n_sparse_blocks = torch.sum(sparsity_layout_output.to(torch.int)).item()
+
+    validate_contiguous(sparsity_layout_x, sparsity_reverse_lut_x,
+                        sparsity_layout_y, sparsity_reverse_lut_y,
+                        sparsity_layout_output, sparsity_lut_o)
 
     return _BlocksparseMatmulSSS.apply(x, y,
                                        sparsity_layout_x, sparsity_reverse_lut_x,
                                        sparsity_layout_y, sparsity_reverse_lut_y,
                                        sparsity_layout_output, sparsity_lut_o,
                                        sparsity_block_size,
-                                       o_n_sparse_blocks,
+                                       n_sparse_blocks,
                                        triton_block_size)
 
 
@@ -55,13 +59,8 @@ class _BlocksparseMatmulSSS(torch.autograd.Function):
                 sparsity_layout_x: Tensor, sparsity_reverse_lut_x: Tensor,
                 sparsity_layout_y: Tensor, sparsity_reverse_lut_y: Tensor,
                 sparsity_layout_o: Tensor, sparsity_lut_o: Tensor,
-                sparsity_block_size: int, o_n_sparse_blocks: int, triton_block_size: int) -> Tensor:
-        validate_contiguous(x, y,
-                            sparsity_layout_x, sparsity_reverse_lut_x,
-                            sparsity_layout_y, sparsity_reverse_lut_y,
-                            sparsity_layout_o, sparsity_lut_o)
-
-        output = torch.zeros(size=(o_n_sparse_blocks, sparsity_block_size, sparsity_block_size), device=x.device)
+                sparsity_block_size: int, n_sparse_blocks: int, triton_block_size: int) -> Tensor:
+        output = torch.zeros(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size), device=x.device)
 
         x_b, x_r, x_c = x.size()
         x_b_s, x_r_s, x_c_s = x.stride()
@@ -116,12 +115,9 @@ class _BlocksparseMatmulSSS(torch.autograd.Function):
         sparsity_layout_o = ctx.sparsity_layout_o
         sparsity_block_size = ctx.sparsity_block_size
         triton_block_size = ctx.triton_block_size
-        device = x.device
 
-        blksprs_transpose = BlocksparseTranspose(sparsity_block_size, device, triton_block_size)
-
-        x_t, sparsity_layout_x_t = blksprs_transpose(x, sparsity_layout_x)
-        y_t, sparsity_layout_y_t = blksprs_transpose(y, sparsity_layout_y)
+        x_t, sparsity_layout_x_t = transpose(x, sparsity_layout_x, sparsity_block_size, triton_block_size)
+        y_t, sparsity_layout_y_t = transpose(y, sparsity_layout_y, sparsity_block_size, triton_block_size)
 
         grad_x = matmul_sss(grad_output, y_t,
                             sparsity_layout_o,

@@ -1,7 +1,6 @@
 import torch
 from torch import Tensor
 
-from blksprs.ops.tools import BaseBlocksparse
 from blksprs.utils.tools import get_triton_block_size
 
 
