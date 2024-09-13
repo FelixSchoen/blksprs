@@ -60,7 +60,7 @@ class _BlocksparseMatmulSSS(torch.autograd.Function):
                 sparsity_layout_y: Tensor, sparsity_reverse_lut_y: Tensor,
                 sparsity_layout_o: Tensor, sparsity_lut_o: Tensor,
                 sparsity_block_size: int, n_sparse_blocks: int, triton_block_size: int) -> Tensor:
-        output = torch.zeros(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size), device=x.device)
+        output = torch.empty(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size), device=x.device)
 
         x_b, x_r, x_c = x.size()
         x_b_s, x_r_s, x_c_s = x.stride()

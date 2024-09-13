@@ -14,7 +14,6 @@ from blksprs.ops.transpose import transpose
 from blksprs.utils.tools import slow_to_sparse, slow_to_dense
 
 # TODO Benchmarking
-# TODO Implement Triton kernels for transpose?
 
 # Device setup
 DEVICE = torch.device("cuda:0")
@@ -318,14 +317,16 @@ def test_create_sparsity_layout():
             assert torch.allclose(blksprs_sparsity_layout, sparsity_layout_x.to(torch.int), atol=ATOL, rtol=RTOL)
 
 
+
 # Utility
 
 
 def _get_blocksparse_input(b, m, n, sparsity_block_size, sparsity_percentage, fill_value=0.0):
     x = torch.randn(size=(b, m, n), device=DEVICE)
-    sparsity_layout = torch.ones(size=(b, m // sparsity_block_size, n // sparsity_block_size), device=DEVICE)
     m_s = m // sparsity_block_size
     n_s = n // sparsity_block_size
+
+    sparsity_layout = torch.ones(size=(b, m_s, n_s), device=DEVICE)
 
     num_zero_elements = int(m_s * n_s * (1 - sparsity_percentage))
     for b_i in range(b):

@@ -28,7 +28,7 @@ class _BlocksparseExp(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x: Tensor, sparsity_block_size: int, triton_block_size: int) -> Tensor:
-        output = torch.zeros_like(x)
+        output = torch.empty_like(x)
 
         x_b, x_r, x_c = x.shape
         x_b_s, x_r_s, x_c_s = x.stride()
