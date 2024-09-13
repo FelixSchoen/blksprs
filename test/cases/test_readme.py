@@ -1,37 +1,3 @@
-# blksprs
-
-## Overview
-
-A lightweight library for operations on blocksparse matrices in PyTorch.
-
-Currently supported operations (includes gradient calculation):
-
-- Sparse matrix multiplication (_supports any combination of sparse and dense matrices due to support for `sparse = sparse @ sparse` matmul_)
-- Softmax
-- Transposition
-- Conversion from and to sparse form
-
-As with this library sparse matrices are represented using a tuple of `(matrix, sparsity_layout, sparsity_block_size)`, any element-wise operations can be applied in regular torch-like fashion.
-These include, e.g.,
-
-- Element-wise addition and subtraction
-- Element-wise multiplication and division
-- Element-wise exponentiation
-- ...
-
-## Installation
-
-We recommend installing blksprs from [PyPI](https://pypi.org/project/blksprs/) using pip:
-
-```pip install blksprs```
-
-## Changelog
-
-See [`CHANGELOG.md`](https://github.com/FelixSchoen/blksprs/blob/main/CHANGELOG.md) for a detailed changelog.
-
-## Usage
-
-```python
 import torch
 
 from blksprs.layouting.sparsity_layout import create_sparsity_layout
@@ -121,4 +87,14 @@ def _get_random_sparsity_layout(b, m, n, sparsity_block_size, sparsity_percentag
         sparsity_layout[b_i, indices // n_s, indices % n_s] = 0
 
     return sparsity_layout
-```
+
+
+import pytest
+
+
+@pytest.fixture(scope="session", autouse=True)
+def setup():
+    torch.manual_seed(0)
+    torch.set_printoptions(edgeitems=64, linewidth=10000)
+    normal_repr = torch.Tensor.__repr__
+    torch.Tensor.__repr__ = lambda self: f"{self.shape}, {self.dtype}:\n{normal_repr(self)}"
