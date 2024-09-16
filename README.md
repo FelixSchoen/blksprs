@@ -2,7 +2,7 @@
 
 ## Overview
 
-A lightweight library for operations on blocksparse matrices in PyTorch.
+A lightweight and efficient library for operations on blocksparse matrices in PyTorch using Triton.
 
 Currently supported operations (includes gradient calculation):
 
@@ -20,6 +20,8 @@ These include, e.g.,
 - ...
 
 ## Installation
+
+Note that due to the dependency on [Triton](https://github.com/triton-lang/triton) this library is only compatible with the Linux platform.
 
 We recommend installing blksprs from [PyPI](https://pypi.org/project/blksprs/) using pip:
 
@@ -56,6 +58,7 @@ def test_readme():
     # Must be a power of two and smaller than or equal to sparsity_block_size
     # If it is set to ``none`` a value will be chosen automatically
     triton_block_size = None
+
 
     # Initialise random (dense) tensors
     x = torch.randn(size=(b, h, m, k), device="cuda")

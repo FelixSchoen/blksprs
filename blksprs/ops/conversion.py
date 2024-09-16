@@ -18,7 +18,6 @@ def to_dense(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, fill_
     """
     validate_dimensions(x)
     validate_contiguous(x, sparsity_layout)
-    validate_dtype_float(x)
     validate_device(x)
     validate_sparsity(sparsity_block_size, (x, sparsity_layout))
 
@@ -131,7 +130,6 @@ def to_sparse(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, trit
     """
     validate_dimensions(x)
     validate_contiguous(x, sparsity_layout)
-    validate_dtype_float(x)
     validate_device(x)
 
     sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
@@ -151,7 +149,7 @@ class _BlocksparseToSparse(torch.autograd.Function):
     def forward(ctx, x: Tensor,
                 sparsity_layout: Tensor, sparsity_lut: Tensor,
                 sparsity_block_size: int, n_sparse_blocks: int, triton_block_size: int) -> Tensor:
-        output = torch.empty(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size), device=x.device)
+        output = torch.empty(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size), dtype=x.dtype, device=x.device)
 
         x_b, x_r, x_c = x.size()
         x_b_s, x_r_s, x_c_s = x.stride()
