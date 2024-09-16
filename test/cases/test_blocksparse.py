@@ -7,7 +7,7 @@ from matplotlib import pyplot as plt
 from blksprs.layouting.sparsity_layout import create_sparsity_layout
 from blksprs.ops.conversion import to_dense, to_sparse
 from blksprs.ops.exp import exp
-from blksprs.ops.matmul_sss import matmul_sss
+from blksprs.ops.matmul import matmul
 from blksprs.ops.row_wise_sum import row_wise_sum
 from blksprs.ops.softmax import softmax
 from blksprs.ops.transpose import transpose
@@ -99,10 +99,10 @@ def test_blksprs_matmul_sss():
             y_blksprs = y.clone().requires_grad_(True)
 
             stock_matmul_out = torch.matmul(x_stock, y_stock)
-            blksprs_matmul_out = matmul_sss(to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
-                                            to_sparse(y_blksprs, sparsity_layout_y, sparsity_block_size),
-                                            sparsity_layout_x, sparsity_layout_y, sparsity_layout_o,
-                                            sparsity_block_size)
+            blksprs_matmul_out = matmul(to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
+                                        to_sparse(y_blksprs, sparsity_layout_y, sparsity_block_size),
+                                        sparsity_layout_x, sparsity_layout_y, sparsity_layout_o,
+                                        sparsity_block_size)
             blksprs_matmul_out_dense = to_dense(blksprs_matmul_out, sparsity_layout_o, sparsity_block_size)
 
             assert torch.allclose(blksprs_matmul_out_dense, stock_matmul_out, atol=ATOL, rtol=RTOL)

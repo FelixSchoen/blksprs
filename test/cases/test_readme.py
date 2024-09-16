@@ -2,7 +2,7 @@ import torch
 
 from blksprs.layouting.sparsity_layout import create_sparsity_layout
 from blksprs.ops.conversion import to_sparse, to_dense
-from blksprs.ops.matmul_sss import matmul_sss
+from blksprs.ops.matmul import matmul
 from blksprs.ops.row_wise_sum import row_wise_sum
 from blksprs.ops.softmax import softmax
 from blksprs.ops.transpose import transpose
@@ -44,8 +44,8 @@ def test_readme():
     y_sparse = to_sparse(y_dense, sparsity_layout_y, sparsity_block_size, triton_block_size=triton_block_size)
 
     # Perform matrix multiplication
-    o_sparse = matmul_sss(x_sparse, y_sparse, sparsity_layout_x, sparsity_layout_y, sparsity_layout_o,
-                          sparsity_block_size, triton_block_size=triton_block_size)
+    o_sparse = matmul(x_sparse, y_sparse, sparsity_layout_x, sparsity_layout_y, sparsity_layout_o,
+                      sparsity_block_size, triton_block_size=triton_block_size)
     o_dense = to_dense(o_sparse, sparsity_layout_o, sparsity_block_size, triton_block_size=triton_block_size)
 
     # Sanity check

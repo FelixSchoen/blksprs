@@ -6,7 +6,8 @@ from triton import language as tl
 from torch import Tensor
 
 from blksprs.utils.tools import get_triton_block_size
-from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_dtype_float, validate_device
+from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_dtype_float, validate_device, \
+    validate_sparsity
 
 
 def transpose(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, triton_block_size: int = None) -> (
@@ -21,6 +22,7 @@ def transpose(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, trit
     validate_contiguous(x)
     validate_dtype_float(x)
     validate_device(x)
+    validate_sparsity(sparsity_block_size, (x, sparsity_layout))
 
     sparsity_layout_t = sparsity_layout.transpose(-1, -2).contiguous()
 

@@ -1,7 +1,7 @@
 import torch
 import triton
-from triton import language as tl
 from torch import Tensor
+from triton import language as tl
 
 from blksprs.utils.tools import get_triton_block_size
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_dtype_float, validate_device

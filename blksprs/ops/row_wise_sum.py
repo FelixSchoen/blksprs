@@ -4,7 +4,8 @@ from torch import Tensor
 from triton import language as tl
 
 from blksprs.utils.tools import get_triton_block_size
-from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_dtype_float, validate_device
+from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_dtype_float, validate_device, \
+    validate_sparsity
 
 
 def row_wise_sum(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int,
@@ -21,6 +22,7 @@ def row_wise_sum(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int,
     validate_contiguous(x)
     validate_dtype_float(x)
     validate_device(x)
+    validate_sparsity(sparsity_block_size, (x, sparsity_layout))
 
     sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
     sparsity_layout_flat = sparsity_layout.reshape(-1)

@@ -9,9 +9,9 @@ from blksprs.utils.validation import validate_contiguous, validate_dimensions, v
     validate_sparsity
 
 
-def matmul_sss(x: Tensor, y: Tensor,
-               sparsity_layout_x: Tensor, sparsity_layout_y: Tensor, sparsity_layout_output: Tensor,
-               sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
+def matmul(x: Tensor, y: Tensor,
+           sparsity_layout_x: Tensor, sparsity_layout_y: Tensor, sparsity_layout_output: Tensor,
+           sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
     """Performs matrix multiplication between two blocksparse tensors.
 
     The desired sparsity layout of the output tensor is used to only calculate blocks that will be present in the output.
@@ -119,16 +119,16 @@ class _BlocksparseMatmulSSS(torch.autograd.Function):
         x_t, sparsity_layout_x_t = transpose(x, sparsity_layout_x, sparsity_block_size, triton_block_size)
         y_t, sparsity_layout_y_t = transpose(y, sparsity_layout_y, sparsity_block_size, triton_block_size)
 
-        grad_x = matmul_sss(grad_output, y_t,
-                            sparsity_layout_o,
-                            sparsity_layout_y_t,
-                            sparsity_layout_x,
-                            sparsity_block_size, triton_block_size)
-        grad_y = matmul_sss(x_t, grad_output,
-                            sparsity_layout_x_t,
-                            sparsity_layout_o,
-                            sparsity_layout_y,
-                            sparsity_block_size, triton_block_size)
+        grad_x = matmul(grad_output, y_t,
+                        sparsity_layout_o,
+                        sparsity_layout_y_t,
+                        sparsity_layout_x,
+                        sparsity_block_size, triton_block_size)
+        grad_y = matmul(x_t, grad_output,
+                        sparsity_layout_x_t,
+                        sparsity_layout_o,
+                        sparsity_layout_y,
+                        sparsity_block_size, triton_block_size)
 
         return grad_x, grad_y, None, None, None, None, None, None, None, None, None
 
