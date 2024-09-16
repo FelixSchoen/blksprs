@@ -10,6 +10,7 @@ from blksprs.ops.exp import exp
 from blksprs.ops.gather import gather
 from blksprs.ops.matmul import matmul
 from blksprs.ops.row_wise_sum import row_wise_sum
+from blksprs.ops.scatter import scatter
 from blksprs.ops.softmax import softmax
 from blksprs.ops.transpose import transpose
 from blksprs.utils.tools import slow_to_sparse, slow_to_dense
@@ -299,14 +300,16 @@ def test_blksprs_exp():
 
 def test_gather():
     for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
-        x = torch.randn(size=(b, m, k), device=DEVICE)
-        sparsity_layout_x = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
+        m = max(m, n)
 
-        i = (torch.randint(0, k, size=(k,), dtype=torch.float, device=DEVICE)
-             .unsqueeze(0).expand(m, k).unsqueeze(0).expand(b, m, k).contiguous())
-        sparsity_layout_i = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
+        x = torch.randn(size=(b, k, m), device=DEVICE)
+        sparsity_layout_x = torch.ones(size=(b, k // sparsity_block_size, m // sparsity_block_size), device=DEVICE)
 
-        sparsity_layout_i_s = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
+        i = (torch.randint(0, n, size=(n,), dtype=torch.int, device=DEVICE)
+             .unsqueeze(0).expand(k, n).unsqueeze(0).expand(b, k, n).contiguous())
+        sparsity_layout_i = torch.ones(size=(b, k // sparsity_block_size, n // sparsity_block_size), device=DEVICE)
+
+        sparsity_layout_i_s = _get_blocksparse_layout(b, k, n, sparsity_block_size, sparsity_percentage)
 
         for x, sparsity_layout_x, i, sparsity_layout_i in [(x, sparsity_layout_x, i, sparsity_layout_i),
                                                            (x, sparsity_layout_x, i, sparsity_layout_i_s), ]:
@@ -328,6 +331,44 @@ def test_gather():
                                                 sparsity_block_size, triton_block_size=triton_block_size)
 
             assert torch.allclose(blksprs_gather_dense_out, stock_gather_rndtrp_out, atol=ATOL, rtol=RTOL)
+
+
+def test_scatter():
+    TEST_CONFIGURATIONS = [
+        # (b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage)
+        # All same
+        (2, 16, 16, 16, 16, 16, 0.75), ]
+
+    for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+        m = max(m, n)
+
+        x = torch.randn(size=(b, k, n), device=DEVICE)
+        # x = torch.ones_like(x)
+        # x = torch.randint(high=k * n, size=(b, k, n), device=DEVICE).float()
+        # x = torch.arange(0, b * k * n, device=DEVICE).reshape(b, k, n).float()
+        sparsity_layout_x = torch.ones(size=(b, k // sparsity_block_size, n // sparsity_block_size), device=DEVICE)
+
+        i = (torch.randint(0, n, size=(n,), dtype=torch.int, device=DEVICE)
+             .unsqueeze(0).expand(k, n).unsqueeze(0).expand(b, k, n).contiguous())
+        i = (torch.arange(0, n, dtype=torch.int, device=DEVICE)
+             .unsqueeze(0).expand(k, n).unsqueeze(0).expand(b, k, n).contiguous())
+        i = torch.zeros_like(i)
+
+        sparsity_layout_o = torch.ones(size=(b, k // sparsity_block_size, m // sparsity_block_size), device=DEVICE)
+
+        stock_out_buffer = torch.zeros(size=(b, k, m), device=DEVICE)
+
+        stock_scatter_out = stock_out_buffer.scatter_reduce(dim=-1, index=i.to(torch.int64), src=x, reduce="sum")
+
+        blksprs_scatter_out = scatter(to_sparse(x, sparsity_layout_x, sparsity_block_size, triton_block_size),
+                                      sparsity_layout_x,
+                                      to_sparse(i, sparsity_layout_x, sparsity_block_size, triton_block_size),
+                                      sparsity_layout_o,
+                                      sparsity_block_size, triton_block_size)
+        blksprs_scatter_dense_out = to_dense(blksprs_scatter_out, sparsity_layout_o, sparsity_block_size,
+                                             triton_block_size=triton_block_size)
+
+        _visualise((stock_scatter_out, "stock_scatter_out"), (blksprs_scatter_dense_out, "blksprs_scatter_dense_out_full"))
 
 
 # Layouting
