@@ -1,16 +1,11 @@
-from typing import Any
-
 import torch
 import triton
-from sympy.codegen.cnodes import static
 from torch import Tensor
 from triton import language as tl
 
-from blksprs.ops.exp import exp
-from blksprs.ops.row_wise_sum import row_wise_sum
 from blksprs.utils.tools import get_triton_block_size
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_dtype_float, validate_device, \
-    validate_sparsity, validate_dtype_int
+    validate_sparsity
 
 
 def gather(x: Tensor, sparsity_layout_x: Tensor, i: Tensor, sparsity_layout_i: Tensor,
@@ -65,14 +60,14 @@ class _BlocksparseGather(torch.autograd.Function):
 
         (_BlocksparseGather.kernel_blocksparse_gather[triton_grid]
          (x,
-          x_b, x_b_s, x_r, x_r_s, x_c, x_c_s,
-          s_l_x_b, s_l_x_b_s, s_l_x_r, s_l_x_r_s, s_l_x_c, s_l_x_c_s,
+          x_b, x_b_s, x_c_s,
+          s_l_x_b, s_l_x_b_s, s_l_x_r_s, s_l_x_c_s,
           sparsity_reverse_lut_x,
           i,
-          i_b, i_b_s, i_r, i_r_s, i_c, i_c_s,
+          i_b, i_b_s, i_r_s, i_c_s,
           output,
-          o_b, o_b_s, o_r, o_r_s, o_c, o_c_s,
-          sparsity_lut_i, s_lut_i_r, s_lut_i_r_s, s_lut_i_c, s_lut_i_c_s,
+          o_b, o_b_s, o_r_s, o_c_s,
+          sparsity_lut_i, s_lut_i_r, s_lut_i_r_s, s_lut_i_c_s,
           sparsity_block_size,
           triton_block_size))
 
@@ -81,14 +76,14 @@ class _BlocksparseGather(torch.autograd.Function):
     @staticmethod
     @triton.jit
     def kernel_blocksparse_gather(x,
-                                  x_b, x_b_s, x_r, x_r_s, x_c, x_c_s,
-                                  s_l_x_b, s_l_x_b_s, s_l_x_r, s_l_x_r_s, s_l_x_c, s_l_x_c_s,
+                                  x_b, x_b_s, x_c_s,
+                                  s_l_x_b, s_l_x_b_s, s_l_x_r_s, s_l_x_c_s,
                                   r_lut_x,
                                   i,
-                                  i_b, i_b_s, i_r, i_r_s, i_c, i_c_s,
+                                  i_b, i_b_s, i_r_s, i_c_s,
                                   o,
-                                  o_b, o_b_s, o_r, o_r_s, o_c, o_c_s,
-                                  s_lut_o, s_lut_o_r, s_lut_o_r_s, s_lut_o_c, s_lut_o_c_s,
+                                  o_b, o_b_s, o_r_s, o_c_s,
+                                  s_lut_o, s_lut_o_r, s_lut_o_r_s, s_lut_o_c_s,
                                   sparsity_block_size,
                                   TRITON_BLOCK_SIZE: tl.constexpr) -> None:
         # Get triton block indices
@@ -125,7 +120,7 @@ class _BlocksparseGather(torch.autograd.Function):
 
         # Load x values
         blk_x_idx = ((rev_idx_spa_x * x_b_s) +
-                     (tl.arange(0, TRITON_BLOCK_SIZE) * o_r_s)[:, None] +
+                     ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
                      (pos_spa_col_x * x_c_s))
         blk_x_msk = (blk_x_idx < x_b * x_b_s)
         blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
