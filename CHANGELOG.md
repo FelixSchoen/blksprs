@@ -8,11 +8,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- Add validation for sparsity of input for ``to_dense``, ``row_wise_sum``, ``softmax``, and ``transpose``
-
+- Add validation for sparsity of input for all applicable functions
+- 
 ### Changed
 
 - Rename ``matmul_sss`` to ``matmul``
+- Improve documentation
+
+### Fixed
+
+- Fix memory leaks of backward passes
 
 ## [1.0] - 2024-09-13
 

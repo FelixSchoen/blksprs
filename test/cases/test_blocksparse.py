@@ -320,7 +320,7 @@ def test_gather():
         sparsity_layout_i_bs = _get_blocksparse_layout(b, k, n, sparsity_block_size, sparsity_percentage)
         i_bs = _blocksparse_roundtrip(i, sparsity_layout_i_bs, sparsity_block_size, triton_block_size)
 
-        x_bs = create_gather_sparsity_layout(x, i_bs, sparsity_layout_i_bs, sparsity_block_size, triton_block_size)
+        # x_bs = create_gather_sparsity_layout(x, i_bs, sparsity_layout_i_bs, sparsity_block_size, triton_block_size)
 
         for x, sparsity_layout_x, i, sparsity_layout_i in [(x, sparsity_layout_x, i, sparsity_layout_i),
                                                            (x, sparsity_layout_x, i_bs, sparsity_layout_i_bs),

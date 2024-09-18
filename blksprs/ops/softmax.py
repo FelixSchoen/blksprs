@@ -6,7 +6,7 @@ from triton import language as tl
 from blksprs.ops.exp import exp
 from blksprs.ops.row_wise_sum import row_wise_sum
 from blksprs.utils.tools import get_triton_block_size
-from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_dtype_float, validate_device, \
+from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity
 
 
@@ -28,7 +28,6 @@ def softmax(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, triton
     """
     validate_dimensions(x)
     validate_contiguous(x)
-    validate_dtype_float(x)
     validate_device(x)
     validate_sparsity(sparsity_block_size, (x, sparsity_layout))
 

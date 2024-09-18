@@ -4,15 +4,28 @@ from torch import Tensor
 from triton import language as tl
 
 from blksprs.utils.tools import get_triton_block_size
-from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_dtype_float, validate_device, \
+from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity, validate_dtype_int
 
 
 def gather(src: Tensor, sparsity_layout_src: Tensor, idx: Tensor, sparsity_layout_idx: Tensor,
            sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
+    """Applies a gather operation on a block-sparse tensor in compressed form.
+
+    Args:
+        src (Tensor): The source block-sparse tensor in compressed form to gather from.
+        sparsity_layout_src (Tensor): The sparsity layout of the source block-sparse tensor.
+        idx (Tensor): The block-sparse indices tensor in compressed form specifying how to gather from the source tensor.
+        sparsity_layout_idx (Tensor): The sparsity layout of the indices block-sparse tensor.
+        sparsity_block_size (int): The size of the sparsity blocks.
+        triton_block_size (int, optional): The block size to use for the triton kernel (default ``None``).
+
+    Returns:
+        Tensor: The result of the gather operation as a block-sparse tensor in compressed form.
+
+    """
     validate_dimensions(src, idx)
     validate_contiguous(src, idx)
-    validate_dtype_float(src)
     validate_dtype_int(idx)
     validate_device(src, idx)
     validate_sparsity(sparsity_block_size, (src, sparsity_layout_src), (idx, sparsity_layout_idx))
@@ -154,6 +167,9 @@ def scatter(src: Tensor, sparsity_layout_src: Tensor,
             idx: Tensor,
             sparsity_layout_tgt: Tensor,
             sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
+    """Wrapper for ``scatter_reduce`` with ``reduce_op="none"``.
+
+    """
     return scatter_reduce(src, sparsity_layout_src,
                           idx,
                           sparsity_layout_tgt,
@@ -166,9 +182,24 @@ def scatter_reduce(src: Tensor, sparsity_layout_src: Tensor,
                    sparsity_layout_tgt: Tensor,
                    sparsity_block_size: int,
                    reduce_op: str = "sum", triton_block_size: int = None) -> Tensor:
+    """Applies a scatter operation on a block-sparse tensor in compressed form.
+
+    Args:
+        src (Tensor): The source block-sparse tensor in compressed form to scatter from.
+        sparsity_layout_src (Tensor): The sparsity layout of the source block-sparse tensor.
+        idx (Tensor): The block-sparse indices tensor in compressed form specifying how to scatter to the target tensor.
+        sparsity_layout_tgt (Tensor): The sparsity layout of the target block-sparse tensor.
+        sparsity_block_size (int): The size of the sparsity blocks.
+        reduce_op (str, optional): The reduction operation to apply during the scatter operation (default ``"sum"``).
+            Supported operations are ``"none"`` and ``"sum"``.
+        triton_block_size (int, optional): The block size to use for the triton kernel (default ``None``).
+
+    Returns:
+        Tensor: The result of the scatter operation as a block-sparse tensor in compressed form.
+
+    """
     validate_dimensions(src, idx)
     validate_contiguous(src, idx)
-    # validate_dtype_float(src)
     validate_dtype_int(idx)
     validate_device(src, idx)
     validate_sparsity(sparsity_block_size, (src, sparsity_layout_src), (idx, sparsity_layout_src))

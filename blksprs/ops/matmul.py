@@ -5,7 +5,7 @@ from triton import language as tl
 
 from blksprs.ops.transpose import transpose
 from blksprs.utils.tools import get_triton_block_size
-from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_dtype_float, validate_device, \
+from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity
 
 
@@ -31,7 +31,6 @@ def matmul(x: Tensor, y: Tensor,
     """
     validate_dimensions(x, y)
     validate_contiguous(x, y)
-    validate_dtype_float(x, y)
     validate_device(x, y)
     validate_sparsity(sparsity_block_size, (x, sparsity_layout_x), (y, sparsity_layout_y))
     if sparsity_layout_x.size(-1) != sparsity_layout_y.size(-2):

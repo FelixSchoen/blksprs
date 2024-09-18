@@ -5,13 +5,12 @@ from triton import language as tl
 
 from blksprs.utils.tools import get_triton_block_size
 from blksprs.utils.validation import validate_triton_block_size, validate_dimensions, validate_device, \
-    validate_dtype_float, validate_contiguous
+    validate_contiguous
 
 
 def create_sparsity_layout(x: Tensor, sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
     validate_dimensions(x)
     validate_contiguous(x)
-    validate_dtype_float(x)
     validate_device(x)
 
     output = torch.zeros(x.size(0), x.size(1) // sparsity_block_size, x.size(2) // sparsity_block_size,
