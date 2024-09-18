@@ -98,10 +98,7 @@ class _BlocksparseMatmulSSS(torch.autograd.Function):
           sparsity_block_size,
           triton_block_size))
 
-        ctx.save_for_backward(x, y)
-        ctx.sparsity_layout_x = sparsity_layout_x
-        ctx.sparsity_layout_y = sparsity_layout_y
-        ctx.sparsity_layout_o = sparsity_layout_o
+        ctx.save_for_backward(x, sparsity_layout_x, y, sparsity_layout_y, sparsity_layout_o)
         ctx.sparsity_block_size = sparsity_block_size
         ctx.triton_block_size = triton_block_size
 
@@ -109,10 +106,7 @@ class _BlocksparseMatmulSSS(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        x, y = ctx.saved_tensors
-        sparsity_layout_x = ctx.sparsity_layout_x
-        sparsity_layout_y = ctx.sparsity_layout_y
-        sparsity_layout_o = ctx.sparsity_layout_o
+        x, sparsity_layout_x, y, sparsity_layout_y, sparsity_layout_o = ctx.saved_tensors
         sparsity_block_size = ctx.sparsity_block_size
         triton_block_size = ctx.triton_block_size
 

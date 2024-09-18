@@ -77,6 +77,7 @@ class _BlocksparseTranspose(torch.autograd.Function):
           triton_block_size))
 
         # Save for backward pass
+        ctx.save_for_backward(sparsity_layout)
         ctx.sparsity_layout = sparsity_layout
         ctx.sparsity_block_size = sparsity_block_size
         ctx.triton_block_size = triton_block_size
@@ -85,7 +86,7 @@ class _BlocksparseTranspose(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        sparsity_layout = ctx.sparsity_layout
+        sparsity_layout = ctx.saved_tensors[0]
         sparsity_block_size = ctx.sparsity_block_size
         triton_block_size = ctx.triton_block_size
 

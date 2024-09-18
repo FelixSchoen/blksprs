@@ -69,7 +69,7 @@ class _BlocksparseToDense(torch.autograd.Function):
           sparsity_block_size,
           triton_block_size))
 
-        ctx.sparsity_layout = sparsity_layout
+        ctx.save_for_backward(sparsity_layout)
         ctx.sparsity_block_size = sparsity_block_size
         ctx.triton_block_size = triton_block_size
 
@@ -77,7 +77,7 @@ class _BlocksparseToDense(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        sparsity_layout = ctx.sparsity_layout
+        sparsity_layout = ctx.saved_tensors[0]
         sparsity_block_size = ctx.sparsity_block_size
         triton_block_size = ctx.triton_block_size
 
@@ -172,7 +172,7 @@ class _BlocksparseToSparse(torch.autograd.Function):
           sparsity_block_size,
           triton_block_size))
 
-        ctx.sparsity_layout = sparsity_layout
+        ctx.save_for_backward(sparsity_layout)
         ctx.sparsity_block_size = sparsity_block_size
         ctx.triton_block_size = triton_block_size
 
@@ -180,7 +180,7 @@ class _BlocksparseToSparse(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        sparsity_layout = ctx.sparsity_layout
+        sparsity_layout = ctx.saved_tensors[0]
         sparsity_block_size = ctx.sparsity_block_size
         triton_block_size = ctx.triton_block_size
 
