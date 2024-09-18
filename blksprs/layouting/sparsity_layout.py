@@ -32,9 +32,9 @@ def create_sparsity_layout(x: Tensor, sparsity_block_size: int, triton_block_siz
 
     (kernel_sparsity_layout[triton_grid]
      (x,
-      x_b, x_b_s, x_r, x_r_s, x_c, x_c_s,
+      x_b, x_b_s, x_r_s, x_c_s,
       output,
-      o_b, o_b_s, o_r, o_r_s, o_c, o_c_s,
+      o_b, o_b_s, o_r_s, o_c_s,
       sparsity_block_size,
       triton_block_size))
 
@@ -43,9 +43,9 @@ def create_sparsity_layout(x: Tensor, sparsity_block_size: int, triton_block_siz
 
 @triton.jit
 def kernel_sparsity_layout(x,
-                           x_b, x_b_s, x_r, x_r_s, x_c, x_c_s,
+                           x_b, x_b_s, x_r_s, x_c_s,
                            o,
-                           o_b, o_b_s, o_r, o_r_s, o_c, o_c_s,
+                           o_b, o_b_s, o_r_s, o_c_s,
                            sparsity_block_size,
                            TRITON_BLOCK_SIZE: tl.constexpr) -> None:
     # Get triton block indices

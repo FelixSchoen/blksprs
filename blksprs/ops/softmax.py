@@ -31,7 +31,10 @@ def softmax(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, triton
     validate_device(x)
     validate_sparsity(sparsity_block_size, (x, sparsity_layout))
 
-    max_val = torch.max(x).item()
+    if x.size(0) != 0:
+        max_val = torch.max(x).item()
+    else:
+        max_val = 0
     x_scaled = x - max_val
 
     sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
