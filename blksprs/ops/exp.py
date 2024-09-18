@@ -4,7 +4,8 @@ from torch import Tensor
 from triton import language as tl
 
 from blksprs.utils.tools import get_triton_block_size
-from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device
+from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
+    validate_sparsity_block_size, validate_triton_block_size
 
 
 def exp(x: Tensor, sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
@@ -27,6 +28,8 @@ def exp(x: Tensor, sparsity_block_size: int, triton_block_size: int = None) -> T
     validate_dimensions(x)
     validate_contiguous(x)
     validate_device(x)
+    validate_sparsity_block_size(sparsity_block_size, x)
+    validate_triton_block_size(triton_block_size, sparsity_block_size)
 
     return _BlocksparseExp.apply(x, sparsity_block_size, triton_block_size)
 

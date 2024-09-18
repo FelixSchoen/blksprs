@@ -5,7 +5,7 @@ from triton import language as tl
 
 from blksprs.utils.tools import get_triton_block_size
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
-    validate_sparsity, validate_dtype_int
+    validate_sparsity, validate_dtype_int, validate_sparsity_block_size, validate_triton_block_size
 
 
 def gather(src: Tensor, sparsity_layout_src: Tensor, idx: Tensor, sparsity_layout_idx: Tensor,
@@ -29,6 +29,8 @@ def gather(src: Tensor, sparsity_layout_src: Tensor, idx: Tensor, sparsity_layou
     validate_dtype_int(idx)
     validate_device(src, idx)
     validate_sparsity(sparsity_block_size, (src, sparsity_layout_src), (idx, sparsity_layout_idx))
+    validate_sparsity_block_size(sparsity_block_size, src, idx)
+    validate_triton_block_size(triton_block_size, sparsity_block_size)
 
     sparsity_layout_x_flat = sparsity_layout_src.reshape(-1)
     sparsity_reverse_lut_x = ((torch.cumsum(sparsity_layout_x_flat, dim=-1) - 1) *
@@ -203,6 +205,8 @@ def scatter_reduce(src: Tensor, sparsity_layout_src: Tensor,
     validate_dtype_int(idx)
     validate_device(src, idx)
     validate_sparsity(sparsity_block_size, (src, sparsity_layout_src), (idx, sparsity_layout_src))
+    validate_sparsity_block_size(sparsity_block_size, src, idx)
+    validate_triton_block_size(triton_block_size, sparsity_block_size)
 
     if reduce_op not in ["none", "sum"]:
         raise ValueError(f"Reduction operation '{reduce_op}' is not supported")

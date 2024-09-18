@@ -5,7 +5,7 @@ from triton import language as tl
 
 from blksprs.utils.tools import get_triton_block_size
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
-    validate_sparsity
+    validate_sparsity, validate_sparsity_block_size, validate_triton_block_size
 
 
 def to_dense(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, fill_value: float = 0,
@@ -29,6 +29,8 @@ def to_dense(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, fill_
     validate_contiguous(x, sparsity_layout)
     validate_device(x)
     validate_sparsity(sparsity_block_size, (x, sparsity_layout))
+    validate_sparsity_block_size(sparsity_block_size, x)
+    validate_triton_block_size(triton_block_size, sparsity_block_size)
 
     sparsity_layout_flat = sparsity_layout.reshape(-1)
     sparsity_reverse_lut = ((torch.cumsum(sparsity_layout_flat, dim=-1) - 1) *
@@ -151,6 +153,8 @@ def to_sparse(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, trit
     validate_dimensions(x)
     validate_contiguous(x, sparsity_layout)
     validate_device(x)
+    validate_sparsity_block_size(sparsity_block_size, x)
+    validate_triton_block_size(triton_block_size, sparsity_block_size)
 
     sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
     n_sparse_blocks = torch.sum(sparsity_layout.to(torch.int)).item()

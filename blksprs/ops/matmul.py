@@ -6,7 +6,7 @@ from triton import language as tl
 from blksprs.ops.transpose import transpose
 from blksprs.utils.tools import get_triton_block_size
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
-    validate_sparsity
+    validate_sparsity, validate_sparsity_block_size, validate_triton_block_size
 
 
 def matmul(x: Tensor, y: Tensor,
@@ -35,6 +35,8 @@ def matmul(x: Tensor, y: Tensor,
     validate_sparsity(sparsity_block_size, (x, sparsity_layout_x), (y, sparsity_layout_y))
     if sparsity_layout_x.size(-1) != sparsity_layout_y.size(-2):
         raise ValueError("Inner dimensions of tensors must match")
+    validate_sparsity_block_size(sparsity_block_size, x, y)
+    validate_triton_block_size(triton_block_size, sparsity_block_size)
 
     sparsity_layout_x_flat = sparsity_layout_x.reshape(-1)
     sparsity_reverse_lut_x = ((torch.cumsum(sparsity_layout_x_flat, dim=-1) - 1) *

@@ -9,7 +9,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - Add validation for sparsity of input for all applicable functions
-- 
+- Add forward and backward functions for block-sparse ``gather`` operation
+- Add forward and backward functions for block-sparse ``scatter_reduce`` operation (gradients only computable with ``reduce_op = 'sum'``)
+- Add wrapper function ``scatter`` (applies ``scatter_reduce`` with ``reduce_op = 'none'``)
+- Add ``build_distribution_layout`` function to create sparsity layout for distribution operations
+
 ### Changed
 
 - Rename ``matmul_sss`` to ``matmul``
