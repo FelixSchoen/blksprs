@@ -8,13 +8,21 @@ from blksprs.utils.validation import validate_contiguous, validate_dimensions, v
 
 
 def exp(x: Tensor, sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
-    """Applies the element-wise exponential function to the input tensor.
+    """Applies the element-wise exponential function to a block-sparse tensor.
 
-        Returns a new tensor with the exponential of the elements of the input tensor.
+    Note:
+        This operation does not consider sparse blocks, i.e., these will not be set to ``e^0``.
+        Consider this when converting back to tensors in regular form.
 
-        Note:
-            This operation does not consider sparse blocks, i.e., these will not be set to ``e^0``.
-            Consider this when converting back to dense tensors.
+    Args:
+        x (Tensor): A block-sparse tensor in compressed form.
+        sparsity_block_size (int): The size of the sparsity blocks.
+        triton_block_size (int): The block size to use for the triton kernel (default ``None``).
+
+    Returns:
+        Tensor: The exponential function applied to all elements of the input tensor as a block-sparse tensor in
+            compressed form.
+
     """
     validate_dimensions(x)
     validate_contiguous(x)

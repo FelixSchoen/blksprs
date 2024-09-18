@@ -11,10 +11,19 @@ from blksprs.utils.validation import validate_contiguous, validate_dimensions, v
 
 
 def softmax(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
-    """Computes the softmax of a blocksparse tensor.
+    """Computes the softmax of a block-sparse tensor in compressed form.
 
     Note:
-        Sparse blocks are not considered for the calculation of the softmax, i.e., assumed to be ``-inf``.
+        Sparse blocks are not considered for the calculation of the softmax, i.e., all values are assumed to be ``-inf``.
+
+    Args:
+        x (Tensor): A block-sparse tensor in compressed form.
+        sparsity_layout (Tensor): The sparsity layout of the block-sparse tensor.
+        sparsity_block_size (int): The size of the sparsity blocks.
+        triton_block_size (int): The block size to use for the triton kernel (default ``None``).
+
+    Returns:
+        Tensor: The result of the softmax operation as a block-sparse tensor in compressed form.
 
     """
     validate_dimensions(x)

@@ -42,10 +42,17 @@ def validate_device(*tensors: Tensor) -> None:
 
 def validate_sparsity(sparsity_block_size: int, *tensor_sparsity_layout_tuples: tuple[Tensor, Tensor]) -> None:
     for (tensor, sparsity_layout) in tensor_sparsity_layout_tuples:
+        validate_sparsity_layout_values(sparsity_layout)
+
         if not (tensor.size(-1) == tensor.size(-2) == sparsity_block_size):
             raise ValueError("Blocks not conforming to sparsity block size")
         if not tensor.size(0) == torch.sum(sparsity_layout.reshape(-1)):
             raise ValueError("Mismatch between sparsity layout and blocks")
+
+
+def validate_sparsity_layout_values(sparsity_layout: Tensor):
+    if not torch.all(torch.logical_or(sparsity_layout == 0, sparsity_layout == 1)):
+        raise ValueError("Sparsity layout values must be either 0 or 1")
 
 
 def validate_triton_block_size(triton_block_size: int, sparsity_block_size: int):

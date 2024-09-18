@@ -10,10 +10,19 @@ from blksprs.utils.validation import validate_contiguous, validate_dimensions, v
 
 def to_dense(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, fill_value: float = 0,
              triton_block_size: int = None) -> Tensor:
-    """Converts a blocksparse tensor to a dense tensor based on the given sparsity layout.
+    """Converts a block-sparse tensor in compressed form to a block-sparse tensor in regular form based on the given
+        sparsity layout.
 
-    The ``fill_value`` is used to fill the resulting dense tensor with a specific value (default ``0``) where the
-     blocksparse tensor is not present.
+    Args:
+        x (Tensor): A block-sparse tensor in compressed form.
+        sparsity_layout (Tensor): The sparsity layout of the block-sparse tensor.
+        sparsity_block_size (int): The size of the sparsity blocks.
+        fill_value (float): The value to fill the resulting dense tensor with where the block-sparse tensor is not
+            present (default ``0``).
+        triton_block_size (int): The block size to use for the triton kernel (default ``None``).
+
+    Returns:
+        Tensor: The block-sparse tensor converted to regular form.
 
     """
     validate_dimensions(x)
@@ -81,7 +90,8 @@ class _BlocksparseToDense(torch.autograd.Function):
         sparsity_block_size = ctx.sparsity_block_size
         triton_block_size = ctx.triton_block_size
 
-        return to_sparse(grad_output, sparsity_layout, sparsity_block_size, triton_block_size), None, None, None, None, None
+        return to_sparse(grad_output, sparsity_layout, sparsity_block_size,
+                         triton_block_size), None, None, None, None, None
 
     @staticmethod
     @triton.jit
@@ -125,7 +135,17 @@ class _BlocksparseToDense(torch.autograd.Function):
 
 
 def to_sparse(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
-    """Converts a dense tensor to a blocksparse tensor based on the given sparsity layout.
+    """Converts a block-sparse tensor in regular form to a block-sparse tensor in compressed form based on the given
+    sparsity layout.
+
+        Args:
+        x (Tensor): A block-sparse tensor in regular form.
+        sparsity_layout (Tensor): The sparsity layout of the block-sparse tensor.
+        sparsity_block_size (int): The size of the sparsity blocks.
+        triton_block_size (int): The block size to use for the triton kernel (default ``None``).
+
+    Returns:
+        Tensor: The block-sparse tensor converted to compressed form.
 
     """
     validate_dimensions(x)
@@ -149,7 +169,8 @@ class _BlocksparseToSparse(torch.autograd.Function):
     def forward(ctx, x: Tensor,
                 sparsity_layout: Tensor, sparsity_lut: Tensor,
                 sparsity_block_size: int, n_sparse_blocks: int, triton_block_size: int) -> Tensor:
-        output = torch.empty(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size), dtype=x.dtype, device=x.device)
+        output = torch.empty(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size), dtype=x.dtype,
+                             device=x.device)
 
         x_b, x_r, x_c = x.size()
         x_b_s, x_r_s, x_c_s = x.stride()

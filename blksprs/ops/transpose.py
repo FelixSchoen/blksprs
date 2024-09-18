@@ -12,10 +12,20 @@ from blksprs.utils.validation import validate_dimensions, validate_contiguous, v
 
 def transpose(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, triton_block_size: int = None) -> (
         Tensor, Tensor):
-    """Transposes a blocksparse tensor.
+    """Transposes a block-sparse tensor in compressed form.
 
     Note:
          Returns the transposed tensor and the sparsity layout of the transposed tensor.
+
+    Args:
+        x (Tensor): A block-sparse tensor in compressed form.
+        sparsity_layout (Tensor): The sparsity layout of the block-sparse tensor.
+        sparsity_block_size (int): The size of the sparsity blocks.
+        triton_block_size (int): The block size to use for the triton kernel (default ``None``).
+
+    Returns:
+        Tensor: The transposed block-sparse tensor in compressed form.
+        Tensor: The sparsity layout of the transposed tensor.
 
     """
     validate_dimensions(x)

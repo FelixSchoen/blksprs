@@ -12,9 +12,21 @@ from blksprs.utils.validation import validate_contiguous, validate_dimensions, v
 def matmul(x: Tensor, y: Tensor,
            sparsity_layout_x: Tensor, sparsity_layout_y: Tensor, sparsity_layout_output: Tensor,
            sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
-    """Performs matrix multiplication between two blocksparse tensors.
+    """Performs matrix multiplication between two block-sparse tensors.
 
-    The desired sparsity layout of the output tensor is used to only calculate blocks that will be present in the output.
+    The sparsity layout of the output tensor is used to only calculate blocks that will be present in the output.
+
+    Args:
+        x (Tensor): A block-sparse tensor in compressed form.
+        y (Tensor): A block-sparse tensor in compressed form.
+        sparsity_layout_x (Tensor): The sparsity layout of the first block-sparse tensor.
+        sparsity_layout_y (Tensor): The sparsity layout of the second block-sparse tensor.
+        sparsity_layout_output (Tensor): The sparsity layout of the output tensor.
+        sparsity_block_size (int): The size of the sparsity blocks.
+        triton_block_size (int, optional): The block size to use for the triton kernel (default ``None``).
+
+    Returns:
+        Tensor: The result of the matrix multiplication as a block-sparse tensor in compressed form.
 
     """
     validate_dimensions(x, y)
