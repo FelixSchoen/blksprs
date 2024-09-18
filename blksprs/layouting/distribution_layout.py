@@ -8,9 +8,22 @@ from blksprs.utils.validation import validate_triton_block_size, validate_dimens
     validate_contiguous
 
 
-def create_distribution_layout(indices: Tensor, sparsity_layout_indices: Tensor,
-                               size_target: torch.Size,
-                               sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
+def build_distribution_layout(indices: Tensor, sparsity_layout_indices: Tensor,
+                              size_target: torch.Size,
+                              sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
+    """Builds the sparsity layout of either the source of a gather or the target of a scatter operation.
+
+    Args:
+        indices (Tensor): The block-sparse indices tensor in compressed form used for the gather or scatter operation.
+        sparsity_layout_indices (Tensor): The sparsity layout of the indices block-sparse tensor.
+        size_target (torch.Size): The size of the block-sparse target tensor in regular form.
+        sparsity_block_size (int): The size of the sparsity blocks.
+        triton_block_size (int, optional): The block size to use for the triton kernel (default ``None``).
+
+    Returns:
+        Tensor: The sparsity layout of the source or target tensor.
+
+    """
     validate_dimensions(indices)
     validate_contiguous(indices)
     validate_device(indices)

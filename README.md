@@ -36,7 +36,7 @@ See [`CHANGELOG.md`](https://github.com/FelixSchoen/blksprs/blob/main/CHANGELOG.
 ```python
 import torch
 
-from blksprs.layouting.sparsity_layout import create_sparsity_layout
+from blksprs.layouting.sparsity_layout import build_sparsity_layout
 from blksprs.ops.conversion import to_sparse, to_dense
 from blksprs.ops.matmul import matmul
 from blksprs.ops.row_wise_sum import row_wise_sum
@@ -59,7 +59,6 @@ def test_readme():
     # If it is set to ``none`` a value will be chosen automatically
     triton_block_size = None
 
-
     # Initialise random (dense) tensors
     x = torch.randn(size=(b, h, m, k), device="cuda")
     y = torch.randn(size=(b, h, n, k), device="cuda").transpose(-1, -2).contiguous()
@@ -69,8 +68,8 @@ def test_readme():
     y_dense, y_shape_original = do_shape_blocksparse(y)
 
     # Create sparsity layouts from existing tensors
-    sparsity_layout_x = create_sparsity_layout(x_dense, sparsity_block_size, triton_block_size=triton_block_size)
-    sparsity_layout_y = create_sparsity_layout(y_dense, sparsity_block_size, triton_block_size=triton_block_size)
+    sparsity_layout_x = build_sparsity_layout(x_dense, sparsity_block_size, triton_block_size=triton_block_size)
+    sparsity_layout_y = build_sparsity_layout(y_dense, sparsity_block_size, triton_block_size=triton_block_size)
 
     # Create random sparsity layout for output tensor
     sparsity_layout_o = _get_random_sparsity_layout(b * h, m, n, sparsity_block_size, sparsity_percentage)
@@ -96,7 +95,7 @@ def test_readme():
     assert torch.allclose(o_dense, o_torch_round_trip, atol=2e-2)  # Note that small numerical differences are expected
 
     # Assert that the output has the correct sparsity layout
-    actual_sparsity_layout_o = create_sparsity_layout(o_dense, sparsity_block_size, triton_block_size=triton_block_size)
+    actual_sparsity_layout_o = build_sparsity_layout(o_dense, sparsity_block_size, triton_block_size=triton_block_size)
     assert torch.allclose(actual_sparsity_layout_o, sparsity_layout_o)
 
     # Convert output tensor back to original shape

@@ -4,8 +4,8 @@ import pytest
 import torch
 from matplotlib import pyplot as plt
 
-from blksprs.layouting.distribution_layout import create_distribution_layout
-from blksprs.layouting.sparsity_layout import create_sparsity_layout
+from blksprs.layouting.distribution_layout import build_distribution_layout
+from blksprs.layouting.sparsity_layout import build_sparsity_layout
 from blksprs.ops.conversion import to_dense, to_sparse
 from blksprs.ops.distribution import scatter_reduce, gather
 from blksprs.ops.exp import exp
@@ -16,7 +16,6 @@ from blksprs.ops.transpose import transpose
 
 # TODO Benchmarking
 # TODO Validate sparsity_block_size power of 2
-# TODO more test cases with sparsity
 
 # Device setup
 DEVICE = torch.device("cuda:0")
@@ -329,7 +328,7 @@ def test_gather():
         sparsity_layout_i_bs = _get_blocksparse_layout(b, k, n, sparsity_block_size, sparsity_percentage)
         i_bs = _blocksparse_roundtrip(i, sparsity_layout_i_bs, sparsity_block_size, triton_block_size)
 
-        sparsity_layout_x_bs = create_distribution_layout(
+        sparsity_layout_x_bs = build_distribution_layout(
             to_sparse(i, sparsity_layout_i, sparsity_block_size, triton_block_size),
             sparsity_layout_i, x.size(), sparsity_block_size, triton_block_size)
 
@@ -379,9 +378,9 @@ def test_scatter():
         x_bs = _blocksparse_roundtrip(x, sparsity_layout_x_bs, sparsity_block_size, triton_block_size)
         i_bs = _blocksparse_roundtrip(i, sparsity_layout_x_bs, sparsity_block_size, triton_block_size)
 
-        sparsity_layout_o_bs = create_distribution_layout(
+        sparsity_layout_o_bs = build_distribution_layout(
             to_sparse(i, sparsity_layout_x, sparsity_block_size, triton_block_size),
-            sparsity_layout_x, (b, k, m), sparsity_block_size, triton_block_size)
+            sparsity_layout_x, torch.Size((b, k, m)), sparsity_block_size, triton_block_size)
 
         for x, sparsity_layout_x, i, sparsity_layout_i, sparsity_layout_o in [
             (x, sparsity_layout_x, i, sparsity_layout_x, sparsity_layout_o),
@@ -435,7 +434,7 @@ def test_create_sparsity_layout():
             x_sparse = to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size, triton_block_size=triton_block_size)
             x_dense = to_dense(x_sparse, sparsity_layout_x, sparsity_block_size, triton_block_size=triton_block_size)
 
-            blksprs_sparsity_layout = create_sparsity_layout(x_dense, sparsity_block_size, triton_block_size)
+            blksprs_sparsity_layout = build_sparsity_layout(x_dense, sparsity_block_size, triton_block_size)
 
             assert torch.allclose(blksprs_sparsity_layout, sparsity_layout_x.to(torch.int), atol=ATOL, rtol=RTOL)
 
@@ -463,10 +462,10 @@ def test_create_distribution_layout():
             stock_scatter_out = _blocksparse_roundtrip(
                 stock_out_buffer.scatter_reduce(dim=-1, index=i.to(torch.int64), src=src, reduce="sum"),
                 sparsity_layout_tgt, sparsity_block_size, triton_block_size)
-            stock_distribution_layout = create_sparsity_layout(stock_scatter_out, sparsity_block_size,
-                                                               triton_block_size)
+            stock_distribution_layout = build_sparsity_layout(stock_scatter_out, sparsity_block_size,
+                                                              triton_block_size)
 
-            blksprs_distribution_layout = create_distribution_layout(
+            blksprs_distribution_layout = build_distribution_layout(
                 to_sparse(i, sparsity_layout_i, sparsity_block_size, triton_block_size),
                 sparsity_layout_i, tgt.size(), sparsity_block_size, triton_block_size)
 

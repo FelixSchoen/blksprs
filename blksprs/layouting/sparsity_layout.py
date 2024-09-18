@@ -8,7 +8,18 @@ from blksprs.utils.validation import validate_triton_block_size, validate_dimens
     validate_contiguous
 
 
-def create_sparsity_layout(x: Tensor, sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
+def build_sparsity_layout(x: Tensor, sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
+    """Builds the sparsity layout of a dense tensor covering its sparse blocks.
+
+    Args:
+        x (Tensor): A block-sparse (or dense) tensor in regular form.
+        sparsity_block_size (int): The size of the sparsity blocks.
+        triton_block_size (int, optional): The block size to use for the triton kernel (default ``None``).
+
+    Returns:
+        Tensor: The sparsity layout of the input block-sparse (or dense) tensor.
+
+    """
     validate_dimensions(x)
     validate_contiguous(x)
     validate_device(x)
