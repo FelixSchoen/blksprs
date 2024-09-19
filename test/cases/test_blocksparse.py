@@ -6,7 +6,7 @@ import torch
 from matplotlib import pyplot as plt
 
 from blksprs.layouting.distribution_layout import build_distribution_layout
-from blksprs.layouting.sparsity_layout import build_sparsity_layout
+from blksprs.layouting.sparsity_layout import build_sparsity_layout, build_sparsity_layout_adaption
 from blksprs.misc.broadcast_addition import broadcast_addition, broadcast_subtraction
 from blksprs.ops.conversion import to_dense, to_sparse
 from blksprs.ops.distribution import scatter_reduce, gather
@@ -424,7 +424,7 @@ def test_scatter():
 
 # Layouting
 
-def test_create_sparsity_layout():
+def test_build_sparsity_layout():
     for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
         x = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
@@ -441,7 +441,32 @@ def test_create_sparsity_layout():
             assert torch.allclose(blksprs_sparsity_layout, sparsity_layout_x.to(torch.int), atol=ATOL, rtol=RTOL)
 
 
-def test_create_distribution_layout():
+def test_build_sparsity_layout_adaption():
+    for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+        x = torch.randn(size=(b, m, k), device=DEVICE)
+
+        for sparsity_block_size_from, sparsity_block_size_to in [(sparsity_block_size, sparsity_block_size // 4),
+                                                                 (sparsity_block_size, sparsity_block_size // 2),
+                                                                 (sparsity_block_size, sparsity_block_size),
+                                                                 (sparsity_block_size // 4, sparsity_block_size),
+                                                                 (sparsity_block_size // 2, sparsity_block_size)]:
+            triton_block_size = min(triton_block_size, sparsity_block_size_from, sparsity_block_size_to)
+
+            sparsity_layout_x_bs_to = _get_blocksparse_layout(b, m, k, sparsity_block_size_to, sparsity_percentage)
+            x_bs = _blocksparse_roundtrip(x, sparsity_layout_x_bs_to, sparsity_block_size_to, triton_block_size)
+            sparsity_layout_x_bs_from = build_sparsity_layout(x_bs, sparsity_block_size_from, triton_block_size)
+
+            blksprs_sparsity_layout_adaption = build_sparsity_layout_adaption(
+                to_sparse(x_bs, sparsity_layout_x_bs_from, sparsity_block_size_from, triton_block_size),
+                sparsity_layout_x_bs_from,
+                sparsity_block_size_from,
+                sparsity_block_size_to,
+                triton_block_size)
+
+            assert torch.allclose(blksprs_sparsity_layout_adaption, sparsity_layout_x_bs_to, atol=ATOL, rtol=RTOL)
+
+
+def test_build_distribution_layout():
     for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
         m = max(m, n)
 
@@ -513,7 +538,7 @@ def _get_blocksparse_layout(b, m, n, sparsity_block_size, sparsity_percentage):
     m_s = m // sparsity_block_size
     n_s = n // sparsity_block_size
 
-    sparsity_layout = torch.ones(size=(b, m_s, n_s), device=DEVICE)
+    sparsity_layout = torch.ones(size=(b, m_s, n_s), dtype=torch.int, device=DEVICE)
 
     num_zero_elements = int(m_s * n_s * (1 - sparsity_percentage))
     for b_i in range(b):

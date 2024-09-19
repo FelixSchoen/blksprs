@@ -178,10 +178,10 @@ class _BlocksparseToSparse(torch.autograd.Function):
 
         x_b, x_r, x_c = x.size()
         x_b_s, x_r_s, x_c_s = x.stride()
-        o_b, o_r, o_c = output.size()
-        o_b_s, o_r_s, o_c_s = output.stride()
         s_lut_r, s_lut_c = sparsity_lut.size()
         s_lut_r_s, s_lut_c_s = sparsity_lut.stride()
+        o_b, o_r, o_c = output.size()
+        o_b_s, o_r_s, o_c_s = output.stride()
 
         if triton_block_size is None:
             triton_block_size = get_triton_block_size(sparsity_block_size)
@@ -254,3 +254,15 @@ class _BlocksparseToSparse(torch.autograd.Function):
                      ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE) * o_c_s))[None, :])
         blk_o_msk = (blk_o_idx < (pid_blk + 1) * o_b_s)
         tl.store(o + blk_o_idx, blk_d, mask=blk_o_msk)
+
+
+def adapt_layout(x: Tensor, sparsity_layout: Tensor, sparsity_block_size_from: int, sparsity_block_size_to: int,
+                 triton_block_size: int = None) -> tuple[Tensor, Tensor]:
+    validate_dimensions(x)
+    validate_contiguous(x, sparsity_layout)
+    validate_device(x)
+    validate_sparsity(sparsity_block_size_from, (x, sparsity_layout))
+    validate_sparsity_block_size(sparsity_block_size_from, x)
+    validate_sparsity_block_size(sparsity_block_size_to)
+    min_sparsity_block_size = min(sparsity_block_size_from, sparsity_block_size_to)
+    validate_triton_block_size(triton_block_size, min_sparsity_block_size)
