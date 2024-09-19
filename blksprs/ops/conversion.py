@@ -151,7 +151,7 @@ def to_sparse(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, trit
 
     """
     validate_dimensions(x)
-    validate_contiguous(x, sparsity_layout)
+    validate_contiguous(x)
     validate_device(x)
     validate_sparsity_block_size(sparsity_block_size, x)
     validate_triton_block_size(triton_block_size, sparsity_block_size)
@@ -159,7 +159,7 @@ def to_sparse(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, trit
     sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
     n_sparse_blocks = torch.sum(sparsity_layout.to(torch.int)).item()
 
-    validate_contiguous(sparsity_lut)
+    validate_contiguous(sparsity_layout, sparsity_lut)
 
     return _BlocksparseToSparse.apply(x,
                                       sparsity_layout, sparsity_lut,

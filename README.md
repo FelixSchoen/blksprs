@@ -79,8 +79,8 @@ def test_readme():
     y_sparse = to_sparse(y_dense, sparsity_layout_y, sparsity_block_size, triton_block_size=triton_block_size)
 
     # Perform matrix multiplication
-    o_sparse = matmul(x_sparse, y_sparse, sparsity_layout_x, sparsity_layout_y, sparsity_layout_o,
-                      sparsity_block_size, triton_block_size=triton_block_size)
+    o_sparse = matmul(x_sparse, sparsity_layout_x, y_sparse, sparsity_layout_y, sparsity_layout_o, sparsity_block_size,
+                      triton_block_size=triton_block_size)
     o_dense = to_dense(o_sparse, sparsity_layout_o, sparsity_block_size, triton_block_size=triton_block_size)
 
     # Sanity check

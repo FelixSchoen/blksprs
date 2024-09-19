@@ -1,3 +1,4 @@
+import random
 from pathlib import Path
 
 import pytest
@@ -6,6 +7,7 @@ from matplotlib import pyplot as plt
 
 from blksprs.layouting.distribution_layout import build_distribution_layout
 from blksprs.layouting.sparsity_layout import build_sparsity_layout
+from blksprs.misc.broadcast_addition import broadcast_addition, broadcast_subtraction
 from blksprs.ops.conversion import to_dense, to_sparse
 from blksprs.ops.distribution import scatter_reduce, gather
 from blksprs.ops.exp import exp
@@ -15,7 +17,6 @@ from blksprs.ops.softmax import softmax
 from blksprs.ops.transpose import transpose
 
 # TODO Benchmarking
-# TODO Validate sparsity_block_size power of 2
 
 # Device setup
 DEVICE = torch.device("cuda:0")
@@ -74,7 +75,9 @@ RTOL = 1e-2
 
 @pytest.fixture(scope="session", autouse=True)
 def setup():
-    torch.manual_seed(0)
+    seed = random.randint(0, 2 ** 32 - 1)
+    print("Random Seed:", seed)
+    torch.manual_seed(seed)
     torch.set_printoptions(edgeitems=64, linewidth=10000)
     override_pytorch_repr()
 
@@ -108,10 +111,9 @@ def test_blksprs_matmul_sss():
             y_blksprs = y.clone().requires_grad_(True)
 
             stock_matmul_out = torch.matmul(x_stock, y_stock)
-            blksprs_matmul_out = matmul(to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
-                                        to_sparse(y_blksprs, sparsity_layout_y, sparsity_block_size),
-                                        sparsity_layout_x, sparsity_layout_y, sparsity_layout_o,
-                                        sparsity_block_size)
+            blksprs_matmul_out = matmul(to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size), sparsity_layout_x,
+                                        to_sparse(y_blksprs, sparsity_layout_y, sparsity_block_size), sparsity_layout_y,
+                                        sparsity_layout_o, sparsity_block_size)
             blksprs_matmul_dense_out = to_dense(blksprs_matmul_out, sparsity_layout_o, sparsity_block_size)
 
             assert torch.allclose(blksprs_matmul_dense_out, stock_matmul_out, atol=ATOL, rtol=RTOL)
@@ -470,6 +472,39 @@ def test_create_distribution_layout():
                 sparsity_layout_i, tgt.size(), sparsity_block_size, triton_block_size)
 
             torch.allclose(blksprs_distribution_layout, stock_distribution_layout, atol=ATOL, rtol=RTOL)
+
+
+# Misc
+
+def test_broadcast_addition():
+    for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+        x = torch.randint(high=m, size=(b, m), device=DEVICE)
+        y = torch.randint(high=m, size=(b, m), device=DEVICE)
+
+        sparsity_layout_o = torch.ones(size=(b, m // sparsity_block_size, m // sparsity_block_size), device=DEVICE)
+        sparsity_layout_o_bs = _get_blocksparse_layout(b, m, m, sparsity_block_size, sparsity_percentage)
+
+        for x, y, sparsity_layout_o in [(x, y, sparsity_layout_o), (x, y, sparsity_layout_o_bs)]:
+            stock_broadcast_addition = _blocksparse_roundtrip(torch.add(x.unsqueeze(-1), y.unsqueeze(-2)),
+                                                              sparsity_layout_o, sparsity_block_size,
+                                                              triton_block_size).to(torch.float)
+            blksprs_broadcast_addition_out = broadcast_addition(x, y, sparsity_layout_o,
+                                                                sparsity_block_size, triton_block_size)
+            blksprs_broadcast_addition_dense_out = to_dense(blksprs_broadcast_addition_out, sparsity_layout_o,
+                                                            sparsity_block_size, triton_block_size=triton_block_size)
+
+            stock_broadcast_subtraction = _blocksparse_roundtrip(torch.sub(x.unsqueeze(-1), y.unsqueeze(-2)),
+                                                                 sparsity_layout_o, sparsity_block_size,
+                                                                 triton_block_size).to(torch.float)
+            blksprs_broadcast_subtraction = broadcast_subtraction(x, y, sparsity_layout_o,
+                                                                  sparsity_block_size, triton_block_size)
+            blksprs_broadcast_subtraction_dense_out = to_dense(blksprs_broadcast_subtraction, sparsity_layout_o,
+                                                               sparsity_block_size, triton_block_size=triton_block_size)
+
+            assert torch.allclose(blksprs_broadcast_addition_dense_out, stock_broadcast_addition,
+                                  atol=ATOL, rtol=RTOL)
+            assert torch.allclose(blksprs_broadcast_subtraction_dense_out, stock_broadcast_subtraction,
+                                  atol=ATOL, rtol=RTOL)
 
 
 # Utility
