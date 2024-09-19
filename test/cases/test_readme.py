@@ -10,7 +10,7 @@ from blksprs.utils.tools import do_shape_blocksparse, undo_shape_blocksparse
 
 
 def test_readme():
-    # Set up parameters
+    # Set up parameters (batch size, number of heads, dimensions for matrices (m, k) and (n, k))
     b, h, m, n, k = 2, 4, 64, 64, 16
 
     # Percentage of blocks that will be sparse in the output for demonstration purposes

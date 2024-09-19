@@ -2,16 +2,20 @@
 
 ## Overview
 
-A lightweight and efficient library for operations on blocksparse matrices in PyTorch using Triton.
+A lightweight and efficient library for operations on block-sparse matrices in PyTorch using Triton.
 
 Currently supported operations (includes gradient calculation):
 
-- Sparse matrix multiplication (_supports any combination of sparse and dense matrices due to support for `sparse = sparse @ sparse` matmul_)
+- Sparse matrix multiplication (_supports any combination of sparse and dense matrices due to support
+  for `sparse = sparse @ sparse` matmul_)
 - Softmax
 - Transposition
+- Gather
+- Scatter (_supports either no reduction or summation, gradients are only available for summation_)
 - Conversion from and to sparse form
 
-As with this library sparse matrices are represented using a tuple of `(matrix, sparsity_layout, sparsity_block_size)`, any element-wise operations can be applied in regular torch-like fashion.
+As with this library sparse matrices are represented using a tuple of `(matrix, sparsity_layout, sparsity_block_size)`,
+any element-wise operations can be applied in regular torch-like fashion.
 These include, e.g.,
 
 - Element-wise addition and subtraction
@@ -19,9 +23,16 @@ These include, e.g.,
 - Element-wise exponentiation
 - ...
 
+Note that in order to correctly apply element-wise operations between two sparse tensors their sparsity layouts have to
+match.
+
+Furthermore, the library provides a set of utility functions for the creation of sparsity layouts based on existing
+dense tensors.
+
 ## Installation
 
-Note that due to the dependency on [Triton](https://github.com/triton-lang/triton) this library is only compatible with the Linux platform.
+Note that due to the dependency on [Triton](https://github.com/triton-lang/triton) this library is only compatible with
+the Linux platform.
 
 We recommend installing blksprs from [PyPI](https://pypi.org/project/blksprs/) using pip:
 
@@ -32,6 +43,13 @@ We recommend installing blksprs from [PyPI](https://pypi.org/project/blksprs/) u
 See [`CHANGELOG.md`](https://github.com/FelixSchoen/blksprs/blob/main/CHANGELOG.md) for a detailed changelog.
 
 ## Usage
+
+We provide an example below to demonstrate the usage of the library.
+For more detailed examples, please refer to
+the [test cases](https://github.com/FelixSchoen/blksprs/blob/main/test/cases/test_blocksparse.py) which cover all
+implemented operations and functions.
+The example below can also be found in
+the [test cases](https://github.com/FelixSchoen/blksprs/blob/main/test/cases/test_readme.py).
 
 ```python
 import torch
@@ -46,7 +64,7 @@ from blksprs.utils.tools import do_shape_blocksparse, undo_shape_blocksparse
 
 
 def test_readme():
-    # Set up parameters
+    # Set up parameters (batch size, number of heads, dimensions for matrices (m, k) and (n, k))
     b, h, m, n, k = 2, 4, 64, 64, 16
 
     # Percentage of blocks that will be sparse in the output for demonstration purposes
