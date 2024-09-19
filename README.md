@@ -2,7 +2,7 @@
 
 ## Overview
 
-A lightweight library for operations on blocksparse matrices in PyTorch.
+A lightweight and efficient library for operations on blocksparse matrices in PyTorch using Triton.
 
 Currently supported operations (includes gradient calculation):
 
@@ -21,6 +21,8 @@ These include, e.g.,
 
 ## Installation
 
+Note that due to the dependency on [Triton](https://github.com/triton-lang/triton) this library is only compatible with the Linux platform.
+
 We recommend installing blksprs from [PyPI](https://pypi.org/project/blksprs/) using pip:
 
 ```pip install blksprs```
@@ -34,9 +36,9 @@ See [`CHANGELOG.md`](https://github.com/FelixSchoen/blksprs/blob/main/CHANGELOG.
 ```python
 import torch
 
-from blksprs.layouting.sparsity_layout import create_sparsity_layout
+from blksprs.layouting.sparsity_layout import build_sparsity_layout
 from blksprs.ops.conversion import to_sparse, to_dense
-from blksprs.ops.matmul_sss import matmul_sss
+from blksprs.ops.matmul import matmul
 from blksprs.ops.row_wise_sum import row_wise_sum
 from blksprs.ops.softmax import softmax
 from blksprs.ops.transpose import transpose
@@ -57,7 +59,6 @@ def test_readme():
     # If it is set to ``none`` a value will be chosen automatically
     triton_block_size = None
 
-
     # Initialise random (dense) tensors
     x = torch.randn(size=(b, h, m, k), device="cuda")
     y = torch.randn(size=(b, h, n, k), device="cuda").transpose(-1, -2).contiguous()
@@ -67,8 +68,8 @@ def test_readme():
     y_dense, y_shape_original = do_shape_blocksparse(y)
 
     # Create sparsity layouts from existing tensors
-    sparsity_layout_x = create_sparsity_layout(x_dense, sparsity_block_size, triton_block_size=triton_block_size)
-    sparsity_layout_y = create_sparsity_layout(y_dense, sparsity_block_size, triton_block_size=triton_block_size)
+    sparsity_layout_x = build_sparsity_layout(x_dense, sparsity_block_size, triton_block_size=triton_block_size)
+    sparsity_layout_y = build_sparsity_layout(y_dense, sparsity_block_size, triton_block_size=triton_block_size)
 
     # Create random sparsity layout for output tensor
     sparsity_layout_o = _get_random_sparsity_layout(b * h, m, n, sparsity_block_size, sparsity_percentage)
@@ -78,8 +79,8 @@ def test_readme():
     y_sparse = to_sparse(y_dense, sparsity_layout_y, sparsity_block_size, triton_block_size=triton_block_size)
 
     # Perform matrix multiplication
-    o_sparse = matmul_sss(x_sparse, y_sparse, sparsity_layout_x, sparsity_layout_y, sparsity_layout_o,
-                          sparsity_block_size, triton_block_size=triton_block_size)
+    o_sparse = matmul(x_sparse, sparsity_layout_x, y_sparse, sparsity_layout_y, sparsity_layout_o, sparsity_block_size,
+                      triton_block_size=triton_block_size)
     o_dense = to_dense(o_sparse, sparsity_layout_o, sparsity_block_size, triton_block_size=triton_block_size)
 
     # Sanity check
@@ -94,7 +95,7 @@ def test_readme():
     assert torch.allclose(o_dense, o_torch_round_trip, atol=2e-2)  # Note that small numerical differences are expected
 
     # Assert that the output has the correct sparsity layout
-    actual_sparsity_layout_o = create_sparsity_layout(o_dense, sparsity_block_size, triton_block_size=triton_block_size)
+    actual_sparsity_layout_o = build_sparsity_layout(o_dense, sparsity_block_size, triton_block_size=triton_block_size)
     assert torch.allclose(actual_sparsity_layout_o, sparsity_layout_o)
 
     # Convert output tensor back to original shape

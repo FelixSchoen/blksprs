@@ -5,13 +5,23 @@ from triton import language as tl
 
 from blksprs.utils.tools import get_triton_block_size
 from blksprs.utils.validation import validate_triton_block_size, validate_dimensions, validate_device, \
-    validate_dtype_float, validate_contiguous
+    validate_contiguous
 
 
-def create_sparsity_layout(x: Tensor, sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
+def build_sparsity_layout(x: Tensor, sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
+    """Builds the sparsity layout of a dense tensor covering its sparse blocks.
+
+    Args:
+        x (Tensor): A block-sparse (or dense) tensor in regular form.
+        sparsity_block_size (int): The size of the sparsity blocks.
+        triton_block_size (int, optional): The block size to use for the triton kernel (default ``None``).
+
+    Returns:
+        Tensor: The sparsity layout of the input block-sparse (or dense) tensor.
+
+    """
     validate_dimensions(x)
     validate_contiguous(x)
-    validate_dtype_float(x)
     validate_device(x)
 
     output = torch.zeros(x.size(0), x.size(1) // sparsity_block_size, x.size(2) // sparsity_block_size,
@@ -33,9 +43,9 @@ def create_sparsity_layout(x: Tensor, sparsity_block_size: int, triton_block_siz
 
     (kernel_sparsity_layout[triton_grid]
      (x,
-      x_b, x_b_s, x_r, x_r_s, x_c, x_c_s,
+      x_b, x_b_s, x_r_s, x_c_s,
       output,
-      o_b, o_b_s, o_r, o_r_s, o_c, o_c_s,
+      o_b, o_b_s, o_r_s, o_c_s,
       sparsity_block_size,
       triton_block_size))
 
@@ -44,9 +54,9 @@ def create_sparsity_layout(x: Tensor, sparsity_block_size: int, triton_block_siz
 
 @triton.jit
 def kernel_sparsity_layout(x,
-                           x_b, x_b_s, x_r, x_r_s, x_c, x_c_s,
+                           x_b, x_b_s, x_r_s, x_c_s,
                            o,
-                           o_b, o_b_s, o_r, o_r_s, o_c, o_c_s,
+                           o_b, o_b_s, o_r_s, o_c_s,
                            sparsity_block_size,
                            TRITON_BLOCK_SIZE: tl.constexpr) -> None:
     # Get triton block indices

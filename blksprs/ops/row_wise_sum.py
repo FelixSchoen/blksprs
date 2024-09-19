@@ -4,23 +4,39 @@ from torch import Tensor
 from triton import language as tl
 
 from blksprs.utils.tools import get_triton_block_size
-from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_dtype_float, validate_device
+from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
+    validate_sparsity, validate_sparsity_block_size, validate_triton_block_size
 
 
 def row_wise_sum(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int,
                  flag_slice_only: bool = False, triton_block_size: int = None) -> tuple[Tensor, Tensor]:
-    """Computes the row-wise sum of a blocksparse tensor.
+    """Computes the row-wise sum of a block-sparse tensor.
 
-    Returns a blocksparse tensor with only one block per row, where the first entry is the sum of the corresponding row.
+    Returns a block-sparse tensor in compressed form with only one block per row, where the first entry contains the sum
+        of the corresponding row.
 
     Note:
-        If ``flag_slice_only`` is set the output will be of shape ``[batch_size, row_size, 1]``.
+        If ``flag_slice_only`` is set the output will be of shape ``[x.size(0), x.size(1), 1]``.
+
+    Args:
+        x (Tensor): A block-sparse tensor in compressed form.
+        sparsity_layout (Tensor): The sparsity layout of the block-sparse tensor.
+        sparsity_block_size (int): The size of the sparsity blocks.
+        flag_slice_only (bool, optional): If set the output will be of shape ``[x.size(0), x.size(1), 1]``
+            (default ``False``).
+        triton_block_size (int): The block size to use for the triton kernel (default ``None``).
+
+    Returns:
+        tuple[Tensor, Tensor]: A tuple containing a block-sparse tensor in compressed form containing the row-wise sum
+            of the input and the sparsity layout of the output tensor.
 
     """
     validate_dimensions(x)
     validate_contiguous(x)
-    validate_dtype_float(x)
     validate_device(x)
+    validate_sparsity(sparsity_block_size, (x, sparsity_layout))
+    validate_sparsity_block_size(sparsity_block_size, x)
+    validate_triton_block_size(triton_block_size, sparsity_block_size)
 
     sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
     sparsity_layout_flat = sparsity_layout.reshape(-1)

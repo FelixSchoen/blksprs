@@ -1,26 +1,37 @@
-from typing import Any
-
 import torch
 import triton
-from triton import language as tl
 from torch import Tensor
+from triton import language as tl
 
 from blksprs.utils.tools import get_triton_block_size
-from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_dtype_float, validate_device
+from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_device, \
+    validate_sparsity, validate_sparsity_block_size, validate_triton_block_size
 
 
 def transpose(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, triton_block_size: int = None) -> (
         Tensor, Tensor):
-    """Transposes a blocksparse tensor.
+    """Transposes a block-sparse tensor in compressed form.
 
     Note:
          Returns the transposed tensor and the sparsity layout of the transposed tensor.
 
+    Args:
+        x (Tensor): A block-sparse tensor in compressed form.
+        sparsity_layout (Tensor): The sparsity layout of the block-sparse tensor.
+        sparsity_block_size (int): The size of the sparsity blocks.
+        triton_block_size (int): The block size to use for the triton kernel (default ``None``).
+
+    Returns:
+        Tensor: The transposed block-sparse tensor in compressed form.
+        Tensor: The sparsity layout of the transposed tensor.
+
     """
     validate_dimensions(x)
     validate_contiguous(x)
-    validate_dtype_float(x)
     validate_device(x)
+    validate_sparsity(sparsity_block_size, (x, sparsity_layout))
+    validate_sparsity_block_size(sparsity_block_size, x)
+    validate_triton_block_size(triton_block_size, sparsity_block_size)
 
     sparsity_layout_t = sparsity_layout.transpose(-1, -2).contiguous()
 
@@ -75,6 +86,7 @@ class _BlocksparseTranspose(torch.autograd.Function):
           triton_block_size))
 
         # Save for backward pass
+        ctx.save_for_backward(sparsity_layout)
         ctx.sparsity_layout = sparsity_layout
         ctx.sparsity_block_size = sparsity_block_size
         ctx.triton_block_size = triton_block_size
@@ -83,7 +95,7 @@ class _BlocksparseTranspose(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        sparsity_layout = ctx.sparsity_layout
+        sparsity_layout = ctx.saved_tensors[0]
         sparsity_block_size = ctx.sparsity_block_size
         triton_block_size = ctx.triton_block_size
 

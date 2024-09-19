@@ -6,22 +6,37 @@ from triton import language as tl
 from blksprs.ops.exp import exp
 from blksprs.ops.row_wise_sum import row_wise_sum
 from blksprs.utils.tools import get_triton_block_size
-from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_dtype_float, validate_device
+from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
+    validate_sparsity, validate_sparsity_block_size, validate_triton_block_size
 
 
 def softmax(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
-    """Computes the softmax of a blocksparse tensor.
+    """Computes the softmax of a block-sparse tensor in compressed form.
 
     Note:
-        Sparse blocks are not considered for the calculation of the softmax, i.e., assumed to be ``-inf``.
+        Sparse blocks are not considered for the calculation of the softmax, i.e., all values are assumed to be ``-inf``.
+
+    Args:
+        x (Tensor): A block-sparse tensor in compressed form.
+        sparsity_layout (Tensor): The sparsity layout of the block-sparse tensor.
+        sparsity_block_size (int): The size of the sparsity blocks.
+        triton_block_size (int): The block size to use for the triton kernel (default ``None``).
+
+    Returns:
+        Tensor: The result of the softmax operation as a block-sparse tensor in compressed form.
 
     """
     validate_dimensions(x)
     validate_contiguous(x)
-    validate_dtype_float(x)
     validate_device(x)
+    validate_sparsity(sparsity_block_size, (x, sparsity_layout))
+    validate_sparsity_block_size(sparsity_block_size, x)
+    validate_triton_block_size(triton_block_size, sparsity_block_size)
 
-    max_val = torch.max(x).item()
+    if x.size(0) != 0:
+        max_val = torch.max(x).item()
+    else:
+        max_val = 0
     x_scaled = x - max_val
 
     sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
@@ -83,9 +98,7 @@ class _BlocksparseSoftmax(torch.autograd.Function):
           triton_block_size))
 
         # Save for backward pass
-        ctx.save_for_backward(output)
-        ctx.sparsity_layout = sparsity_layout
-        ctx.sparsity_lut = sparsity_lut
+        ctx.save_for_backward(output, sparsity_layout, sparsity_lut)
         ctx.sparsity_block_size = sparsity_block_size
         ctx.triton_block_size = triton_block_size
 
@@ -93,9 +106,7 @@ class _BlocksparseSoftmax(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        o = ctx.saved_tensors[0]
-        sparsity_layout = ctx.sparsity_layout
-        sparsity_lut = ctx.sparsity_lut
+        o, sparsity_layout, sparsity_lut = ctx.saved_tensors
         sparsity_block_size = ctx.sparsity_block_size
         triton_block_size = ctx.triton_block_size
 
