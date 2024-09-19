@@ -11,7 +11,7 @@ from blksprs.utils.validation import validate_triton_block_size, validate_dimens
 
 
 def build_sparsity_layout(x: Tensor, sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
-    """Builds the sparsity layout of a dense tensor covering its sparse blocks.
+    """Builds the sparsity layout of a dense tensor in regular form covering its sparse blocks.
 
     Args:
         x (Tensor): A block-sparse (or dense) tensor in regular form.
@@ -82,25 +82,40 @@ def kernel_sparsity_layout(x,
         tl.store(o + blk_o_idx, 1, mask=blk_o_msk)
 
 
-def build_sparsity_layout_adaption(x: Tensor, sparsity_layout: Tensor,
+def build_sparsity_layout_adaption(x: Tensor, sparsity_layout_from: Tensor,
                                    sparsity_block_size_from: int, sparsity_block_size_to: int,
                                    triton_block_size: int = None) -> Tensor:
+    """Builds the sparsity layout of a block-sparse tensor in compressed form if a different sparsity block size were
+        used.
+        
+    Args:
+        x (Tensor): A block-sparse tensor in compressed form.
+        sparsity_layout_from (Tensor): The sparsity layout of the input block-sparse tensor.
+        sparsity_block_size_from (int): The size of the sparsity blocks of the input tensor.
+        sparsity_block_size_to (int): The desired size of the sparsity blocks for the resulting layout.
+        triton_block_size (int, optional): The block size to use for the triton kernel (default ``None``).
+
+    Returns:
+        Tensor: The sparsity layout in regular form using the new sparsity block size of the input block-sparse tensor
+            in compressed form.
+    
+    """
     validate_dimensions(x)
-    validate_contiguous(x, sparsity_layout)
+    validate_contiguous(x, sparsity_layout_from)
     validate_device(x)
-    validate_sparsity(sparsity_block_size_from, (x, sparsity_layout))
+    validate_sparsity(sparsity_block_size_from, (x, sparsity_layout_from))
     validate_sparsity_block_size(sparsity_block_size_from, x)
     validate_sparsity_block_size(sparsity_block_size_to)
     min_sparsity_block_size = min(sparsity_block_size_from, sparsity_block_size_to)
     validate_triton_block_size(triton_block_size, min_sparsity_block_size)
 
-    sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
+    sparsity_lut = torch.nonzero(sparsity_layout_from).contiguous()
 
-    validate_contiguous(sparsity_layout, sparsity_lut)
+    validate_contiguous(sparsity_layout_from, sparsity_lut)
 
-    o_b = sparsity_layout.size(0)
-    o_r = math.ceil(sparsity_layout.size(1) * sparsity_block_size_from // sparsity_block_size_to)
-    o_c = math.ceil(sparsity_layout.size(2) * sparsity_block_size_from // sparsity_block_size_to)
+    o_b = sparsity_layout_from.size(0)
+    o_r = math.ceil(sparsity_layout_from.size(1) * sparsity_block_size_from // sparsity_block_size_to)
+    o_c = math.ceil(sparsity_layout_from.size(2) * sparsity_block_size_from // sparsity_block_size_to)
 
     output = torch.zeros(o_b, o_r, o_c, device=x.device, dtype=torch.int32)
 

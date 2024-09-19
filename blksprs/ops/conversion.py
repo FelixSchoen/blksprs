@@ -1,8 +1,11 @@
+from typing import Any
+
 import torch
 import triton
 from torch import Tensor
 from triton import language as tl
 
+from blksprs.layouting.sparsity_layout import build_sparsity_layout_adaption
 from blksprs.utils.tools import get_triton_block_size
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity, validate_sparsity_block_size, validate_triton_block_size
@@ -256,13 +259,131 @@ class _BlocksparseToSparse(torch.autograd.Function):
         tl.store(o + blk_o_idx, blk_d, mask=blk_o_msk)
 
 
-def adapt_layout(x: Tensor, sparsity_layout: Tensor, sparsity_block_size_from: int, sparsity_block_size_to: int,
+def adapt_layout(x: Tensor, sparsity_layout_from: Tensor, sparsity_block_size_from: int, sparsity_block_size_to: int,
                  triton_block_size: int = None) -> tuple[Tensor, Tensor]:
     validate_dimensions(x)
-    validate_contiguous(x, sparsity_layout)
+    validate_contiguous(x, sparsity_layout_from)
     validate_device(x)
-    validate_sparsity(sparsity_block_size_from, (x, sparsity_layout))
+    validate_sparsity(sparsity_block_size_from, (x, sparsity_layout_from))
     validate_sparsity_block_size(sparsity_block_size_from, x)
     validate_sparsity_block_size(sparsity_block_size_to)
     min_sparsity_block_size = min(sparsity_block_size_from, sparsity_block_size_to)
     validate_triton_block_size(triton_block_size, min_sparsity_block_size)
+
+    sparsity_lut_from = torch.nonzero(sparsity_layout_from).contiguous()
+
+    sparsity_layout_to = build_sparsity_layout_adaption(x, sparsity_layout_from,
+                                                        sparsity_block_size_from, sparsity_block_size_to,
+                                                        triton_block_size)
+
+    sparsity_layout_to_flat = sparsity_layout_to.reshape(-1)
+    sparsity_reverse_lut_to = ((torch.cumsum(sparsity_layout_to_flat, dim=-1) - 1) *
+                               (sparsity_layout_to_flat == 1) -
+                               (1 * (sparsity_layout_to_flat == 0)))
+
+    n_sparse_blocks_to = torch.sum(sparsity_layout_to.to(torch.int)).item()
+
+    validate_contiguous(sparsity_layout_to, sparsity_lut_from, sparsity_reverse_lut_to)
+
+    return _BlocksparseAdaptLayout.apply(x, sparsity_layout_from, sparsity_lut_from, sparsity_block_size_from,
+                                         sparsity_layout_to, sparsity_reverse_lut_to, sparsity_block_size_to,
+                                         n_sparse_blocks_to, min_sparsity_block_size, triton_block_size)
+
+
+class _BlocksparseAdaptLayout(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, x: Tensor, sparsity_layout_from: Tensor, sparsity_lut_from: Tensor, sparsity_block_size_from: int,
+                sparsity_layout_to: Tensor, sparsity_reverse_lut_to: Tensor, sparsity_block_size_to: int,
+                n_sparse_blocks_to: int, min_sparsity_block_size: int, triton_block_size: int) -> Tensor:
+        output = torch.zeros(size=(n_sparse_blocks_to, sparsity_block_size_to, sparsity_block_size_to),
+                             dtype=x.dtype, device=x.device)
+
+        x_b, x_r, x_c = x.size()
+        x_b_s, x_r_s, x_c_s = x.stride()
+        s_lut_x_r, s_lut_x_c = sparsity_lut_from.size()
+        s_lut_x_r_s, s_lut_x_c_s = sparsity_lut_from.stride()
+        o_b, o_r, o_c = output.size()
+        o_b_s, o_r_s, o_c_s = output.stride()
+        s_l_o_b, s_l_o_r, s_l_o_c = sparsity_layout_to.size()
+        s_l_o_b_s, s_l_o_r_s, s_l_o_c_s = sparsity_layout_to.stride()
+
+        if triton_block_size is None:
+            triton_block_size = get_triton_block_size(min_sparsity_block_size)
+
+        triton_grid = lambda meta: [x_b,
+                                    triton.cdiv(x_r, meta["TRITON_BLOCK_SIZE"]),
+                                    triton.cdiv(x_c, meta["TRITON_BLOCK_SIZE"])]
+
+        (_BlocksparseAdaptLayout.kernel_adapt_layout[triton_grid]
+         (x,
+          x_b, x_b_s, x_r_s, x_c_s,
+          sparsity_lut_from, s_lut_x_r, s_lut_x_r_s, s_lut_x_c_s,
+          output,
+          o_b, o_b_s, o_r_s, o_c_s,
+          s_l_o_b, s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
+          sparsity_reverse_lut_to,
+          sparsity_block_size_from,
+          sparsity_block_size_to,
+          triton_block_size))
+
+        return output
+
+    @staticmethod
+    @triton.jit
+    def kernel_adapt_layout(x,
+                            x_b, x_b_s, x_r_s, x_c_s,
+                            s_lut_x, s_lut_x_r, s_lut_x_r_s, s_lut_x_c_s,
+                            o,
+                            o_b, o_b_s, o_r_s, o_c_s,
+                            s_l_o_b, s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
+                            r_lut_o,
+                            sparsity_block_size_from,
+                            sparsity_block_size_to,
+                            TRITON_BLOCK_SIZE: tl.constexpr) -> None:
+        # Get triton block indices
+        pid_blk = tl.program_id(axis=0)
+        pid_row = tl.program_id(axis=1)
+        pid_col = tl.program_id(axis=2)
+
+        # Get position of current sparsity block consisting of its batch, row, and column index
+        spa_bat_x_idx = (pid_blk * s_lut_x_r_s + 0 * s_lut_x_c_s)
+        spa_bat_x_msk = (spa_bat_x_idx < s_lut_x_r * s_lut_x_r_s)
+        spa_bat_x = tl.load(s_lut_x + spa_bat_x_idx, mask=spa_bat_x_msk)
+
+        spa_row_x_idx = (pid_blk * s_lut_x_r_s + 1 * s_lut_x_c_s)
+        spa_row_x_msk = (spa_row_x_idx < s_lut_x_r * s_lut_x_r_s)
+        spa_row_x = tl.load(s_lut_x + spa_row_x_idx, mask=spa_row_x_msk)
+
+        spa_col_x_idx = (pid_blk * s_lut_x_r_s + 2 * s_lut_x_c_s)
+        spa_col_x_msk = (spa_col_x_idx < s_lut_x_r * s_lut_x_r_s)
+        spa_col_x = tl.load(s_lut_x + spa_col_x_idx, mask=spa_col_x_msk)
+
+        # Load x values
+        blk_x_idx = ((pid_blk * x_b_s) +
+                     ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
+                     ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
+        blk_x_msk = (blk_x_idx < x_b * x_b_s)
+        blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
+
+        # Get equivalent sparsity block in output layout
+        spa_bat_o = spa_bat_x
+        spa_row_o = (spa_row_x * sparsity_block_size_from + pid_row * TRITON_BLOCK_SIZE) // sparsity_block_size_to
+        spa_col_o = (spa_col_x * sparsity_block_size_from + pid_col * TRITON_BLOCK_SIZE) // sparsity_block_size_to
+
+        # Get reverse sparsity indices for x
+        rev_idx_spa_o_idx = (spa_bat_o * s_l_o_b_s +
+                             spa_row_o * s_l_o_r_s +
+                             spa_col_o * s_l_o_c_s)
+        rev_idx_spa_o_msk = (rev_idx_spa_o_idx < s_l_o_b * s_l_o_b_s)
+        rev_idx_spa_o = tl.load(r_lut_o + rev_idx_spa_o_idx, mask=rev_idx_spa_o_msk).to(tl.int32)
+
+        asdf = ((spa_row_x * sparsity_block_size_from) % sparsity_block_size_to) // TRITON_BLOCK_SIZE
+        bsdf = ((spa_col_x * sparsity_block_size_from) % sparsity_block_size_to) // TRITON_BLOCK_SIZE
+
+        # Store x values
+        blk_o_idx = ((rev_idx_spa_o * o_b_s) +
+                     ((asdf * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
+                     ((bsdf * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
+        blk_o_msk = (blk_o_idx < o_b * o_b_s)
+        tl.store(o + blk_o_idx, blk_x, mask=blk_o_msk)
