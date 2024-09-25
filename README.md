@@ -1,5 +1,8 @@
 # blksprs
 
+[![GitHub Release](https://img.shields.io/github/v/release/FelixSchoen/blksprs?include_prereleases&label=Latest%20Release)](https://github.com/FelixSchoen/blksprs/releases)
+[![Python Version](https://img.shields.io/badge/Python%20Version-3.11-blue)](https://www.python.org/downloads/release/python-3119/)
+
 ## Overview
 
 A lightweight and efficient library for operations on block-sparse matrices in PyTorch using Triton.
