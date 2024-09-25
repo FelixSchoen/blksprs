@@ -10,7 +10,7 @@ def do_shape_blocksparse(x: Tensor):
 
 
 def undo_shape_blocksparse(x: Tensor, shape: Size):
-    if x.shape[-2:] == shape[-2:]:
+    if x.shape[:-2] == shape[:-2]:
         return x
 
     return x.reshape((*shape[:-2], *x.shape[-2:]))
