@@ -1,5 +1,8 @@
 # blksprs
 
+[![GitHub Release](https://img.shields.io/github/v/release/FelixSchoen/blksprs?include_prereleases&label=Latest%20Release)](https://github.com/FelixSchoen/blksprs/releases)
+[![Python Version](https://img.shields.io/badge/Python%20Version-3.11-blue)](https://www.python.org/downloads/release/python-3119/)
+
 ## Overview
 
 A lightweight and efficient library for operations on block-sparse matrices in PyTorch using Triton.
@@ -12,7 +15,8 @@ Currently supported operations (includes gradient calculation):
 - Transposition
 - Gather
 - Scatter (_supports either no reduction or summation, gradients are only available for summation_)
-- Conversion from and to sparse form
+- Conversion to and from sparse form
+- Conversion to different sparsity layouts and different sparsity block sizes
 
 As with this library sparse matrices are represented using a tuple of `(matrix, sparsity_layout, sparsity_block_size)`,
 any element-wise operations can be applied in regular torch-like fashion.
@@ -37,6 +41,11 @@ the Linux platform.
 We recommend installing blksprs from [PyPI](https://pypi.org/project/blksprs/) using pip:
 
 ```pip install blksprs```
+
+### Dependencies
+
+- [PyTorch](https://pytorch.org/) (built with v2.4.0)
+- _[Triton](https://github.com/triton-lang/triton) (included with PyTorch)_
 
 ## Changelog
 
