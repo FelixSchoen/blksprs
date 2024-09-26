@@ -10,6 +10,23 @@ from blksprs.utils.validation import validate_contiguous, validate_device, \
 
 def repeat_interleave(x: Tensor, sparsity_layout: Tensor, repeats: int,
                       sparsity_block_size: int, triton_block_size: int = None) -> tuple[Tensor, Tensor]:
+    """Repeats and interleaves the block-sparse tensor in compressed form.
+
+    Repeats each matrix contained in the tensors by ``repeats`` amount and places them consecutively in the output
+        tensor.
+
+    Args:
+        x (Tensor): A block-sparse tensor in compressed form.
+        sparsity_layout (Tensor): The sparsity layout of the block-sparse tensor.
+        repeats (int): The number of times to repeat the matrices.
+        sparsity_block_size (int): The size of the sparsity blocks.
+        triton_block_size (int): The block size to use for the triton kernel (default ``None``).
+
+    Returns:
+        Tensor: A block-sparse tensor in compressed form containing the repeated and interleaved matrices.
+        Tensor: The sparsity layout of the resulting output tensor.
+
+    """
     validate_dimensions(x)
     validate_contiguous(x)
     validate_device(x)
@@ -22,15 +39,14 @@ def repeat_interleave(x: Tensor, sparsity_layout: Tensor, repeats: int,
 
     sparsity_layout_output_flat = sparsity_layout_output.reshape(-1)
     sparsity_output_reverse_lut = ((torch.cumsum(sparsity_layout_output_flat, dim=-1) - 1) *
-                            (sparsity_layout_output_flat == 1) -
-                            (1 * (sparsity_layout_output_flat == 0)))
+                                   (sparsity_layout_output_flat == 1) -
+                                   (1 * (sparsity_layout_output_flat == 0)))
 
     n_sparse_blocks = torch.sum(sparsity_layout.to(torch.int)).item()
 
     validate_contiguous(sparsity_layout, sparsity_lut, sparsity_layout_output, sparsity_output_reverse_lut)
 
-    # TODO make empty
-    output = torch.ones(n_sparse_blocks * repeats, sparsity_block_size, sparsity_block_size,
+    output = torch.empty(n_sparse_blocks * repeats, sparsity_block_size, sparsity_block_size,
                          dtype=x.dtype, device=x.device)
 
     x_b, x_r, x_c = x.size()
