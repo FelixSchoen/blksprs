@@ -129,7 +129,7 @@ class _BlocksparseTranspose(torch.autograd.Function):
         spa_col_msk = (spa_col_idx < s_lut_r * s_lut_r_s)
         spa_col = tl.load(s_lut + spa_col_idx, mask=spa_col_msk)
 
-        # Get reverse sparsity indices
+        # Get reverse sparsity index
         rev_idx_spa_idx = (spa_bat * s_l_b_s +
                            spa_row * s_l_r_s +
                            spa_col * s_l_c_s)

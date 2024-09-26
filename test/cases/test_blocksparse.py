@@ -8,6 +8,7 @@ from matplotlib import pyplot as plt
 from blksprs.layouting.distribution_layout import build_distribution_layout
 from blksprs.layouting.sparsity_layout import build_sparsity_layout, build_sparsity_layout_adaption
 from blksprs.misc.broadcast_addition import broadcast_addition, broadcast_subtraction
+from blksprs.misc.repeat_interleave import repeat_interleave
 from blksprs.ops.conversion import to_dense, to_sparse, adapt_layout
 from blksprs.ops.distribution import scatter_reduce, gather
 from blksprs.ops.exp import exp
@@ -75,7 +76,14 @@ RTOL = 1e-2
 
 @pytest.fixture(scope="session", autouse=True)
 def setup():
-    seed = random.randint(0, 2 ** 32 - 1)
+    use_random_seed = True
+
+    if use_random_seed:
+        seed = random.randint(0, 2 ** 32 - 1)
+    else:
+        seed = 0
+        print("NOT USING RANDOM SEED")
+
     print("Random Seed:", seed)
     torch.manual_seed(seed)
     torch.set_printoptions(edgeitems=64, linewidth=10000)
@@ -542,13 +550,13 @@ def test_build_distribution_layout():
 
 def test_broadcast_addition():
     for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
-        x = torch.randint(high=m, size=(b, m), device=DEVICE)
-        y = torch.randint(high=m, size=(b, m), device=DEVICE)
+        x_d = torch.randint(high=m, size=(b, m), device=DEVICE)
+        y_d = torch.randint(high=m, size=(b, m), device=DEVICE)
 
         sparsity_layout_o = torch.ones(size=(b, m // sparsity_block_size, m // sparsity_block_size), device=DEVICE)
         sparsity_layout_o_bs = _get_blocksparse_layout(b, m, m, sparsity_block_size, sparsity_percentage)
 
-        for x, y, sparsity_layout_o in [(x, y, sparsity_layout_o), (x, y, sparsity_layout_o_bs)]:
+        for x, y, sparsity_layout_o in [(x_d, y_d, sparsity_layout_o), (x_d, y_d, sparsity_layout_o_bs)]:
             stock_broadcast_addition = _blocksparse_roundtrip(torch.add(x.unsqueeze(-1), y.unsqueeze(-2)),
                                                               sparsity_layout_o, sparsity_block_size,
                                                               triton_block_size).to(torch.float)
@@ -569,6 +577,33 @@ def test_broadcast_addition():
                                   atol=ATOL, rtol=RTOL)
             assert torch.allclose(blksprs_broadcast_subtraction_dense_out, stock_broadcast_subtraction,
                                   atol=ATOL, rtol=RTOL)
+
+
+def test_repeat_interleave():
+    for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+        x_d = torch.randint(high=m, size=(b, m, n), device=DEVICE)
+
+        sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, n // sparsity_block_size), device=DEVICE)
+        sparsity_layout_x_bs = _get_blocksparse_layout(b, m, n, sparsity_block_size, sparsity_percentage)
+        x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size, triton_block_size)
+
+        for x, sparsity_layout_x in [(x_d, sparsity_layout_x_d), (x_bs, sparsity_layout_x_bs)]:
+            x_stock = x.clone()
+            x_blksprs = x.clone()
+
+            stock_repeat_interleave_out = _blocksparse_roundtrip(torch.repeat_interleave(x_stock, 3, dim=0),
+                                                                 torch.repeat_interleave(sparsity_layout_x, 3, dim=0),
+                                                                 sparsity_block_size,
+                                                                 triton_block_size)
+
+            blksprs_repeat_interleave_out, sparsity_layout_repeat_interleave = repeat_interleave(
+                to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
+                sparsity_layout_x, 3, sparsity_block_size, triton_block_size)
+            blksprs_repeat_interleave_dense_out = to_dense(blksprs_repeat_interleave_out,
+                                                           sparsity_layout_repeat_interleave,
+                                                           sparsity_block_size, triton_block_size=triton_block_size)
+
+            assert torch.allclose(blksprs_repeat_interleave_dense_out, stock_repeat_interleave_out, atol=ATOL, rtol=RTOL)
 
 
 # Utility
