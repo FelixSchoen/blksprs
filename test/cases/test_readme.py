@@ -3,7 +3,7 @@ import torch
 from blksprs.layouting.sparsity_layout import build_sparsity_layout
 from blksprs.ops.conversion import to_sparse, to_dense
 from blksprs.ops.matmul import matmul
-from blksprs.ops.row_wise_sum import row_wise_sum
+from blksprs.misc.row_wise import row_wise_sum
 from blksprs.ops.softmax import softmax
 from blksprs.ops.transpose import transpose
 from blksprs.utils.tools import do_shape_blocksparse, undo_shape_blocksparse

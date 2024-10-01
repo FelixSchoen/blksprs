@@ -4,7 +4,7 @@ from torch import Tensor
 from triton import language as tl
 
 from blksprs.ops.exp import exp
-from blksprs.ops.row_wise_sum import row_wise_sum
+from blksprs.misc.row_wise import row_wise_sum
 from blksprs.utils.tools import get_triton_block_size
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity, validate_sparsity_block_size, validate_triton_block_size
@@ -64,11 +64,11 @@ class _BlocksparseSoftmax(torch.autograd.Function):
                 sparsity_block_size: int, triton_block_size: int) -> Tensor:
         output = torch.empty_like(x)
 
-        x_b, x_r, x_c = x.shape
+        x_b, x_r, x_c = x.size()
         x_b_s, x_r_s, x_c_s = x.stride()
-        s_lut_r, s_lut_c = sparsity_lut.shape
+        s_lut_r, s_lut_c = sparsity_lut.size()
         s_lut_r_s, s_lut_c_s = sparsity_lut.stride()
-        o_b, o_r, o_c = output.shape
+        o_b, o_r, o_c = output.size()
 
         x_exp = exp(x, sparsity_block_size, triton_block_size=triton_block_size)
         x_exp_row_wise_sum, sparsity_layout_rws = row_wise_sum(x_exp, sparsity_layout, sparsity_block_size,
@@ -174,7 +174,7 @@ class _BlocksparseSoftmax(torch.autograd.Function):
         spa_row_msk = (spa_row_idx < s_lut_r * s_lut_r_s)
         spa_row = tl.load(s_lut + spa_row_idx, mask=spa_row_msk)
 
-        # Get reverse sparsity indices for x
+        # Get reverse sparsity indices for s
         rev_idx_spa_s_idx = (spa_bat * s_l_s_b_s +
                              spa_row * s_l_s_r_s)
         rev_idx_spa_s_msk = (rev_idx_spa_s_idx < s_l_s_b * s_l_s_b_s)
