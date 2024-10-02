@@ -18,7 +18,6 @@ from blksprs.ops.softmax import softmax
 from blksprs.ops.transpose import transpose
 
 # TODO Benchmarking
-# TODO dann softmax damit updaten, dann museformer
 
 # Device setup
 DEVICE = torch.device("cuda:0")
