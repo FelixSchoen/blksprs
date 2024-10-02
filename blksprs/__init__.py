@@ -5,6 +5,10 @@ from blksprs.ops.matmul import matmul
 from blksprs.ops.softmax import softmax
 from blksprs.ops.transpose import transpose
 
+class layout:
+    from blksprs.layouting.distribution_layout import build_distribution_layout
+    from blksprs.layouting.sparsity_layout import build_sparsity_layout, build_sparsity_layout_adaption
+
 class misc:
     from blksprs.misc.broadcast_ops import broadcast_add, broadcast_sub
     from blksprs.misc.repeat_interleave import repeat_interleave
