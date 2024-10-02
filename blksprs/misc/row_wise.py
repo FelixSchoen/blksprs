@@ -171,10 +171,11 @@ def row_wise_max(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int,
     validate_contiguous(sparsity_layout, sparsity_lut,
                         sparsity_layout_output, sparsity_reverse_lut_output)
 
-    output = torch.zeros(size=(n_sparse_blocks_output,
-                               sparsity_block_size,
-                               1 if flag_slice_only else sparsity_block_size),
-                         device=x.device)
+    output = torch.full(size=(n_sparse_blocks_output,
+                              sparsity_block_size,
+                              1 if flag_slice_only else sparsity_block_size),
+                        fill_value=float("-inf"),
+                        device=x.device)
 
     x_b, x_r, x_c = x.size()
     x_b_s, x_r_s, x_c_s = x.stride()
@@ -293,10 +294,13 @@ def row_wise_add(x: Tensor, sparsity_layout_x: Tensor, y: Tensor,
       sparsity_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
       y, y_b, y_b_s, y_r_s, y_c_s,
       s_l_y_b, s_l_y_b_s, s_l_y_r_s,
+      sparsity_reverse_lut_rwm,
       output,
       o_b, o_b_s, o_r_s, o_c_s,
       triton_block_size
       ))
+
+    return output
 
 
 @triton.jit
@@ -348,6 +352,9 @@ def kernel_blocksparse_row_wise_add(x,
 
     # Compute exp
     buf = blk_x + tl.broadcast_to(blk_s, (TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE))
+
+    # debug
+    asdf = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), 1.0, dtype=tl.float32)
 
     # Store block
     blk_o_idx = ((pid_blk * o_b_s) +

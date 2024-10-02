@@ -18,6 +18,7 @@ from blksprs.ops.softmax import softmax
 from blksprs.ops.transpose import transpose
 
 # TODO Benchmarking
+# TODO dann softmax damit updaten, dann museformer
 
 # Device setup
 DEVICE = torch.device("cuda:0")
@@ -76,7 +77,7 @@ RTOL = 1e-2
 
 @pytest.fixture(scope="session", autouse=True)
 def setup():
-    use_random_seed = True
+    use_random_seed = False
 
     if use_random_seed:
         seed = random.randint(0, 2 ** 32 - 1)
@@ -300,9 +301,11 @@ def test_blksprs_row_wise_max():
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
         sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
-        x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size, triton_block_size)
+        x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size, triton_block_size,
+                                      fill_value=float("-inf"))
 
-        for x, sparsity_layout_x in [(x_d, sparsity_layout_x_d), (x_bs, sparsity_layout_x_bs)]:
+        for x, sparsity_layout_x in [(x_bs, sparsity_layout_x_bs), (x_d, sparsity_layout_x_d),
+                                     (x_bs, sparsity_layout_x_bs)]:
             x_stock = x.clone().requires_grad_(True)
             x_blksprs = x.clone().requires_grad_(True)
 
@@ -310,11 +313,12 @@ def test_blksprs_row_wise_max():
             blksprs_row_wise_max_out, sparsity_layout_output = row_wise_max(
                 to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size), sparsity_layout_x, sparsity_block_size)
             blksprs_row_wise_max_dense_out = to_dense(blksprs_row_wise_max_out, sparsity_layout_output,
-                                                      sparsity_block_size)
+                                                      sparsity_block_size, fill_value=float("-inf"))
 
             blksprs_row_wise_max_out_slice = blksprs_row_wise_max_dense_out[..., 0]
 
-            assert torch.allclose(blksprs_row_wise_max_out_slice, stock_max_out, atol=ATOL, rtol=RTOL)
+            assert torch.allclose(blksprs_row_wise_max_out_slice, stock_max_out, atol=ATOL,
+                                  rtol=RTOL), f"{b}, {m}, {n}, {k}, {sparsity_block_size}"
 
 
 def test_blksprs_row_wise_add():
@@ -323,21 +327,29 @@ def test_blksprs_row_wise_add():
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
         sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
-        x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size, triton_block_size)
+        x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size, triton_block_size,
+                                      fill_value=float("-inf"))
 
-        for x, sparsity_layout_x in [(x_d, sparsity_layout_x_d), (x_bs, sparsity_layout_x_bs)]:
+        for x, sparsity_layout_x in [(x_bs, sparsity_layout_x_bs), (x_d, sparsity_layout_x_d),
+                                     (x_bs, sparsity_layout_x_bs)]:
             x_stock = x.clone().requires_grad_(True)
             x_blksprs = x.clone().requires_grad_(True)
 
-            stock_max_out = (torch.max(x_stock, dim=-1).values).unsqueeze(-1)
-            stock_rwa_out = x_stock + stock_max_out
+            stock_max_out = (torch.max(_blocksparse_roundtrip(x_stock, sparsity_layout_x,
+                                                              sparsity_block_size, triton_block_size=triton_block_size),
+                                       dim=-1).values).unsqueeze(-1)
+            stock_rwa_out = _blocksparse_roundtrip(x_stock + stock_max_out, sparsity_layout_x,
+                                                   sparsity_block_size, triton_block_size=triton_block_size)
 
             blksprs_row_wise_max_out, sparsity_layout_output = row_wise_max(
                 to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size), sparsity_layout_x, sparsity_block_size)
-            blksprs_row_wise_add_out = row_wise_add(x_blksprs, sparsity_layout_x, blksprs_row_wise_max_out,
+            blksprs_row_wise_add_out = row_wise_add(to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
+                                                    sparsity_layout_x, blksprs_row_wise_max_out,
                                                     sparsity_block_size, triton_block_size)
+            blksprs_row_wise_add_dense_out = to_dense(blksprs_row_wise_add_out, sparsity_layout_x,
+                                                      sparsity_block_size)
 
-            assert torch.allclose(blksprs_row_wise_max_out_slice, stock_max_out, atol=ATOL, rtol=RTOL)
+            assert torch.allclose(blksprs_row_wise_add_dense_out, stock_rwa_out, atol=ATOL, rtol=RTOL)
 
 
 def test_blksprs_exp():
