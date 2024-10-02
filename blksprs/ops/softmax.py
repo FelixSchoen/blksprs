@@ -4,7 +4,7 @@ from torch import Tensor
 from triton import language as tl
 
 from blksprs.ops.exp import exp
-from blksprs.misc.row_wise import row_wise_sum
+from blksprs.misc.row_wise import row_wise_sum, row_wise_max, row_wise_sub
 from blksprs.utils.tools import get_triton_block_size
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity, validate_sparsity_block_size, validate_triton_block_size
@@ -33,12 +33,6 @@ def softmax(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, triton
     validate_sparsity_block_size(sparsity_block_size, x)
     validate_triton_block_size(triton_block_size, sparsity_block_size)
 
-    if x.size(0) != 0:
-        max_val = torch.max(x).item()
-    else:
-        max_val = 0
-    x_scaled = x - max_val
-
     sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
 
     sparsity_layout_rws, _ = torch.max(sparsity_layout, dim=-1, keepdim=True)
@@ -49,7 +43,7 @@ def softmax(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, triton
 
     validate_contiguous(sparsity_layout, sparsity_lut, sparsity_reverse_lut_rws)
 
-    return _BlocksparseSoftmax.apply(x_scaled, sparsity_layout,
+    return _BlocksparseSoftmax.apply(x, sparsity_layout,
                                      sparsity_lut,
                                      sparsity_reverse_lut_rws,
                                      sparsity_block_size, triton_block_size)
@@ -70,7 +64,11 @@ class _BlocksparseSoftmax(torch.autograd.Function):
         s_lut_r_s, s_lut_c_s = sparsity_lut.stride()
         o_b, o_r, o_c = output.size()
 
-        x_exp = exp(x, sparsity_block_size, triton_block_size=triton_block_size)
+        x_row_wise_max, sparsity_layout_rwm = row_wise_max(x, sparsity_layout, sparsity_block_size,
+                                                           flag_slice_only=True,
+                                                           triton_block_size=triton_block_size)
+        x_scaled = row_wise_sub(x, sparsity_layout, x_row_wise_max, sparsity_block_size, triton_block_size)
+        x_exp = exp(x_scaled, sparsity_block_size, triton_block_size=triton_block_size)
         x_exp_row_wise_sum, sparsity_layout_rws = row_wise_sum(x_exp, sparsity_layout, sparsity_block_size,
                                                                flag_slice_only=True,
                                                                triton_block_size=triton_block_size)

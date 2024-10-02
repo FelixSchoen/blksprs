@@ -7,7 +7,7 @@ from matplotlib import pyplot as plt
 
 from blksprs.layouting.distribution_layout import build_distribution_layout
 from blksprs.layouting.sparsity_layout import build_sparsity_layout, build_sparsity_layout_adaption
-from blksprs.misc.broadcast_addition import broadcast_addition, broadcast_subtraction
+from blksprs.misc.broadcast_ops import broadcast_add, broadcast_sub
 from blksprs.misc.repeat_interleave import repeat_interleave
 from blksprs.ops.conversion import to_dense, to_sparse, adapt_layout
 from blksprs.ops.distribution import scatter_reduce, gather
@@ -618,16 +618,16 @@ def test_broadcast_addition():
             stock_broadcast_addition = _blocksparse_roundtrip(torch.add(x.unsqueeze(-1), y.unsqueeze(-2)),
                                                               sparsity_layout_o, sparsity_block_size,
                                                               triton_block_size).to(torch.float)
-            blksprs_broadcast_addition_out = broadcast_addition(x, y, sparsity_layout_o,
-                                                                sparsity_block_size, triton_block_size)
+            blksprs_broadcast_addition_out = broadcast_add(x, y, sparsity_layout_o,
+                                                           sparsity_block_size, triton_block_size)
             blksprs_broadcast_addition_dense_out = to_dense(blksprs_broadcast_addition_out, sparsity_layout_o,
                                                             sparsity_block_size, triton_block_size=triton_block_size)
 
             stock_broadcast_subtraction = _blocksparse_roundtrip(torch.sub(x.unsqueeze(-1), y.unsqueeze(-2)),
                                                                  sparsity_layout_o, sparsity_block_size,
                                                                  triton_block_size).to(torch.float)
-            blksprs_broadcast_subtraction = broadcast_subtraction(x, y, sparsity_layout_o,
-                                                                  sparsity_block_size, triton_block_size)
+            blksprs_broadcast_subtraction = broadcast_sub(x, y, sparsity_layout_o,
+                                                          sparsity_block_size, triton_block_size)
             blksprs_broadcast_subtraction_dense_out = to_dense(blksprs_broadcast_subtraction, sparsity_layout_o,
                                                                sparsity_block_size, triton_block_size=triton_block_size)
 

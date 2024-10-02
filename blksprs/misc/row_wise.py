@@ -251,6 +251,20 @@ def kernel_blocksparse_row_wise_max(x,
 
 def row_wise_add(x: Tensor, sparsity_layout_x: Tensor, y: Tensor,
                  sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
+    """For each row in ``y`` adds the value to each value in the corresponding row of the block-sparse tensor ``x``.
+
+    Args:
+        x (Tensor): A block-sparse tensor in compressed form.
+        sparsity_layout_x (Tensor): The sparsity layout of the block-sparse tensor.
+        y (Tensor): A block-sparse tensor in compressed form with only one value per row and a single column of sparse blocks.
+        sparsity_block_size (int): The size of the sparsity blocks.
+        triton_block_size (int): The block size to use for the triton kernel (default ``None``).
+
+    Returns:
+        Tensor: The values of ``x`` with the first value of ``y`` in each row added to them as a block-sparse tensor in
+            compressed form.
+
+    """
     validate_dimensions(x)
     validate_contiguous(x)
     validate_device(x)
@@ -301,6 +315,14 @@ def row_wise_add(x: Tensor, sparsity_layout_x: Tensor, y: Tensor,
       ))
 
     return output
+
+
+def row_wise_sub(x: Tensor, sparsity_layout_x: Tensor, y: Tensor,
+                 sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
+    """Wrapper for ``row_wise_add`` with negated y.
+
+    """
+    return row_wise_add(x, sparsity_layout_x, torch.neg(y), sparsity_block_size, triton_block_size)
 
 
 @triton.jit

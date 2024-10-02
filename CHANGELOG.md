@@ -9,11 +9,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - Add ``row_wise_max`` function
+- Add ``row_wise_add`` function
+- Add ``row_wise_sub`` wrapper function
 
 ### Changed
 
 - Refactor ``row_wise_sum`` function to ``misc`` module
-- Change ``row_wise_sum`` to not make use of ``torch.autograd.Function`` 
+- Change ``row_wise_sum`` to not make use of ``torch.autograd.Function``
+- Rename ``broadcast_addition`` module to ``broadcast_ops``
+- Rename ``broadcast_addition`` and ``broadcast_subtraction`` to ``broadcast_add`` and ``broadcast_sub``
+
+### Fixed
+
+- Fix ``softmax`` shift trick not using per-row maximum values
 
 ## [1.3] - 2024-09-26
 

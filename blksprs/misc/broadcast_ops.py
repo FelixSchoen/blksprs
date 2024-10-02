@@ -8,8 +8,8 @@ from blksprs.utils.validation import validate_contiguous, validate_device, \
     validate_sparsity_block_size, validate_triton_block_size
 
 
-def broadcast_addition(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
-                       sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
+def broadcast_add(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
+                  sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
     """Performs a broadcast and subsequent addition of two dense tensors x and y. Returns a block-sparse tensor in
         compressed form.
 
@@ -70,12 +70,12 @@ def broadcast_addition(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
     return output
 
 
-def broadcast_subtraction(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
-                          sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
-    """Wrapper for ``broadcast_addition`` with negated y.
+def broadcast_sub(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
+                  sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
+    """Wrapper for ``broadcast_add`` with negated y.
 
     """
-    return broadcast_addition(x, torch.neg(y), sparsity_layout_output, sparsity_block_size, triton_block_size)
+    return broadcast_add(x, torch.neg(y), sparsity_layout_output, sparsity_block_size, triton_block_size)
 
 
 @triton.jit
