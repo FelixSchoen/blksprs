@@ -76,7 +76,7 @@ RTOL = 1e-2
 
 @pytest.fixture(scope="session", autouse=True)
 def setup():
-    use_random_seed = False
+    use_random_seed = True
 
     if use_random_seed:
         seed = random.randint(0, 2 ** 32 - 1)
@@ -505,7 +505,8 @@ def test_build_sparsity_layout():
 
             blksprs_sparsity_layout = build_sparsity_layout(x_dense, sparsity_block_size, triton_block_size)
 
-            assert torch.allclose(blksprs_sparsity_layout, sparsity_layout_x.to(torch.int), atol=ATOL, rtol=RTOL)
+            assert torch.allclose(blksprs_sparsity_layout.to(torch.int), sparsity_layout_x.to(torch.int), atol=ATOL,
+                                  rtol=RTOL)
 
 
 def test_build_sparsity_layout_adaption():
@@ -543,7 +544,8 @@ def test_build_sparsity_layout_adaption():
                     sparsity_block_size_to,
                     triton_block_size_c)
 
-                assert torch.allclose(blksprs_sparsity_layout_adaption, sparsity_layout_to, atol=ATOL, rtol=RTOL)
+                assert torch.allclose(blksprs_sparsity_layout_adaption.to(torch.int), sparsity_layout_to.to(torch.int),
+                                      atol=ATOL, rtol=RTOL)
 
                 x_bs_to_cmp = to_sparse(x_stock, sparsity_layout_to, sparsity_block_size_to, triton_block_size_c)
                 blksprs_x_bs_to_cmp = adapt_layout(to_sparse(x_blksprs, sparsity_layout_from,
@@ -600,7 +602,8 @@ def test_build_distribution_layout():
                 to_sparse(i, sparsity_layout_i, sparsity_block_size, triton_block_size),
                 sparsity_layout_i, tgt.size(), sparsity_block_size, triton_block_size)
 
-            torch.allclose(blksprs_distribution_layout, stock_distribution_layout, atol=ATOL, rtol=RTOL)
+            torch.allclose(blksprs_distribution_layout.to(torch.int), stock_distribution_layout.to(torch.int),
+                           atol=ATOL, rtol=RTOL)
 
 
 # Misc

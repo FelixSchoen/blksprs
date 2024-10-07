@@ -31,7 +31,7 @@ def build_distribution_layout(indices: Tensor, sparsity_layout_indices: Tensor,
     sparsity_lut_i = torch.nonzero(sparsity_layout_indices).contiguous()
 
     output = torch.zeros(size_target[0], size_target[1] // sparsity_block_size, size_target[2] // sparsity_block_size,
-                         device=indices.device, dtype=torch.int32)
+                         dtype=torch.bool, device=indices.device)
 
     i_b, i_r, i_c = indices.size()
     i_b_s, i_r_s, i_c_s = indices.stride()

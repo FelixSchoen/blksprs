@@ -27,7 +27,7 @@ def build_sparsity_layout(x: Tensor, sparsity_block_size: int, triton_block_size
     validate_device(x)
 
     output = torch.zeros(x.size(0), x.size(1) // sparsity_block_size, x.size(2) // sparsity_block_size,
-                         device=x.device, dtype=torch.int32)
+                         dtype=torch.bool, device=x.device)
 
     x_b, x_r, x_c = x.size()
     x_b_s, x_r_s, x_c_s = x.stride()
@@ -117,7 +117,7 @@ def build_sparsity_layout_adaption(x: Tensor, sparsity_layout_from: Tensor,
     o_r = math.ceil(sparsity_layout_from.size(1) * sparsity_block_size_from // sparsity_block_size_to)
     o_c = math.ceil(sparsity_layout_from.size(2) * sparsity_block_size_from // sparsity_block_size_to)
 
-    output = torch.zeros(o_b, o_r, o_c, device=x.device, dtype=torch.int32)
+    output = torch.zeros(o_b, o_r, o_c, dtype=torch.bool, device=x.device)
 
     x_b, x_r, x_c = x.size()
     x_b_s, x_r_s, x_c_s = x.stride()

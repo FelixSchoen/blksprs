@@ -62,7 +62,7 @@ def test_readme():
     # Assert that the output has the correct sparsity layout
     actual_sparsity_layout_o = bs.layout.build_sparsity_layout(o_dense, sparsity_block_size,
                                                                triton_block_size=triton_block_size)
-    assert torch.allclose(actual_sparsity_layout_o, sparsity_layout_o)
+    assert torch.allclose(actual_sparsity_layout_o.to(torch.int), sparsity_layout_o)
 
     # Convert output tensor back to original shape
     o = bs.util.undo_shape_blocksparse(o_dense, x_shape_original)
