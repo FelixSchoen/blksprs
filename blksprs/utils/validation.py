@@ -1,9 +1,10 @@
 import torch
 from torch import Tensor
 
+VALIDATION = True
 
 def validate_dimensions(*tensors: Tensor) -> None:
-    if _skip_validation():
+    if _check_skip_validation():
         return
 
     for tensor in tensors:
@@ -12,7 +13,7 @@ def validate_dimensions(*tensors: Tensor) -> None:
 
 
 def validate_contiguous(*tensors: Tensor) -> None:
-    if _skip_validation():
+    if _check_skip_validation():
         return
 
     for tensor in tensors:
@@ -21,7 +22,7 @@ def validate_contiguous(*tensors: Tensor) -> None:
 
 
 def validate_dtype_float(*tensors: Tensor) -> None:
-    if _skip_validation():
+    if _check_skip_validation():
         return
 
     for tensor in tensors:
@@ -30,7 +31,7 @@ def validate_dtype_float(*tensors: Tensor) -> None:
 
 
 def validate_dtype_int(*tensors: Tensor) -> None:
-    if _skip_validation():
+    if _check_skip_validation():
         return
 
     for tensor in tensors:
@@ -39,7 +40,7 @@ def validate_dtype_int(*tensors: Tensor) -> None:
 
 
 def validate_device(*tensors: Tensor) -> None:
-    if _skip_validation():
+    if _check_skip_validation():
         return
 
     device = None
@@ -56,7 +57,7 @@ def validate_device(*tensors: Tensor) -> None:
 
 
 def validate_sparsity(sparsity_block_size: int, *tensor_sparsity_layout_tuples: tuple[Tensor, Tensor]) -> None:
-    if _skip_validation():
+    if _check_skip_validation():
         return
 
     for (tensor, sparsity_layout) in tensor_sparsity_layout_tuples:
@@ -73,7 +74,7 @@ def _validate_sparsity_layout_values(sparsity_layout: Tensor):
         raise ValueError("Sparsity layout values must be either 0 or 1")
 
 def validate_sparsity_block_size(sparsity_block_size: int, *tensors):
-    if _skip_validation():
+    if _check_skip_validation():
         return
 
     if not (sparsity_block_size & (sparsity_block_size - 1)) == 0:
@@ -84,7 +85,7 @@ def validate_sparsity_block_size(sparsity_block_size: int, *tensors):
             raise ValueError("Tensor sizes must be divisible by sparsity block size")
 
 def validate_triton_block_size(triton_block_size: int, sparsity_block_size: int):
-    if _skip_validation():
+    if _check_skip_validation():
         return
 
     if triton_block_size is None:
@@ -93,5 +94,9 @@ def validate_triton_block_size(triton_block_size: int, sparsity_block_size: int)
     if triton_block_size > sparsity_block_size:
         raise ValueError("Triton block size cannot be larger than sparsity block size")
 
-def _skip_validation():
-    return False
+def _check_skip_validation():
+    return not VALIDATION
+
+def _set_skip_validation(skip_validation: bool):
+    global VALIDATION
+    VALIDATION = not skip_validation

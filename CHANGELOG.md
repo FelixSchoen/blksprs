@@ -6,6 +6,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Add ``disable_validation()`` function to disable validation
+
 ### Changed
 
 - Change output dtype of sparsity layouts from ``int32`` to ``bool``

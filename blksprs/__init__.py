@@ -15,4 +15,4 @@ class misc:
     from blksprs.misc.row_wise import row_wise_sum, row_wise_max, row_wise_add, row_wise_sub
 
 class util:
-    from blksprs.utils.tools import do_shape_blocksparse, undo_shape_blocksparse
+    from blksprs.utils.tools import do_shape_blocksparse, undo_shape_blocksparse, disable_validation
