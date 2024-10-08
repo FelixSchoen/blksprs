@@ -25,6 +25,9 @@ def broadcast_add(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
             output tensor corresponds to x(i) + y(j).
 
     """
+    x = x.contiguous()
+    y = y.contiguous()
+
     validate_device(x, y)
     validate_contiguous(x, y)
     if x.size(-1) != y.size(-1):

@@ -30,6 +30,9 @@ def matmul(x: Tensor, sparsity_layout_x: Tensor,
         Tensor: The result of the matrix multiplication as a block-sparse tensor in compressed form.
 
     """
+    x = x.contiguous()
+    y = y.contiguous()
+
     validate_dimensions(x, y)
     validate_contiguous(x, y)
     validate_dtype_float(x, y)

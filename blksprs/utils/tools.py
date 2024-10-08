@@ -4,9 +4,9 @@ from torch import Tensor, Size
 
 def do_shape_blocksparse(x: Tensor):
     if x.dim() == 3:
-        return x, x.size()
+        return x.contiguous(), x.size()
 
-    return x.reshape(-1, x.size(-2), x.size(-1)), x.size()
+    return x.reshape(-1, x.size(-2), x.size(-1)).contiguous(), x.size()
 
 
 def undo_shape_blocksparse(x: Tensor, shape: Size):

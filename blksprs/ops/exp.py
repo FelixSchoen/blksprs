@@ -25,6 +25,8 @@ def exp(x: Tensor, sparsity_block_size: int, triton_block_size: int = None) -> T
             compressed form.
 
     """
+    x = x.contiguous()
+
     validate_dimensions(x)
     validate_contiguous(x)
     validate_device(x)

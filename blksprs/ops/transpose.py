@@ -26,6 +26,8 @@ def transpose(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, trit
         Tensor: The sparsity layout of the transposed tensor.
 
     """
+    x = x.contiguous()
+
     validate_dimensions(x)
     validate_contiguous(x)
     validate_device(x)

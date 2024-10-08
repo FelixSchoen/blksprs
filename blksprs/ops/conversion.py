@@ -28,6 +28,8 @@ def to_dense(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, fill_
         Tensor: The block-sparse tensor converted to regular form.
 
     """
+    x = x.contiguous()
+
     validate_dimensions(x)
     validate_contiguous(x, sparsity_layout)
     validate_device(x)
@@ -156,6 +158,8 @@ def to_sparse(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, trit
         Tensor: The block-sparse tensor converted to compressed form.
 
     """
+    x = x.contiguous()
+
     validate_dimensions(x)
     validate_contiguous(x)
     validate_device(x)
@@ -282,6 +286,8 @@ def adapt_layout(x: Tensor, sparsity_layout_from: Tensor, sparsity_block_size_fr
         Tensor: The block-sparse tensor in compressed form with the adapted sparsity layout and sparsity block size.
 
     """
+    x = x.contiguous()
+
     validate_dimensions(x)
     validate_contiguous(x, sparsity_layout_from)
     validate_device(x)

@@ -27,6 +27,8 @@ def repeat_interleave(x: Tensor, sparsity_layout: Tensor, repeats: int,
         Tensor: The sparsity layout of the resulting output tensor.
 
     """
+    x = x.contiguous()
+
     validate_dimensions(x)
     validate_contiguous(x)
     validate_device(x)

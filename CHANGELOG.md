@@ -9,6 +9,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - Change output dtype of sparsity layouts from ``int32`` to ``bool``
+- Apply ``.contiguous()`` to tensors all ops
 
 ## [1.4] - 2024-10-02
 

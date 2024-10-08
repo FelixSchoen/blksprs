@@ -26,6 +26,8 @@ def softmax(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, triton
         Tensor: The result of the softmax operation as a block-sparse tensor in compressed form.
 
     """
+    x = x.contiguous()
+
     validate_dimensions(x)
     validate_contiguous(x)
     validate_device(x)

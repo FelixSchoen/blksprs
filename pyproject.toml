@@ -1,6 +1,6 @@
 [project]
 name = "blksprs"
-version = "1.4"
+version = "1.4.1"
 authors = [{ name = "Felix Schön", email = "schoen@kr.tuwien.ac.at" }]
 description = "A lightweight library for operations on blocksparse matrices in PyTorch."
 readme = "README.md"
@@ -22,10 +22,8 @@ test = [
     "coverage",
     "matplotlib"
 ]
-deploy = [
-    "build",
-    "twine",
-    "pdoc3"
+build = [
+    "build"
 ]
 
 [build-system]

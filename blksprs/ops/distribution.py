@@ -24,6 +24,9 @@ def gather(src: Tensor, sparsity_layout_src: Tensor, idx: Tensor, sparsity_layou
         Tensor: The result of the gather operation as a block-sparse tensor in compressed form.
 
     """
+    src = src.contiguous()
+    idx = idx.contiguous()
+
     validate_dimensions(src, idx)
     validate_contiguous(src, idx)
     validate_dtype_int(idx)
@@ -200,6 +203,9 @@ def scatter_reduce(src: Tensor, sparsity_layout_src: Tensor,
         Tensor: The result of the scatter operation as a block-sparse tensor in compressed form.
 
     """
+    src = src.contiguous()
+    idx = idx.contiguous()
+
     validate_dimensions(src, idx)
     validate_contiguous(src, idx)
     validate_dtype_int(idx)
