@@ -56,6 +56,7 @@ def row_wise_sum(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int,
     output = torch.zeros(size=(n_sparse_blocks_output,
                                sparsity_block_size,
                                1 if flag_slice_only else sparsity_block_size),
+                         dtype=x.dtype,
                          device=x.device)
 
     x_b, x_r, x_c = x.size()

@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.2] - 2024-10-17
+
+### Fixed
+
+- Fixed output dtype differing from input dtype
+
 ## [1.4.1] - 2024-10-08
 
 ### Added
@@ -13,7 +19,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - Change output dtype of sparsity layouts from ``int32`` to ``bool``
-- Apply ``.contiguous()`` to tensors all ops
+- Apply ``.contiguous()`` to tensors for all ops
 
 ## [1.4] - 2024-10-02
 

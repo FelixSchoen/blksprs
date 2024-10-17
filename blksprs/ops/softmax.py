@@ -127,7 +127,7 @@ class _BlocksparseSoftmax(torch.autograd.Function):
         s_l_s_b, s_l_s_r, s_l_s_c = sparsity_layout_s.size()
         s_l_s_b_s, s_l_s_r_s, s_l_s_c_s = sparsity_layout_s.stride()
 
-        grad_x = torch.empty_like(o)
+        grad_x = torch.empty_like(o, dtype=torch.float)
 
         triton_grid = lambda meta: [o_b,
                                     triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),

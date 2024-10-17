@@ -417,7 +417,8 @@ def test_gather():
             blksprs_gather_dense_out = to_dense(blksprs_gather_out, sparsity_layout_i,
                                                 sparsity_block_size, triton_block_size=triton_block_size)
 
-            assert torch.allclose(blksprs_gather_dense_out, stock_gather_out, atol=ATOL, rtol=RTOL)
+            assert torch.allclose(blksprs_gather_dense_out.to(torch.float), stock_gather_out.to(torch.float),
+                                  atol=ATOL, rtol=RTOL)
 
             target = torch.randn_like(stock_gather_out)
             stock_loss = torch.nn.L1Loss()
@@ -428,7 +429,7 @@ def test_gather():
             stock_loss.backward()
             blksprs_loss.backward()
 
-            assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
+            assert torch.allclose(x_blksprs.grad.to(torch.float), x_stock.grad.to(torch.float), atol=ATOL, rtol=RTOL)
 
 
 def test_scatter():
@@ -633,9 +634,11 @@ def test_broadcast_addition():
             blksprs_broadcast_subtraction_dense_out = to_dense(blksprs_broadcast_subtraction, sparsity_layout_o,
                                                                sparsity_block_size, triton_block_size=triton_block_size)
 
-            assert torch.allclose(blksprs_broadcast_addition_dense_out, stock_broadcast_addition,
+            assert torch.allclose(blksprs_broadcast_addition_dense_out.to(torch.float),
+                                  stock_broadcast_addition.to(torch.float),
                                   atol=ATOL, rtol=RTOL)
-            assert torch.allclose(blksprs_broadcast_subtraction_dense_out, stock_broadcast_subtraction,
+            assert torch.allclose(blksprs_broadcast_subtraction_dense_out.to(torch.float),
+                                  stock_broadcast_subtraction.to(torch.float),
                                   atol=ATOL, rtol=RTOL)
 
 

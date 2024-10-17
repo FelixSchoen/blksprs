@@ -3,13 +3,13 @@ from torch import Tensor
 
 VALIDATION = True
 
-def validate_dimensions(*tensors: Tensor) -> None:
+def validate_dimensions(*tensors: Tensor, dims=3) -> None:
     if _check_skip_validation():
         return
 
     for tensor in tensors:
-        if tensor.dim() != 3:
-            raise ValueError("Tensor must have 3 dimensions")
+        if tensor.dim() != dims:
+            raise ValueError(f"Tensor must have {dims} dimensions")
 
 
 def validate_contiguous(*tensors: Tensor) -> None:
@@ -90,6 +90,9 @@ def validate_triton_block_size(triton_block_size: int, sparsity_block_size: int)
 
     if triton_block_size is None:
         return
+
+    if not (triton_block_size & (triton_block_size - 1)) == 0:
+        raise ValueError("Triton block size must be a power of 2")
 
     if triton_block_size > sparsity_block_size:
         raise ValueError("Triton block size cannot be larger than sparsity block size")

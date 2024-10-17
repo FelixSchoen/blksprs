@@ -41,7 +41,7 @@ def broadcast_add(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
 
     validate_contiguous(sparsity_layout_output, sparsity_lut_o)
 
-    output = torch.zeros(n_sparse_blocks, sparsity_block_size, sparsity_block_size, device=x.device)
+    output = torch.zeros(n_sparse_blocks, sparsity_block_size, sparsity_block_size, dtype=x.dtype, device=x.device)
 
     x_b, x_c = x.size()
     x_b_s, x_c_s = x.stride()
