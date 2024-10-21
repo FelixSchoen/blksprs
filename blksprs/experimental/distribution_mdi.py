@@ -8,7 +8,11 @@ from blksprs.utils.validation import validate_contiguous, validate_dimensions, v
     validate_sparsity, validate_dtype_int, validate_sparsity_block_size, validate_triton_block_size
 
 
-def gather_mdi(src: Tensor, sparsity_layout_src: Tensor, idx_bat: Tensor, idx_col: Tensor, sparsity_layout_idx: Tensor,
+def gather_mdi(src: Tensor, sparsity_layout_src: Tensor,
+               idx_bat: Tensor,
+               idx_row: Tensor,
+               idx_col: Tensor,
+               sparsity_layout_idx: Tensor,
                sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
     src = src.contiguous()
     idx_bat = idx_bat.contiguous()
@@ -92,6 +96,7 @@ class _BlocksparseGatherMDI(torch.autograd.Function):
 
         return scatter_reduce_mdi(grad_output, sparsity_layout_i,
                                   idx_bat,
+                                  None,
                                   idx_col,
                                   sparsity_layout_x,
                                   sparsity_block_size,
@@ -164,6 +169,7 @@ class _BlocksparseGatherMDI(torch.autograd.Function):
 
 def scatter_reduce_mdi(src: Tensor, sparsity_layout_src: Tensor,
                        idx_bat: Tensor,
+                       idx_row: Tensor,
                        idx_col: Tensor,
                        sparsity_layout_tgt: Tensor,
                        sparsity_block_size: int,
@@ -269,7 +275,11 @@ class _BlocksparseScatterReduceMDI(torch.autograd.Function):
         triton_block_size = ctx.triton_block_size
 
         if reduce_op == "sum":
-            return gather_mdi(grad_output, sparsity_layout_o, idx_bat, idx_col, sparsity_layout_x, sparsity_block_size,
+            return gather_mdi(grad_output, sparsity_layout_o,
+                              idx_bat,
+                              None,
+                              idx_col,
+                              sparsity_layout_x, sparsity_block_size,
                               triton_block_size=triton_block_size), None, None, None, None, None, None, None, None, None, None
         else:
             raise ValueError(f"Reduction operation '{reduce_op}' does not support backward pass")
@@ -343,7 +353,7 @@ class _BlocksparseScatterReduceMDI(torch.autograd.Function):
             tl.atomic_add(o + blk_o_idx, blk_x, mask=blk_o_msk)
 
 
-def build_distribution_layout_mdi(idx_bat: Tensor, idx_col: Tensor, sparsity_layout_idx: Tensor,
+def build_distribution_layout_mdi(idx_bat: Tensor, idx_row: Tensor, idx_col: Tensor, sparsity_layout_idx: Tensor,
                                   size_target: torch.Size,
                                   sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
     validate_dimensions(idx_bat, idx_col)

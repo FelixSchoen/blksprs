@@ -725,12 +725,13 @@ def test_blksprs_gather_mdi():
             idx_bat_blksprs = idx_bat.clone()
             idx_col_blksprs = idx_col.clone()
 
-            stock_gather_out = _blocksparse_roundtrip(slow_gather_mdi(x_stock, idx_bat_stock, idx_col_stock),
+            stock_gather_out = _blocksparse_roundtrip(slow_gather_mdi(x_stock, idx_bat_stock, None, idx_col_stock),
                                                       sparsity_layout_i, sparsity_block_size, triton_block_size)
             blksprs_gather_mdi_out = gather_mdi(
                 to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size, triton_block_size),
                 sparsity_layout_x,
                 to_sparse(idx_bat_blksprs, sparsity_layout_i, sparsity_block_size, triton_block_size),
+                None,
                 to_sparse(idx_col_blksprs, sparsity_layout_i, sparsity_block_size, triton_block_size),
                 sparsity_layout_i,
                 sparsity_block_size, triton_block_size)
@@ -773,6 +774,7 @@ def test_blksprs_scatter_mdi():
 
         sparsity_layout_o_bs = build_distribution_layout_mdi(
             to_sparse(idx_bat_bs, sparsity_layout_x_d, sparsity_block_size, triton_block_size),
+            None,
             to_sparse(idx_col_bs, sparsity_layout_x_d, sparsity_block_size, triton_block_size),
             sparsity_layout_x_d, torch.Size((b, k, m)), sparsity_block_size, triton_block_size)
 
@@ -788,13 +790,14 @@ def test_blksprs_scatter_mdi():
             idx_col_blksprs = idx_col.clone()
 
             stock_scatter_out = _blocksparse_roundtrip(
-                slow_scatter_reduce_mdi(x_stock, (b, k, m), idx_bat_stock, idx_col_stock),
+                slow_scatter_reduce_mdi(x_stock, (b, k, m), idx_bat_stock, None, idx_col_stock),
                 sparsity_layout_o, sparsity_block_size, triton_block_size)
 
             blksprs_scatter_mdi_out = scatter_reduce_mdi(
                 to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size, triton_block_size),
                 sparsity_layout_x,
                 to_sparse(idx_bat_blksprs, sparsity_layout_x, sparsity_block_size, triton_block_size),
+                None,
                 to_sparse(idx_col_blksprs, sparsity_layout_x, sparsity_block_size, triton_block_size),
                 sparsity_layout_o,
                 sparsity_block_size,
@@ -901,7 +904,7 @@ def slow_to_dense(x, sparsity_layout, sparsity_block_size: int):
     return output
 
 
-def slow_gather_mdi(src, idx_bat, idx_col):
+def slow_gather_mdi(src, idx_bat, idx_row, idx_col):
     output = torch.zeros(size=(idx_bat.size(0), idx_bat.size(1), idx_bat.size(2)), device=src.device)
 
     for b in range(idx_bat.size(0)):
@@ -912,7 +915,7 @@ def slow_gather_mdi(src, idx_bat, idx_col):
     return output
 
 
-def slow_scatter_reduce_mdi(src, tgt_size, idx_bat, idx_col):
+def slow_scatter_reduce_mdi(src, tgt_size, idx_bat, idx_row, idx_col):
     output = torch.zeros(size=tgt_size, device=src.device)
 
     for b in range(idx_bat.size(0)):
