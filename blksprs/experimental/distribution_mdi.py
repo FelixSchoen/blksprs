@@ -78,11 +78,25 @@ class _BlocksparseGatherMDI(torch.autograd.Function):
           sparsity_block_size,
           triton_block_size))
 
-        ctx.save_for_backward(sparsity_layout_x, idx_col, sparsity_layout_i)
+        ctx.save_for_backward(sparsity_layout_x, idx_bat, idx_col, sparsity_layout_i)
         ctx.sparsity_block_size = sparsity_block_size
         ctx.triton_block_size = triton_block_size
 
         return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        sparsity_layout_x, idx_bat, idx_col, sparsity_layout_i = ctx.saved_tensors
+        sparsity_block_size = ctx.sparsity_block_size
+        triton_block_size = ctx.triton_block_size
+
+        return scatter_reduce_mdi(grad_output, sparsity_layout_i,
+                                  idx_bat,
+                                  idx_col,
+                                  sparsity_layout_x,
+                                  sparsity_block_size,
+                                  reduce_op="sum",
+                                  triton_block_size=triton_block_size), None, None, None, None, None, None, None, None
 
     @staticmethod
     @triton.jit
@@ -240,12 +254,25 @@ class _BlocksparseScatterReduceMDI(torch.autograd.Function):
           sparsity_block_size,
           triton_block_size))
 
-        ctx.save_for_backward(sparsity_layout_x, idx_col, sparsity_layout_o)
+        ctx.save_for_backward(sparsity_layout_x, idx_bat, idx_col, sparsity_layout_o)
         ctx.sparsity_block_size = sparsity_block_size
         ctx.reduce_op = reduce_op
         ctx.triton_block_size = triton_block_size
 
         return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        sparsity_layout_x, idx_bat, idx_col, sparsity_layout_o = ctx.saved_tensors
+        sparsity_block_size = ctx.sparsity_block_size
+        reduce_op = ctx.reduce_op
+        triton_block_size = ctx.triton_block_size
+
+        if reduce_op == "sum":
+            return gather_mdi(grad_output, sparsity_layout_o, idx_bat, idx_col, sparsity_layout_x, sparsity_block_size,
+                              triton_block_size=triton_block_size), None, None, None, None, None, None, None, None, None, None
+        else:
+            raise ValueError(f"Reduction operation '{reduce_op}' does not support backward pass")
 
     @staticmethod
     @triton.jit

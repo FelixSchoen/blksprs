@@ -740,6 +740,17 @@ def test_blksprs_gather_mdi():
             assert torch.allclose(blksprs_gather_mdi_dense_out.to(torch.float), stock_gather_out.to(torch.float),
                                   atol=ATOL, rtol=RTOL)
 
+            target = torch.randn_like(stock_gather_out)
+            stock_loss = torch.nn.L1Loss()
+            blksprs_loss = torch.nn.L1Loss()
+            stock_loss = stock_loss(stock_gather_out, target)
+            blksprs_loss = blksprs_loss(blksprs_gather_mdi_dense_out, target)
+
+            stock_loss.backward()
+            blksprs_loss.backward()
+
+            assert torch.allclose(x_blksprs.grad.to(torch.float), x_stock.grad.to(torch.float), atol=ATOL, rtol=RTOL)
+
 
 def test_blksprs_scatter_mdi():
     for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS_FAST:
@@ -780,7 +791,7 @@ def test_blksprs_scatter_mdi():
                 slow_scatter_reduce_mdi(x_stock, (b, k, m), idx_bat_stock, idx_col_stock),
                 sparsity_layout_o, sparsity_block_size, triton_block_size)
 
-            blksprs_scatter_out = scatter_reduce_mdi(
+            blksprs_scatter_mdi_out = scatter_reduce_mdi(
                 to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size, triton_block_size),
                 sparsity_layout_x,
                 to_sparse(idx_bat_blksprs, sparsity_layout_x, sparsity_block_size, triton_block_size),
@@ -788,21 +799,21 @@ def test_blksprs_scatter_mdi():
                 sparsity_layout_o,
                 sparsity_block_size,
                 reduce_op="sum", triton_block_size=triton_block_size)
-            blksprs_scatter_dense_out = to_dense(blksprs_scatter_out, sparsity_layout_o, sparsity_block_size,
-                                                 triton_block_size=triton_block_size)
+            blksprs_scatter_mdi_dense_out = to_dense(blksprs_scatter_mdi_out, sparsity_layout_o, sparsity_block_size,
+                                                     triton_block_size=triton_block_size)
 
-            assert torch.allclose(blksprs_scatter_dense_out, stock_scatter_out, atol=ATOL, rtol=RTOL)
+            assert torch.allclose(blksprs_scatter_mdi_dense_out, stock_scatter_out, atol=ATOL, rtol=RTOL)
 
-            # target = torch.randn_like(stock_scatter_out)
-            # stock_loss = torch.nn.L1Loss()
-            # blksprs_loss = torch.nn.L1Loss()
-            # stock_loss = stock_loss(stock_scatter_out, target)
-            # blksprs_loss = blksprs_loss(blksprs_scatter_dense_out, target)
-            #
-            # stock_loss.backward()
-            # blksprs_loss.backward()
-            #
-            # assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
+            target = torch.randn_like(stock_scatter_out)
+            stock_loss = torch.nn.L1Loss()
+            blksprs_loss = torch.nn.L1Loss()
+            stock_loss = stock_loss(stock_scatter_out, target)
+            blksprs_loss = blksprs_loss(blksprs_scatter_mdi_dense_out, target)
+
+            stock_loss.backward()
+            blksprs_loss.backward()
+
+            assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
 
 
 # Utility
