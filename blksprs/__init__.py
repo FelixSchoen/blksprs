@@ -18,4 +18,4 @@ class util:
     from blksprs.utils.tools import do_shape_blocksparse, undo_shape_blocksparse, disable_validation
 
 class experimental:
-    from blksprs.experimental.distribution_3d import gather_3d
+    from blksprs.experimental.distribution_mdi import gather_mdi

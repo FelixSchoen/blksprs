@@ -35,8 +35,6 @@ def build_distribution_layout(indices: Tensor, sparsity_layout_indices: Tensor,
 
     i_b, i_r, i_c = indices.size()
     i_b_s, i_r_s, i_c_s = indices.stride()
-    s_l_i_b, s_l_i_r, s_l_i_c = sparsity_layout_indices.size()
-    s_l_i_b_s, s_l_i_r_s, s_l_i_c_s = sparsity_layout_indices.stride()
     s_lut_i_r, s_lut_i_c = sparsity_lut_i.size()
     s_lut_i_r_s, s_lut_i_c_s = sparsity_lut_i.stride()
     o_b, o_r, o_c = output.size()
@@ -54,12 +52,10 @@ def build_distribution_layout(indices: Tensor, sparsity_layout_indices: Tensor,
     (kernel_distribution_layout[triton_grid]
      (indices,
       i_b, i_b_s, i_r_s, i_c_s,
-      sparsity_layout_indices,
-      s_l_i_b, s_l_i_b_s, s_l_i_r, s_l_i_r_s, s_l_i_c, s_l_i_c_s,
       sparsity_lut_i,
-      s_lut_i_r, s_lut_i_r_s, s_lut_i_c, s_lut_i_c_s,
+      s_lut_i_r, s_lut_i_r_s, s_lut_i_c_s,
       output,
-      o_b, o_b_s, o_r, o_r_s, o_c, o_c_s,
+      o_b, o_b_s, o_r_s, o_c_s,
       sparsity_block_size,
       triton_block_size))
 
@@ -69,12 +65,10 @@ def build_distribution_layout(indices: Tensor, sparsity_layout_indices: Tensor,
 @triton.jit
 def kernel_distribution_layout(i,
                                i_b, i_b_s, i_r_s, i_c_s,
-                               s_l_i,
-                               s_l_i_b, s_l_i_b_s, s_l_i_r, s_l_i_r_s, s_l_i_c, s_l_i_c_s,
                                s_lut_i,
-                               s_lut_i_r, s_lut_i_r_s, s_lut_i_c, s_lut_i_c_s,
+                               s_lut_i_r, s_lut_i_r_s, s_lut_i_c_s,
                                o,
-                               o_b, o_b_s, o_r, o_r_s, o_c, o_c_s,
+                               o_b, o_b_s, o_r_s, o_c_s,
                                sparsity_block_size,
                                TRITON_BLOCK_SIZE: tl.constexpr) -> None:
     # Get triton block indices
@@ -105,10 +99,3 @@ def kernel_distribution_layout(i,
                  (blk_i * o_c_s))
     blk_o_msk = (blk_o_idx < o_b * o_b_s)
     tl.store(o + blk_o_idx, blk_v, mask=blk_o_msk)
-
-    # if tl.min(blk_x) != 0 or tl.max(blk_x) != 0:
-    #     blk_o_idx = (pid_bat * o_b_s +
-    #                  (((pid_row * TRITON_BLOCK_SIZE) // sparsity_block_size) * o_r_s +
-    #                   ((pid_col * TRITON_BLOCK_SIZE) // sparsity_block_size) * o_c_s))
-    #     blk_o_msk = (blk_o_idx < o_b * o_b_s)
-    #     tl.store(o + blk_o_idx, 1, mask=blk_o_msk)
