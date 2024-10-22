@@ -16,7 +16,7 @@ from blksprs.ops.distribution import scatter_reduce, gather
 from blksprs.ops.exp import exp
 from blksprs.ops.matmul import matmul
 from blksprs.misc.row_wise import row_wise_sum, row_wise_max, row_wise_add
-from blksprs.ops.partitioning import split
+from blksprs.ops.partitioning import split, merge
 from blksprs.ops.softmax import softmax
 from blksprs.ops.transpose import transpose
 
@@ -99,7 +99,7 @@ RTOL = 1e-2
 
 @pytest.fixture(scope="session", autouse=True)
 def setup():
-    use_random_seed = False
+    use_random_seed = True
 
     if use_random_seed:
         seed = random.randint(0, 2 ** 32 - 1)
@@ -544,16 +544,67 @@ def test_blksprs_split():
 
                 assert torch.allclose(blksprs_split_dense_out, stock_split_out, atol=ATOL, rtol=RTOL)
 
-                # target = torch.randn_like(stock_transpose_out)
-                # stock_loss = torch.nn.L1Loss()
-                # blksprs_loss = torch.nn.L1Loss()
-                # stock_loss = stock_loss(stock_transpose_out, target)
-                # blksprs_loss = blksprs_loss(blksprs_transpose_dense_out, target)
-                #
-                # stock_loss.backward()
-                # blksprs_loss.backward()
-                #
-                # assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
+                target = torch.randn_like(stock_split_out)
+                stock_loss = torch.nn.L1Loss()
+                blksprs_loss = torch.nn.L1Loss()
+                stock_loss = stock_loss(stock_split_out, target)
+                blksprs_loss = blksprs_loss(blksprs_split_dense_out, target)
+
+                stock_loss.backward()
+                blksprs_loss.backward()
+
+                assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
+
+
+def test_blksprs_merge():
+    for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+        x_d = torch.randn(size=(b, m, k), device=DEVICE)
+        sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
+
+        sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
+        x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size, triton_block_size)
+
+        num_partitions_values = []
+        x = k // sparsity_block_size
+        while x >= 1:
+            num_partitions_values.append(x)
+            x //= 2
+
+        for num_partitions in num_partitions_values:
+            for x, sparsity_layout_x in [(x_d, sparsity_layout_x_d), (x_bs, sparsity_layout_x_bs)]:
+                x_stock = x.clone().requires_grad_(True)
+                x_blksprs = x.clone().requires_grad_(True)
+
+                stock_split_out = (x_stock.reshape(x_stock.size(0), x_stock.size(1), num_partitions,
+                                                   x_stock.size(2) // num_partitions).permute(0, 2, 1, 3)
+                                   .reshape(x_stock.size(0) * num_partitions, x_stock.size(1),
+                                            x_stock.size(2) // num_partitions))
+                stock_merge_out = (stock_split_out.reshape(stock_split_out.size(0) // num_partitions, num_partitions,
+                                                           stock_split_out.size(1), stock_split_out.size(2))
+                                   .permute(0, 2, 1, 3).reshape(stock_split_out.size(0) // num_partitions,
+                                                                stock_split_out.size(1),
+                                                                stock_split_out.size(2) * num_partitions))
+                blksprs_split_out, sparsity_layout_split = split(
+                    to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
+                    sparsity_layout_x, num_partitions,
+                    sparsity_block_size, triton_block_size)
+                blksprs_merge_out, sparsity_layout_merge = merge(blksprs_split_out, sparsity_layout_split,
+                                                                 num_partitions, sparsity_block_size, triton_block_size)
+                blksprs_merge_dense_out = to_dense(blksprs_merge_out, sparsity_layout_merge, sparsity_block_size)
+
+                assert torch.allclose(stock_merge_out, x_stock, atol=ATOL, rtol=RTOL)
+                assert torch.allclose(blksprs_merge_dense_out, stock_merge_out, atol=ATOL, rtol=RTOL)
+
+                target = torch.randn_like(stock_merge_out)
+                stock_loss = torch.nn.L1Loss()
+                blksprs_loss = torch.nn.L1Loss()
+                stock_loss = stock_loss(stock_merge_out, target)
+                blksprs_loss = blksprs_loss(blksprs_merge_dense_out, target)
+
+                stock_loss.backward()
+                blksprs_loss.backward()
+
+                assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
 
 
 # Layouting

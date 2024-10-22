@@ -90,7 +90,6 @@ class _BlocksparseTranspose(torch.autograd.Function):
 
         # Save for backward pass
         ctx.save_for_backward(sparsity_layout_o)
-        ctx.sparsity_layout = sparsity_layout_o
         ctx.sparsity_block_size = sparsity_block_size
         ctx.triton_block_size = triton_block_size
 
