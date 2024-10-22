@@ -12,6 +12,20 @@ from blksprs.utils.validation import validate_dimensions, validate_contiguous, v
 
 def split(x: Tensor, sparsity_layout: Tensor, partitions: int,
           sparsity_block_size: int, triton_block_size: int = None) -> (Tensor, Tensor):
+    """Splits a block-sparse tensor in compressed form along the last dimension into partitions.
+
+    Args:
+        x (Tensor): A block-sparse tensor in compressed form.
+        sparsity_layout (Tensor): The sparsity layout of the block-sparse tensor.
+        partitions (int): The number of partitions to split the block-sparse tensor into.
+        sparsity_block_size (int): The size of the sparsity blocks.
+        triton_block_size (int): The block size to use for the triton kernel (default ``None``).
+
+    Returns:
+        Tensor: The block-sparse tensor split into partitions in compressed form.
+        Tensor: The sparsity layout of the output tensor.
+
+    """
     x = x.contiguous()
 
     validate_dimensions(x)
@@ -70,6 +84,20 @@ class _BlocksparseSplit(torch.autograd.Function):
 
 def merge(x: Tensor, sparsity_layout: Tensor, partitions: int,
           sparsity_block_size: int, triton_block_size: int = None) -> (Tensor, Tensor):
+    """Merges the specified partitions of a block-sparse tensor in compressed form along the last dimension.
+
+    Args:
+        x (Tensor): A block-sparse tensor in compressed form.
+        sparsity_layout (Tensor): The sparsity layout of the block-sparse tensor.
+        partitions (int): The number of partitions to be merged.
+        sparsity_block_size (int): The size of the sparsity blocks.
+        triton_block_size (int): The block size to use for the triton kernel (default ``None``).
+
+    Returns:
+        Tensor: The merged block-sparse tensor in compressed form.
+        Tensor: The sparsity layout of the output tensor.
+
+    """
     x = x.contiguous()
 
     validate_dimensions(x)
