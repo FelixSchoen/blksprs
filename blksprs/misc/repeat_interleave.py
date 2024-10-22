@@ -35,7 +35,7 @@ def repeat_interleave(x: Tensor, sparsity_layout: Tensor, repeats: int,
     validate_sparsity_block_size(sparsity_block_size, x)
     validate_triton_block_size(triton_block_size, sparsity_block_size)
 
-    sparsity_layout_output = torch.repeat_interleave(sparsity_layout, 3, dim=0).contiguous()
+    sparsity_layout_output = torch.repeat_interleave(sparsity_layout, repeats, dim=0).contiguous()
 
     sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
 
