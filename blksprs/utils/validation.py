@@ -63,6 +63,8 @@ def validate_sparsity(sparsity_block_size: int, *tensor_sparsity_layout_tuples: 
     for (tensor, sparsity_layout) in tensor_sparsity_layout_tuples:
         _validate_sparsity_layout_values(sparsity_layout)
 
+        if not sparsity_layout.dim() == 3:
+            raise ValueError("Sparsity layout must have exactly 3 dimensions")
         if not (tensor.size(-1) == tensor.size(-2) == sparsity_block_size):
             raise ValueError("Blocks not conforming to sparsity block size")
         if not tensor.size(0) == torch.sum(sparsity_layout.reshape(-1)):

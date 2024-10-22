@@ -56,16 +56,16 @@ def transpose(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, trit
 class _BlocksparseTranspose(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, x: Tensor,
-                sparsity_layout: Tensor, sparsity_lut: Tensor, sparsity_reverse_lut: Tensor, sparsity_block_size: int,
-                n_sparse_blocks: int, triton_block_size: int) -> (Tensor, Tensor):
+    def forward(ctx, x: Tensor, sparsity_layout_o: Tensor, sparsity_lut: Tensor, sparsity_reverse_lut: Tensor,
+                sparsity_block_size: int,
+                n_sparse_blocks: int, triton_block_size: int) -> Tensor:
         output = torch.empty(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
                              dtype=x.dtype, device=x.device)
 
         x_b, x_r, x_c = x.size()
         x_b_s, x_r_s, x_c_s = x.stride()
-        s_l_b, s_l_r, s_l_c = sparsity_layout.size()
-        s_l_b_s, s_l_r_s, s_l_c_s = sparsity_layout.stride()
+        s_l_b, s_l_r, s_l_c = sparsity_layout_o.size()
+        s_l_b_s, s_l_r_s, s_l_c_s = sparsity_layout_o.stride()
         s_lut_r, s_lut_c = sparsity_lut.shape
         s_lut_r_s, s_lut_c_s = sparsity_lut.stride()
         o_b, o_r, o_c = output.size()
@@ -89,8 +89,8 @@ class _BlocksparseTranspose(torch.autograd.Function):
           triton_block_size))
 
         # Save for backward pass
-        ctx.save_for_backward(sparsity_layout)
-        ctx.sparsity_layout = sparsity_layout
+        ctx.save_for_backward(sparsity_layout_o)
+        ctx.sparsity_layout = sparsity_layout_o
         ctx.sparsity_block_size = sparsity_block_size
         ctx.triton_block_size = triton_block_size
 
