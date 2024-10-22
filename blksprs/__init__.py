@@ -4,6 +4,7 @@ from blksprs.ops.exp import exp
 from blksprs.ops.matmul import matmul
 from blksprs.ops.softmax import softmax
 from blksprs.ops.transpose import transpose
+from blksprs.ops.partitioning import split, merge
 
 class layout:
     from blksprs.layouting.distribution_layout import build_distribution_layout
@@ -18,4 +19,4 @@ class util:
     from blksprs.utils.tools import do_shape_blocksparse, undo_shape_blocksparse, disable_validation
 
 class experimental:
-    from blksprs.experimental.distribution_mdi import gather_mdi
+    from blksprs.experimental.distribution_mdi import gather_mdi, scatter_reduce_mdi

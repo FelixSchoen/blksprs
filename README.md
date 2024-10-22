@@ -12,9 +12,10 @@ Currently supported operations (includes gradient calculation):
 - Sparse matrix multiplication (_supports any combination of sparse and dense matrices due to support
   for `sparse = sparse @ sparse` matmul_)
 - Softmax
-- Transposition
+- Transpose
 - Gather
 - Scatter (_supports either no reduction or summation, gradients are only available for summation_)
+- Splitting and merging of matrices along the last dimension
 - Conversion to and from sparse form
 - Conversion to different sparsity layouts and different sparsity block sizes
 
