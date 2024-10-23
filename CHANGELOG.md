@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - 2024-10-23
+
+### Added
+
+- Add ``build_sparsity_layout_matmul`` function
+- Add ``build_sparsity_layout_matmul_fast`` function
+
+### Fixed
+
+- Fixed project version number
+
 ## [1.6] - 2024-10-22
 
 ### Added
