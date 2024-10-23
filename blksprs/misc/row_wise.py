@@ -3,7 +3,7 @@ import triton
 from torch import Tensor
 from triton import language as tl
 
-from blksprs.utils.tools import get_triton_block_size
+from blksprs.utils.tools import get_triton_block_size, stride
 from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_device, validate_sparsity, \
     validate_sparsity_block_size, validate_triton_block_size
 
@@ -60,13 +60,13 @@ def row_wise_sum(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int,
                          device=x.device)
 
     x_b, x_r, x_c = x.size()
-    x_b_s, x_r_s, x_c_s = x.stride()
+    x_b_s, x_r_s, x_c_s = stride(x)
     s_lut_x_r, s_lut_x_c = sparsity_lut.size()
-    s_lut_x_r_s, s_lut_x_c_s = sparsity_lut.stride()
+    s_lut_x_r_s, s_lut_x_c_s = stride(sparsity_lut)
     o_b, o_r, o_c = output.size()
-    o_b_s, o_r_s, o_c_s = output.stride()
+    o_b_s, o_r_s, o_c_s = stride(output)
     s_l_o_b, s_l_o_r, s_l_o_c = sparsity_layout_output.size()
-    s_l_o_b_s, s_l_o_r_s, s_l_o_c_s = sparsity_layout_output.stride()
+    s_l_o_b_s, s_l_o_r_s, s_l_o_c_s = stride(sparsity_layout_output)
 
     if triton_block_size is None:
         triton_block_size = get_triton_block_size(sparsity_block_size)
@@ -183,13 +183,13 @@ def row_wise_max(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int,
                         device=x.device)
 
     x_b, x_r, x_c = x.size()
-    x_b_s, x_r_s, x_c_s = x.stride()
+    x_b_s, x_r_s, x_c_s = stride(x)
     s_lut_x_r, s_lut_x_c = sparsity_lut.size()
-    s_lut_x_r_s, s_lut_x_c_s = sparsity_lut.stride()
+    s_lut_x_r_s, s_lut_x_c_s = stride(sparsity_lut)
     o_b, o_r, o_c = output.size()
-    o_b_s, o_r_s, o_c_s = output.stride()
+    o_b_s, o_r_s, o_c_s = stride(output)
     s_l_o_b, s_l_o_r, s_l_o_c = sparsity_layout_output.size()
-    s_l_o_b_s, s_l_o_r_s, s_l_o_c_s = sparsity_layout_output.stride()
+    s_l_o_b_s, s_l_o_r_s, s_l_o_c_s = stride(sparsity_layout_output)
 
     if triton_block_size is None:
         triton_block_size = get_triton_block_size(sparsity_block_size)
@@ -290,15 +290,15 @@ def row_wise_add(x: Tensor, sparsity_layout_x: Tensor, y: Tensor,
     output = torch.empty_like(x)
 
     x_b, x_r, x_c = x.size()
-    x_b_s, x_r_s, x_c_s = x.stride()
+    x_b_s, x_r_s, x_c_s = stride(x)
     s_lut_r, s_lut_c = sparsity_lut.size()
-    s_lut_r_s, s_lut_c_s = sparsity_lut.stride()
+    s_lut_r_s, s_lut_c_s = stride(sparsity_lut)
     y_b, y_r, y_c = y.size()
-    y_b_s, y_r_s, y_c_s = y.stride()
+    y_b_s, y_r_s, y_c_s = stride(y)
     s_l_y_b, s_l_y_r, s_l_y_c = sparsity_layout_rwm.size()
-    s_l_y_b_s, s_l_y_r_s, s_l_y_c_s = sparsity_layout_rwm.stride()
+    s_l_y_b_s, s_l_y_r_s, s_l_y_c_s = stride(sparsity_layout_rwm)
     o_b, o_r, o_c = output.size()
-    o_b_s, o_r_s, o_c_s = output.stride()
+    o_b_s, o_r_s, o_c_s = stride(output)
 
     if triton_block_size is None:
         triton_block_size = get_triton_block_size(sparsity_block_size)

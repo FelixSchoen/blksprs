@@ -5,7 +5,7 @@ from triton import language as tl
 
 from blksprs.ops.exp import exp
 from blksprs.misc.row_wise import row_wise_sum, row_wise_max, row_wise_sub
-from blksprs.utils.tools import get_triton_block_size
+from blksprs.utils.tools import get_triton_block_size, stride
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity, validate_sparsity_block_size, validate_triton_block_size
 
@@ -61,9 +61,9 @@ class _BlocksparseSoftmax(torch.autograd.Function):
         output = torch.empty_like(x)
 
         x_b, x_r, x_c = x.size()
-        x_b_s, x_r_s, x_c_s = x.stride()
+        x_b_s, x_r_s, x_c_s = stride(x)
         s_lut_r, s_lut_c = sparsity_lut.size()
-        s_lut_r_s, s_lut_c_s = sparsity_lut.stride()
+        s_lut_r_s, s_lut_c_s = stride(sparsity_lut)
         o_b, o_r, o_c = output.size()
 
         x_row_wise_max, sparsity_layout_rwm = row_wise_max(x, sparsity_layout, sparsity_block_size,
@@ -76,9 +76,9 @@ class _BlocksparseSoftmax(torch.autograd.Function):
                                                                triton_block_size=triton_block_size)
 
         s_b, s_r, s_c = x_exp_row_wise_sum.shape
-        s_b_s, s_r_s, s_c_s = x_exp_row_wise_sum.stride()
+        s_b_s, s_r_s, s_c_s = stride(x_exp_row_wise_sum)
         s_l_s_b, s_l_s_r, s_l_s_c = sparsity_layout_rws.shape
-        s_l_s_b_s, s_l_s_r_s, s_l_s_c_s = sparsity_layout_rws.stride()
+        s_l_s_b_s, s_l_s_r_s, s_l_s_c_s = stride(sparsity_layout_rws)
 
         if triton_block_size is None:
             triton_block_size = get_triton_block_size(sparsity_block_size)
@@ -119,13 +119,13 @@ class _BlocksparseSoftmax(torch.autograd.Function):
                                   (1 * (sparsity_layout_s_flat == 0)))
 
         o_b, o_r, o_c = o.size()
-        o_b_s, o_r_s, o_c_s = o.stride()
+        o_b_s, o_r_s, o_c_s = stride(o)
         s_lut_r, s_lut_c = sparsity_lut.size()
-        s_lut_r_s, s_lut_c_s = sparsity_lut.stride()
+        s_lut_r_s, s_lut_c_s = stride(sparsity_lut)
         s_b, s_r, s_c = s.size()
-        s_b_s, s_r_s, s_c_s = s.stride()
+        s_b_s, s_r_s, s_c_s = stride(s)
         s_l_s_b, s_l_s_r, s_l_s_c = sparsity_layout_s.size()
-        s_l_s_b_s, s_l_s_r_s, s_l_s_c_s = sparsity_layout_s.stride()
+        s_l_s_b_s, s_l_s_r_s, s_l_s_c_s = stride(sparsity_layout_s)
 
         grad_x = torch.empty_like(o, dtype=torch.float)
 

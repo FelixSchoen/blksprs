@@ -65,8 +65,9 @@ TEST_CONFIGURATIONS = [
     (2, 128, 256, 64, 32, 16, 0.1),
     (2, 128, 256, 64, 32, 16, 0.1),
     (2, 128, 128, 128, 16, 8, 0.015625),
-    # Empty
+    # Empty and single block
     (2, 64, 64, 64, 32, 16, 0),
+    (1, 64, 64, 64, 32, 16, 0.25),
 ]
 
 TEST_CONFIGURATIONS_FAST = [
@@ -377,6 +378,11 @@ def test_blksprs_matmul():
 
 
 def test_repeat():
+    TEST_CONFIGURATIONS = [
+        # (b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage)
+        # Different sparsity
+        (2, 128, 128, 128, 64, 32, 0.5),]
+
     for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)

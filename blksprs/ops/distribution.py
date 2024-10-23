@@ -3,7 +3,7 @@ import triton
 from torch import Tensor
 from triton import language as tl
 
-from blksprs.utils.tools import get_triton_block_size
+from blksprs.utils.tools import get_triton_block_size, stride
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity, validate_dtype_int, validate_sparsity_block_size, validate_triton_block_size
 
@@ -59,15 +59,15 @@ class _BlocksparseGather(torch.autograd.Function):
         output = torch.empty_like(i, dtype=x.dtype)
 
         x_b, x_r, x_c = x.size()
-        x_b_s, x_r_s, x_c_s = x.stride()
+        x_b_s, x_r_s, x_c_s = stride(x)
         s_l_x_b, s_l_x_r, s_l_x_c = sparsity_layout_x.size()
-        s_l_x_b_s, s_l_x_r_s, s_l_x_c_s = sparsity_layout_x.stride()
+        s_l_x_b_s, s_l_x_r_s, s_l_x_c_s = stride(sparsity_layout_x)
         i_b, i_r, i_c = i.size()
-        i_b_s, i_r_s, i_c_s = i.stride()
+        i_b_s, i_r_s, i_c_s = stride(i)
         s_lut_i_r, s_lut_i_c = sparsity_lut_i.size()
-        s_lut_i_r_s, s_lut_i_c_s = sparsity_lut_i.stride()
+        s_lut_i_r_s, s_lut_i_c_s = stride(sparsity_lut_i)
         o_b, o_r, o_c = output.size()
-        o_b_s, o_r_s, o_c_s = output.stride()
+        o_b_s, o_r_s, o_c_s = stride(output)
 
         if triton_block_size is None:
             triton_block_size = get_triton_block_size(sparsity_block_size)
@@ -248,15 +248,15 @@ class _BlocksparseScatterReduce(torch.autograd.Function):
                              dtype=x.dtype, device=x.device)
 
         x_b, x_r, x_c = x.size()
-        x_b_s, x_r_s, x_c_s = x.stride()
+        x_b_s, x_r_s, x_c_s = stride(x)
         s_lut_x_r, s_lut_x_c = sparsity_lut_x.size()
-        s_lut_x_r_s, s_lut_x_c_s = sparsity_lut_x.stride()
+        s_lut_x_r_s, s_lut_x_c_s = stride(sparsity_lut_x)
         i_b, i_r, i_c = i.size()
-        i_b_s, i_r_s, i_c_s = i.stride()
+        i_b_s, i_r_s, i_c_s = stride(i)
         o_b, o_r, o_c = output.size()
-        o_b_s, o_r_s, o_c_s = output.stride()
+        o_b_s, o_r_s, o_c_s = stride(output)
         s_l_o_b, s_l_o_r, s_l_o_c = sparsity_layout_o.size()
-        s_l_o_b_s, s_l_o_r_s, s_l_o_c_s = sparsity_layout_o.stride()
+        s_l_o_b_s, s_l_o_r_s, s_l_o_c_s = stride(sparsity_layout_o)
 
         if triton_block_size is None:
             triton_block_size = get_triton_block_size(sparsity_block_size)

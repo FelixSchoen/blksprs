@@ -52,7 +52,7 @@ class _BlocksparseRepeat(torch.autograd.Function):
                 triton_block_size: int) -> Tensor:
         ctx.save_for_backward(sparsity_layout_x, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut)
         ctx.x_size = x.size()
-        ctx.x_stride = x.stride()
+        ctx.x_stride = stride(x)
 
         return forward_flow(ctx, x, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut, sparsity_block_size,
                             n_sparse_blocks, triton_block_size)
@@ -71,11 +71,11 @@ class _BlocksparseRepeat(torch.autograd.Function):
                              dtype=grad_output.dtype, device=grad_output.device)
 
         x_b, x_r, x_c = grad_output.size()
-        x_b_s, x_r_s, x_c_s = grad_output.stride()
+        x_b_s, x_r_s, x_c_s = stride(grad_output)
         s_l_x_b, s_l_x_r, s_l_x_c = sparsity_layout_o.size()
-        s_l_x_b_s, s_l_x_r_s, s_l_x_c_s = sparsity_layout_o.stride()
+        s_l_x_b_s, s_l_x_r_s, s_l_x_c_s = stride(sparsity_layout_o)
         s_lut_r, s_lut_c = sparsity_lut.size()
-        s_lut_r_s, s_lut_c_s = sparsity_lut.stride()
+        s_lut_r_s, s_lut_c_s = stride(sparsity_lut)
         o_b, o_r, o_c = x_size
         o_b_s, o_r_s, o_c_s = x_stride
 
@@ -215,6 +215,7 @@ def forward_flow(ctx, x: Tensor, sparsity_layout_o: Tensor, sparsity_lut: Tensor
     s_l_o_b_s, s_l_o_r_s, s_l_o_c_s = stride(sparsity_layout_o)
     s_lut_r, s_lut_c = sparsity_lut.size()
     s_lut_r_s, s_lut_c_s = stride(sparsity_lut)
+    asdf = torch.tensor(sparsity_lut).stride()
 
     if triton_block_size is None:
         triton_block_size = get_triton_block_size(sparsity_block_size)

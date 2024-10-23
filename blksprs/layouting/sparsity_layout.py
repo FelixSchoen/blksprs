@@ -5,7 +5,7 @@ import triton
 from torch import Tensor
 from triton import language as tl
 
-from blksprs.utils.tools import get_triton_block_size
+from blksprs.utils.tools import get_triton_block_size, stride
 from blksprs.utils.validation import validate_triton_block_size, validate_dimensions, validate_device, \
     validate_contiguous, validate_sparsity, validate_sparsity_block_size
 
@@ -30,9 +30,9 @@ def build_sparsity_layout(x: Tensor, sparsity_block_size: int, triton_block_size
                          dtype=torch.bool, device=x.device)
 
     x_b, x_r, x_c = x.size()
-    x_b_s, x_r_s, x_c_s = x.stride()
+    x_b_s, x_r_s, x_c_s = stride(x)
     o_b, o_r, o_c = output.size()
-    o_b_s, o_r_s, o_c_s = output.stride()
+    o_b_s, o_r_s, o_c_s = stride(output)
 
     if triton_block_size is None:
         triton_block_size = get_triton_block_size(sparsity_block_size)
@@ -120,10 +120,10 @@ def build_sparsity_layout_adaption(x: Tensor, sparsity_layout_from: Tensor,
     output = torch.zeros(o_b, o_r, o_c, dtype=torch.bool, device=x.device)
 
     x_b, x_r, x_c = x.size()
-    x_b_s, x_r_s, x_c_s = x.stride()
+    x_b_s, x_r_s, x_c_s = stride(x)
     s_lut_r, s_lut_c = sparsity_lut.size()
-    s_lut_r_s, s_lut_c_s = sparsity_lut.stride()
-    o_b_s, o_r_s, o_c_s = output.stride()
+    s_lut_r_s, s_lut_c_s = stride(sparsity_lut)
+    o_b_s, o_r_s, o_c_s = stride(output)
 
     if triton_block_size is None:
         triton_block_size = get_triton_block_size(sparsity_block_size_from)

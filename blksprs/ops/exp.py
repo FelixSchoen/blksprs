@@ -3,7 +3,7 @@ import triton
 from torch import Tensor
 from triton import language as tl
 
-from blksprs.utils.tools import get_triton_block_size
+from blksprs.utils.tools import get_triton_block_size, stride
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity_block_size, validate_triton_block_size
 
@@ -43,9 +43,9 @@ class _BlocksparseExp(torch.autograd.Function):
         output = torch.empty_like(x)
 
         x_b, x_r, x_c = x.shape
-        x_b_s, x_r_s, x_c_s = x.stride()
+        x_b_s, x_r_s, x_c_s = stride(x)
         o_b, o_r, o_c = output.shape
-        o_b_s, o_r_s, o_c_s = output.stride()
+        o_b_s, o_r_s, o_c_s = stride(output)
 
         if triton_block_size is None:
             triton_block_size = get_triton_block_size(sparsity_block_size)

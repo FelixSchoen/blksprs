@@ -3,7 +3,7 @@ import triton
 from torch import Tensor
 from triton import language as tl
 
-from blksprs.utils.tools import get_triton_block_size
+from blksprs.utils.tools import get_triton_block_size, stride
 from blksprs.utils.validation import validate_contiguous, validate_device, \
     validate_sparsity_block_size, validate_triton_block_size
 
@@ -44,13 +44,13 @@ def broadcast_add(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
     output = torch.zeros(n_sparse_blocks, sparsity_block_size, sparsity_block_size, dtype=x.dtype, device=x.device)
 
     x_b, x_c = x.size()
-    x_b_s, x_c_s = x.stride()
+    x_b_s, x_c_s = stride(x)
     y_b, y_c = y.size()
-    y_b_s, y_c_s = y.stride()
+    y_b_s, y_c_s = stride(y)
     o_b, o_r, o_c = output.size()
-    o_b_s, o_r_s, o_c_s = output.stride()
+    o_b_s, o_r_s, o_c_s = stride(output)
     s_lut_o_r, s_lut_o_c = sparsity_lut_o.size()
-    s_lut_o_r_s, s_lut_o_c_s = sparsity_lut_o.stride()
+    s_lut_o_r_s, s_lut_o_c_s = stride(sparsity_lut_o)
 
     if triton_block_size is None:
         triton_block_size = get_triton_block_size(sparsity_block_size)

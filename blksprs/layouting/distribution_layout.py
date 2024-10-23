@@ -3,7 +3,7 @@ import triton
 from torch import Tensor
 from triton import language as tl
 
-from blksprs.utils.tools import get_triton_block_size
+from blksprs.utils.tools import get_triton_block_size, stride
 from blksprs.utils.validation import validate_triton_block_size, validate_dimensions, validate_device, \
     validate_contiguous
 
@@ -34,11 +34,11 @@ def build_distribution_layout(indices: Tensor, sparsity_layout_indices: Tensor,
                          dtype=torch.bool, device=indices.device)
 
     i_b, i_r, i_c = indices.size()
-    i_b_s, i_r_s, i_c_s = indices.stride()
+    i_b_s, i_r_s, i_c_s = stride(indices)
     s_lut_i_r, s_lut_i_c = sparsity_lut_i.size()
-    s_lut_i_r_s, s_lut_i_c_s = sparsity_lut_i.stride()
+    s_lut_i_r_s, s_lut_i_c_s = stride(sparsity_lut_i)
     o_b, o_r, o_c = output.size()
-    o_b_s, o_r_s, o_c_s = output.stride()
+    o_b_s, o_r_s, o_c_s = stride(output)
 
     if triton_block_size is None:
         triton_block_size = get_triton_block_size(sparsity_block_size)
