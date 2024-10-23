@@ -188,3 +188,39 @@ def kernel_sparsity_layout_adaption(x,
                        // sparsity_block_size_to) * o_c_s))
         blk_o_msk = (blk_o_idx < o_b * o_b_s)
         tl.store(o + blk_o_idx, 1, mask=blk_o_msk)
+
+
+def build_sparsity_layout_matmul(sparsity_layout_x: Tensor, sparsity_layout_y: Tensor):
+    """Builds the precise sparsity layout of the result of a matrix multiplication between the two input tensors.
+
+    Args:
+        sparsity_layout_x (Tensor): The sparsity layout of the first block-sparse tensor.
+        sparsity_layout_y (Tensor): The sparsity layout of the second block-sparse tensor.
+
+    Returns:
+        Tensor: The precise sparsity layout of the result of a matrix multiplication between the two input tensors.
+
+    """
+    return torch.matmul(sparsity_layout_x.to(torch.float), sparsity_layout_y.to(torch.float)).to(torch.bool)
+
+
+def build_sparsity_layout_matmul_fast(sparsity_layout_x: Tensor, sparsity_layout_y: Tensor):
+    """Builds the approximate sparsity layout of the result of a matrix multiplication between the two input tensors.
+
+    Note:
+        This function is faster than the ``build_sparsity_layout_matmul`` function due to the fact that it only checks
+            whether at least one of the blocks in either of the vectors participating in the matmul is non-sparse. The
+            resulting sparsity layout may thus overestimate the actual sparsity of the result.
+
+    Args:
+        sparsity_layout_x (Tensor): The sparsity layout of the first block-sparse tensor.
+        sparsity_layout_y (Tensor): The sparsity layout of the second block-sparse tensor.
+
+    Returns:
+        Tensor: The approximate sparsity layout of the result of a matrix multiplication between the two input tensors.
+
+    """
+    sparsity_layout_x_slice = torch.max(sparsity_layout_x, dim=-1).values.unsqueeze(-1)
+    sparsity_layout_y_slice = torch.max(sparsity_layout_y, dim=-2).values.unsqueeze(1)
+
+    return torch.logical_or(sparsity_layout_x_slice, sparsity_layout_y_slice)

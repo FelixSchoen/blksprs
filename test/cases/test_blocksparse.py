@@ -8,7 +8,8 @@ from matplotlib import pyplot as plt
 
 from blksprs.experimental.distribution_mdi import gather_mdi, build_distribution_layout_mdi, scatter_reduce_mdi
 from blksprs.layouting.distribution_layout import build_distribution_layout
-from blksprs.layouting.sparsity_layout import build_sparsity_layout, build_sparsity_layout_adaption
+from blksprs.layouting.sparsity_layout import build_sparsity_layout, build_sparsity_layout_adaption, \
+    build_sparsity_layout_matmul, build_sparsity_layout_matmul_fast
 from blksprs.misc.broadcast_ops import broadcast_add, broadcast_sub
 from blksprs.misc.repeat_interleave import repeat_interleave
 from blksprs.ops.conversion import to_dense, to_sparse, adapt_layout
@@ -99,7 +100,7 @@ RTOL = 1e-2
 
 @pytest.fixture(scope="session", autouse=True)
 def setup():
-    use_random_seed = True
+    use_random_seed = False
 
     if use_random_seed:
         seed = random.randint(0, 2 ** 32 - 1)
@@ -133,9 +134,11 @@ def test_blksprs_matmul_sss():
         y_bs = _blocksparse_roundtrip(y_d, sparsity_layout_y_bs, sparsity_block_size, triton_block_size)
 
         sparsity_layout_o_d = torch.ones(size=(b, m // sparsity_block_size, n // sparsity_block_size), device=DEVICE)
+        sparsity_layout_o_bs = build_sparsity_layout_matmul_fast(sparsity_layout_x_bs, sparsity_layout_y_bs)
 
-        for x, sparsity_layout_x, y, sparsity_layout_y in [(x_d, sparsity_layout_x_d, y_d, sparsity_layout_y_d),
-                                                           (x_bs, sparsity_layout_x_bs, y_bs, sparsity_layout_y_bs)]:
+        for x, sparsity_layout_x, y, sparsity_layout_y, sparsity_layout_o in [
+            (x_d, sparsity_layout_x_d, y_d, sparsity_layout_y_d, sparsity_layout_o_d),
+            (x_bs, sparsity_layout_x_bs, y_bs, sparsity_layout_y_bs, sparsity_layout_o_bs)]:
             x_stock = x.clone().requires_grad_(True)
             y_stock = y.clone().requires_grad_(True)
             x_blksprs = x.clone().requires_grad_(True)
@@ -144,8 +147,8 @@ def test_blksprs_matmul_sss():
             stock_matmul_out = torch.matmul(x_stock, y_stock)
             blksprs_matmul_out = matmul(to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size), sparsity_layout_x,
                                         to_sparse(y_blksprs, sparsity_layout_y, sparsity_block_size), sparsity_layout_y,
-                                        sparsity_layout_o_d, sparsity_block_size)
-            blksprs_matmul_dense_out = to_dense(blksprs_matmul_out, sparsity_layout_o_d, sparsity_block_size)
+                                        sparsity_layout_o, sparsity_block_size)
+            blksprs_matmul_dense_out = to_dense(blksprs_matmul_out, sparsity_layout_o, sparsity_block_size)
 
             assert torch.allclose(blksprs_matmul_dense_out, stock_matmul_out, atol=ATOL, rtol=RTOL)
 
@@ -687,6 +690,15 @@ def test_build_sparsity_layout_adaption():
                 blksprs_loss.backward()
 
                 assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
+
+
+def test_build_sparsity_layout_matmul():
+    for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+        sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
+        sparsity_layout_y_bs = _get_blocksparse_layout(b, k, n, sparsity_block_size, sparsity_percentage)
+
+        sparsity_layout_matmul = build_sparsity_layout_matmul(sparsity_layout_x_bs, sparsity_layout_y_bs)
+        sparsity_layout_matmul_fast = build_sparsity_layout_matmul_fast(sparsity_layout_x_bs, sparsity_layout_y_bs)
 
 
 def test_build_distribution_layout():

@@ -8,7 +8,7 @@ from blksprs.ops.partitioning import split, merge
 
 class layout:
     from blksprs.layouting.distribution_layout import build_distribution_layout
-    from blksprs.layouting.sparsity_layout import build_sparsity_layout, build_sparsity_layout_adaption
+    from blksprs.layouting.sparsity_layout import build_sparsity_layout, build_sparsity_layout_adaption, build_sparsity_layout_matmul
 
 class misc:
     from blksprs.misc.broadcast_ops import broadcast_add, broadcast_sub
