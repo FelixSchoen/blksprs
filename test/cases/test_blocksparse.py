@@ -387,17 +387,22 @@ def test_repeat():
         num_repeats_values = [1, 2, 3, 4]
 
         for num_repeat in num_repeats_values:
-            for x, sparsity_layout_x in [(x_d, sparsity_layout_x_d), (x_bs, sparsity_layout_x_bs)]:
+            for x, sparsity_layout_x in [(x_bs, sparsity_layout_x_bs), (x_d, sparsity_layout_x_d), (x_bs, sparsity_layout_x_bs)]:
                 x_stock = x.clone().requires_grad_(True)
                 x_blksprs = x.clone().requires_grad_(True)
 
                 repeats = (num_repeat, num_repeat, num_repeat)
 
-                stock_repeat_out = x_stock.repeat(repeats).contiguous()
+                sparsity_layout_o_bs = _get_blocksparse_layout(b * repeats[0], m * repeats[1], k * repeats[2],
+                                                               sparsity_block_size, sparsity_percentage)
+                if torch.all(sparsity_layout_x):
+                    sparsity_layout_o_bs = torch.ones_like(sparsity_layout_o_bs)
+
+                stock_repeat_out = _blocksparse_roundtrip(x_stock.repeat(repeats), sparsity_layout_o_bs, sparsity_block_size, triton_block_size)
                 blksprs_repeat_out, sparsity_layout_output = repeat(
                     to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
                     sparsity_layout_x, repeats,
-                    sparsity_block_size, None, triton_block_size)
+                    sparsity_block_size, sparsity_layout_o_bs, triton_block_size)
                 blksprs_repeat_dense_out = to_dense(blksprs_repeat_out, sparsity_layout_output, sparsity_block_size)
 
                 assert torch.allclose(blksprs_repeat_dense_out, stock_repeat_out, atol=ATOL, rtol=RTOL)
@@ -1010,7 +1015,8 @@ def _visualise(*matrices, dim=0):
         output_path_base = BASE_PATH.joinpath("test", "output", "blksprs")
         output_path_base.mkdir(exist_ok=True)
 
-        _visualise_matrix(matrix_data[dim], str(output_path_base.joinpath(matrix_label)), grid_size=1, vmin=vmin, vmax=vmax, **add_args)
+        _visualise_matrix(matrix_data[dim], str(output_path_base.joinpath(matrix_label)), grid_size=1, vmin=vmin,
+                          vmax=vmax, **add_args)
 
 
 def _visualise_matrix(matrix: torch.Tensor, output_path: str, grid_size=16, vmin=None, vmax=None):

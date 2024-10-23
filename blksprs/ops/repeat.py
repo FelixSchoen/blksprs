@@ -3,7 +3,7 @@ import triton
 from triton import language as tl
 from torch import Tensor
 
-from blksprs.utils.tools import get_triton_block_size
+from blksprs.utils.tools import get_triton_block_size, stride
 from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_device, \
     validate_sparsity, validate_sparsity_block_size, validate_triton_block_size
 
@@ -20,10 +20,12 @@ def repeat(x: Tensor, sparsity_layout_x: Tensor, repeats: tuple[int, int, int],
     validate_sparsity_block_size(sparsity_block_size, x)
     validate_triton_block_size(triton_block_size, sparsity_block_size)
 
-    if sparsity_layout_output is None:
-        sparsity_layout_output = sparsity_layout_x.repeat(repeats[0], repeats[1], repeats[2])
+    sparsity_layout_o = sparsity_layout_x.repeat(repeats[0], repeats[1], repeats[2])
 
-    sparsity_lut = torch.nonzero(sparsity_layout_output).contiguous()
+    if sparsity_layout_output is not None:
+        sparsity_layout_o = torch.logical_and(sparsity_layout_o, sparsity_layout_output)
+
+    sparsity_lut = torch.nonzero(sparsity_layout_o).contiguous()
 
     sparsity_layout_flat = sparsity_layout_x.reshape(-1)
     sparsity_reverse_lut = (((torch.cumsum(sparsity_layout_flat, dim=-1) - 1) *
@@ -33,12 +35,12 @@ def repeat(x: Tensor, sparsity_layout_x: Tensor, repeats: tuple[int, int, int],
                             .repeat(repeats[0], repeats[1], repeats[2])
                             .reshape(-1).contiguous())
 
-    n_sparse_blocks = torch.sum(sparsity_layout_output.to(torch.int)).item()
+    n_sparse_blocks = torch.sum(sparsity_layout_o.to(torch.int)).item()
 
-    validate_contiguous(sparsity_layout_output, sparsity_lut, sparsity_reverse_lut)
+    validate_contiguous(sparsity_layout_o, sparsity_lut, sparsity_reverse_lut)
 
-    return _BlocksparseRepeat.apply(x, sparsity_layout_x, sparsity_layout_output, sparsity_lut, sparsity_reverse_lut,
-                                    sparsity_block_size, n_sparse_blocks, triton_block_size), sparsity_layout_output
+    return _BlocksparseRepeat.apply(x, sparsity_layout_x, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut,
+                                    sparsity_block_size, n_sparse_blocks, triton_block_size), sparsity_layout_o
 
 
 class _BlocksparseRepeat(torch.autograd.Function):
@@ -57,10 +59,6 @@ class _BlocksparseRepeat(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        if False:
-            import pydevd
-            pydevd.settrace(suspend=False, trace_only_current_thread=True)
-
         sparsity_layout_x, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut = ctx.saved_tensors
         x_size = ctx.x_size
         x_stride = ctx.x_stride
@@ -88,9 +86,6 @@ class _BlocksparseRepeat(torch.autograd.Function):
                                     triton.cdiv(x_r, meta["TRITON_BLOCK_SIZE"]),
                                     triton.cdiv(x_c, meta["TRITON_BLOCK_SIZE"])]
 
-        debug = torch.zeros_like(grad_output)
-
-
         (kernel_blocksparse_flow_push[triton_grid]
          (grad_output,
           x_b, x_b_s, x_r_s, x_c_s,
@@ -99,11 +94,7 @@ class _BlocksparseRepeat(torch.autograd.Function):
           sparsity_reverse_lut,
           output,
           o_b, o_b_s, o_r_s, o_c_s,
-          debug,
           triton_block_size))
-
-        import blksprs as bs
-        debug_full = bs.to_dense(debug, sparsity_layout_o, sparsity_block_size)
 
         return output, None, None, None, None, None, None, None
 
@@ -143,7 +134,8 @@ def kernel_blocksparse_flow_pull(x,
     rev_idx_spa = tl.load(r_lut + rev_idx_spa_idx, mask=rev_idx_spa_msk).to(tl.int32)
 
     if rev_idx_spa == -1:
-        assert False, "Invalid sparsity block"
+        tl.device_assert(False)
+        return
 
     blk_x_idx = (rev_idx_spa * x_b_s +
                  ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
@@ -166,7 +158,6 @@ def kernel_blocksparse_flow_push(x,
                                  r_lut,
                                  o,
                                  o_b, o_b_s, o_r_s, o_c_s,
-                                 debug_ten,
                                  TRITON_BLOCK_SIZE: tl.constexpr) -> None:
     # Get triton block indices
     pid_blk = tl.program_id(axis=0)
@@ -194,7 +185,8 @@ def kernel_blocksparse_flow_push(x,
     rev_idx_spa = tl.load(r_lut + rev_idx_spa_idx, mask=rev_idx_spa_msk).to(tl.int32)
 
     if rev_idx_spa == -1:
-        assert False, "Invalid sparsity block"
+        tl.device_assert(False)
+        return
 
     blk_x_idx = (pid_blk * x_b_s +
                  ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
@@ -208,23 +200,21 @@ def kernel_blocksparse_flow_push(x,
     blk_o_msk = (blk_o_idx < o_b * o_b_s)
     tl.atomic_add(o + blk_o_idx, blk_x, mask=blk_o_msk)
 
-    blk_debug = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), 1, dtype=tl.float32)
-    tl.atomic_add(debug_ten + blk_x_idx, blk_debug, mask=blk_o_msk)
-
 
 def forward_flow(ctx, x: Tensor, sparsity_layout_o: Tensor, sparsity_lut: Tensor, sparsity_reverse_lut: Tensor,
                  sparsity_block_size: int, n_sparse_blocks: int, triton_block_size: int) -> Tensor:
     output = torch.empty(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
                          dtype=x.dtype, device=x.device)
+    output = torch.zeros_like(output)
 
     x_b, x_r, x_c = x.size()
-    x_b_s, x_r_s, x_c_s = x.stride()
+    x_b_s, x_r_s, x_c_s = stride(x)
     o_b, o_r, o_c = output.size()
-    o_b_s, o_r_s, o_c_s = output.stride()
+    o_b_s, o_r_s, o_c_s = stride(output)
     s_l_o_b, s_l_o_r, s_l_o_c = sparsity_layout_o.size()
-    s_l_o_b_s, s_l_o_r_s, s_l_o_c_s = sparsity_layout_o.stride()
-    s_lut_r, s_lut_c = sparsity_lut.shape
-    s_lut_r_s, s_lut_c_s = sparsity_lut.stride()
+    s_l_o_b_s, s_l_o_r_s, s_l_o_c_s = stride(sparsity_layout_o)
+    s_lut_r, s_lut_c = sparsity_lut.size()
+    s_lut_r_s, s_lut_c_s = stride(sparsity_lut)
 
     if triton_block_size is None:
         triton_block_size = get_triton_block_size(sparsity_block_size)

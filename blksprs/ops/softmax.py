@@ -181,7 +181,8 @@ class _BlocksparseSoftmax(torch.autograd.Function):
         rev_idx_spa_s = tl.load(r_lut_s + rev_idx_spa_s_idx, mask=rev_idx_spa_s_msk).to(tl.int32)
 
         if rev_idx_spa_s == -1:
-            assert False, "Invalid sparsity block"
+            tl.device_assert(False)
+            return
 
         # Load x block
         blk_x_idx = ((pid_blk * x_b_s) +

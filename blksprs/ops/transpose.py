@@ -140,7 +140,8 @@ class _BlocksparseTranspose(torch.autograd.Function):
         rev_idx_spa = tl.load(r_lut + rev_idx_spa_idx, mask=rev_idx_spa_msk).to(tl.int32)
 
         if rev_idx_spa == -1:
-            assert False, "Invalid sparsity block"
+            tl.device_assert(False)
+            return
 
         blk_x_idx = (rev_idx_spa * x_b_s +
                      ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
