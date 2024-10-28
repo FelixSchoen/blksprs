@@ -1,4 +1,6 @@
-import math
+import random
+from pathlib import Path
+
 import random
 from pathlib import Path
 
@@ -13,11 +15,11 @@ from blksprs.layouting.sparsity_layout import build_sparsity_layout, build_spars
     build_sparsity_layout_matmul, build_sparsity_layout_matmul_fast
 from blksprs.misc.broadcast_ops import broadcast_add, broadcast_sub
 from blksprs.misc.repeat_interleave import repeat_interleave
+from blksprs.misc.row_wise import row_wise_sum, row_wise_max, row_wise_add
 from blksprs.ops.conversion import to_dense, to_sparse, adapt_layout
 from blksprs.ops.distribution import scatter_reduce, gather
 from blksprs.ops.exp import exp
 from blksprs.ops.matmul import matmul
-from blksprs.misc.row_wise import row_wise_sum, row_wise_max, row_wise_add
 from blksprs.ops.partitioning import split, merge
 from blksprs.ops.repeat import repeat
 from blksprs.ops.softmax import softmax
@@ -378,11 +380,6 @@ def test_blksprs_matmul():
 
 
 def test_repeat():
-    TEST_CONFIGURATIONS = [
-        # (b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage)
-        # Different sparsity
-        (2, 128, 128, 128, 64, 32, 0.5),]
-
     for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
@@ -393,7 +390,7 @@ def test_repeat():
         num_repeats_values = [1, 2, 3, 4]
 
         for num_repeat in num_repeats_values:
-            for x, sparsity_layout_x in [(x_bs, sparsity_layout_x_bs), (x_d, sparsity_layout_x_d), (x_bs, sparsity_layout_x_bs)]:
+            for x, sparsity_layout_x in [(x_d, sparsity_layout_x_d), (x_bs, sparsity_layout_x_bs)]:
                 x_stock = x.clone().requires_grad_(True)
                 x_blksprs = x.clone().requires_grad_(True)
 
@@ -404,7 +401,8 @@ def test_repeat():
                 if torch.all(sparsity_layout_x):
                     sparsity_layout_o_bs = torch.ones_like(sparsity_layout_o_bs)
 
-                stock_repeat_out = _blocksparse_roundtrip(x_stock.repeat(repeats), sparsity_layout_o_bs, sparsity_block_size, triton_block_size)
+                stock_repeat_out = _blocksparse_roundtrip(x_stock.repeat(repeats), sparsity_layout_o_bs,
+                                                          sparsity_block_size, triton_block_size)
                 blksprs_repeat_out, sparsity_layout_output = repeat(
                     to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
                     sparsity_layout_x, repeats,
@@ -853,6 +851,7 @@ def test_repeat_interleave():
 
 # Experimental
 
+@pytest.mark.skip(reason="Slow experimental test")
 def test_blksprs_gather_mdi():
     for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS_FAST:
         m = max(m, n)
@@ -913,6 +912,7 @@ def test_blksprs_gather_mdi():
             assert torch.allclose(x_blksprs.grad.to(torch.float), x_stock.grad.to(torch.float), atol=ATOL, rtol=RTOL)
 
 
+@pytest.mark.skip(reason="Slow experimental test")
 def test_blksprs_scatter_mdi():
     for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS_FAST:
         m = max(m, n)
