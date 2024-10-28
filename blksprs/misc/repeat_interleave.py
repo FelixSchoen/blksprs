@@ -8,8 +8,8 @@ from blksprs.utils.validation import validate_contiguous, validate_device, \
     validate_sparsity_block_size, validate_triton_block_size, validate_dimensions
 
 
-def repeat_interleave(x: Tensor, sparsity_layout: Tensor, repeats: int,
-                      sparsity_block_size: int, triton_block_size: int = None) -> tuple[Tensor, Tensor]:
+def repeat_interleave_old(x: Tensor, sparsity_layout: Tensor, repeats: int,
+                          sparsity_block_size: int, triton_block_size: int = None) -> tuple[Tensor, Tensor]:
     """Repeats and interleaves the block-sparse tensor in compressed form.
 
     Repeats each matrix contained in the tensors by ``repeats`` amount and places them consecutively in the output

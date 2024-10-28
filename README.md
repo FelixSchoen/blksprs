@@ -29,15 +29,18 @@ These include, e.g.,
 - Element-wise exponentiation
 - ...
 
-Further helpful operations that do **not** support gradient calculation include:
-
-- 
-
 Note that in order to correctly apply element-wise operations between two sparse tensors their sparsity layouts have to
 match.
 
+Further helpful operations (included in the ``bs.misc`` module) that do **not** support gradient calculation include:
+
+- Repeat Interleave
+- Row-wise sum, max, addition, and subtraction
+- Broadcast addition and subtraction between slices
+
 Furthermore, the library provides a set of utility functions for the creation of sparsity layouts based on existing
-dense tensors.
+dense tensors and for the scatter operation (module ``bs.layout``), as well as utility functions to ensure correct input
+dimensionality (module ``bs.util``).
 
 ## Installation
 

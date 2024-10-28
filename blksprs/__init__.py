@@ -16,7 +16,6 @@ class layout:
 
 class misc:
     from blksprs.misc.broadcast_ops import broadcast_add, broadcast_sub
-    from blksprs.misc.repeat_interleave import repeat_interleave
     from blksprs.misc.row_wise import row_wise_sum, row_wise_max, row_wise_add, row_wise_sub
 
 

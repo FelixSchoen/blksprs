@@ -62,6 +62,42 @@ def repeat(x: Tensor, sparsity_layout_x: Tensor, repeats: tuple[int, int, int],
                                     sparsity_block_size, n_sparse_blocks, triton_block_size), sparsity_layout_o
 
 
+def repeat_interleave(x: Tensor, sparsity_layout_x: Tensor, repeats: int,
+                      sparsity_block_size: int, sparsity_layout_output: Tensor = None,
+                      triton_block_size: int = None) -> (
+        Tensor, Tensor):
+    x = x.contiguous()
+
+    validate_dimensions(x)
+    validate_contiguous(x)
+    validate_device(x)
+    validate_sparsity(sparsity_block_size, (x, sparsity_layout_x))
+    validate_sparsity_block_size(sparsity_block_size, x)
+    validate_triton_block_size(triton_block_size, sparsity_block_size)
+
+    sparsity_layout_o = torch.repeat_interleave(sparsity_layout_x, repeats, dim=0).contiguous()
+
+    if sparsity_layout_output is not None:
+        sparsity_layout_o = torch.logical_and(sparsity_layout_o, sparsity_layout_output)
+
+    sparsity_lut = torch.nonzero(sparsity_layout_o).contiguous()
+
+    sparsity_layout_flat = sparsity_layout_x.reshape(-1)
+    sparsity_reverse_lut = (((torch.cumsum(sparsity_layout_flat, dim=-1) - 1) *
+                             (sparsity_layout_flat == 1) -
+                             (1 * (sparsity_layout_flat == 0)))
+                            .reshape(sparsity_layout_x.size())
+                            .repeat_interleave(repeats, dim=0)
+                            .reshape(-1).contiguous())
+
+    n_sparse_blocks = torch.sum(sparsity_layout_o.to(torch.int)).item()
+
+    validate_contiguous(sparsity_layout_o, sparsity_lut, sparsity_reverse_lut)
+
+    return _BlocksparseRepeat.apply(x, sparsity_layout_x, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut,
+                                    sparsity_block_size, n_sparse_blocks, triton_block_size), sparsity_layout_o
+
+
 class _BlocksparseRepeat(torch.autograd.Function):
 
     @staticmethod
