@@ -29,6 +29,10 @@ These include, e.g.,
 - Element-wise exponentiation
 - ...
 
+Further helpful operations that do **not** support gradient calculation include:
+
+- 
+
 Note that in order to correctly apply element-wise operations between two sparse tensors their sparsity layouts have to
 match.
 

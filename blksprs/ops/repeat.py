@@ -11,6 +11,25 @@ from blksprs.utils.validation import validate_dimensions, validate_contiguous, v
 def repeat(x: Tensor, sparsity_layout_x: Tensor, repeats: tuple[int, int, int],
            sparsity_block_size: int, sparsity_layout_output: Tensor = None, triton_block_size: int = None) -> (
         Tensor, Tensor):
+    """Repeats a block-spare tensor in compressed form according to the given repeats.
+    
+    Repeats is a 3-tuple of integers, where each integer represents the number of times the tensor should be repeated in
+        the first, second and third dimension respectively.
+        
+    Note:
+        An output sparsity layout can be provided, in which case only the indicated blocks are filled. This may result
+        in blocks not being present in the output that were present in the input if the output sparsity layout indicates
+        them to be sparse.
+    
+    Args:
+        x (Tensor): A block-sparse tensor in compressed form.
+        sparsity_layout_x (Tensor): The sparsity layout of the block-sparse tensor.
+        repeats (tuple[int, int, int]): The number of times the tensor should be repeated in the first, second and
+            third dimension respectively.
+        sparsity_block_size (int): The size of the sparsity blocks.
+        sparsity_layout_output (Tensor): The desired sparsity layout of the output tensor (default ``None``).
+        triton_block_size (int): The block size to use for the triton kernel (default ``None``).
+    """
     x = x.contiguous()
 
     validate_dimensions(x)
@@ -215,7 +234,6 @@ def forward_flow(ctx, x: Tensor, sparsity_layout_o: Tensor, sparsity_lut: Tensor
     s_l_o_b_s, s_l_o_r_s, s_l_o_c_s = stride(sparsity_layout_o)
     s_lut_r, s_lut_c = sparsity_lut.size()
     s_lut_r_s, s_lut_c_s = stride(sparsity_lut)
-    asdf = torch.tensor(sparsity_lut).stride()
 
     if triton_block_size is None:
         triton_block_size = get_triton_block_size(sparsity_block_size)
