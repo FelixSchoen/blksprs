@@ -9,14 +9,13 @@ A lightweight and efficient library for operations on block-sparse matrices in P
 
 Currently supported operations (includes gradient calculation):
 
-- Sparse matrix multiplication (_supports any combination of sparse and dense matrices due to support
-  for `sparse = sparse @ sparse` matmul_)
+- Matrix multiplication
 - Softmax
 - Transpose
 - Gather
 - Scatter (_supports either no reduction or summation, gradients are only available for summation_)
 - Repeat (_supports target sparsity layout_)
-- Splitting and merging of matrices along the last dimension
+- Repeat Interleave (_supports target sparsity layout_)
 - Conversion to and from sparse form
 - Conversion to different sparsity layouts and different sparsity block sizes
 
@@ -32,9 +31,10 @@ These include, e.g.,
 Note that in order to correctly apply element-wise operations between two sparse tensors their sparsity layouts have to
 match.
 
-Further helpful operations (included in the ``bs.misc`` module) that do **not** support gradient calculation include:
+Further helpful operations (included in the ``bs.misc`` module) that do **not necessarily support gradient calculation**
+include:
 
-- Repeat Interleave
+- Splitting and merging of matrices along the last dimension
 - Row-wise sum, max, addition, and subtraction
 - Broadcast addition and subtraction between slices
 

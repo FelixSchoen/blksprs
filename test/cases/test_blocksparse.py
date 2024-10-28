@@ -14,9 +14,9 @@ from blksprs.misc.broadcast_ops import broadcast_add, broadcast_sub
 from blksprs.misc.row_wise import row_wise_sum, row_wise_max, row_wise_add
 from blksprs.ops.conversion import to_dense, to_sparse, adapt_layout
 from blksprs.ops.distribution import scatter_reduce, gather
-from blksprs.ops.exp import exp
+from blksprs.misc.exp import exp
 from blksprs.ops.matmul import matmul
-from blksprs.ops.partitioning import split, merge
+from blksprs.misc.partitioning import split, merge
 from blksprs.ops.repeat import repeat, repeat_interleave
 from blksprs.ops.softmax import softmax
 from blksprs.ops.transpose import transpose
