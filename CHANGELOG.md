@@ -15,7 +15,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- Change ``repeat_interleave`` to use same flow kernels ``repeat`` does
+- Change ``repeat_interleave`` to use same flow kernels as ``repeat`` does
 
 ## [1.7] - 2024-10-28
 
