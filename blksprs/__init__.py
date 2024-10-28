@@ -5,7 +5,7 @@ from blksprs.ops.matmul import matmul
 from blksprs.ops.softmax import softmax
 from blksprs.ops.transpose import transpose
 from blksprs.ops.partitioning import split, merge
-from blksprs.ops.repeat import repeat
+from blksprs.ops.repeat import repeat, repeat_interleave
 
 
 class layout:

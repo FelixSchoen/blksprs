@@ -29,6 +29,11 @@ def repeat(x: Tensor, sparsity_layout_x: Tensor, repeats: tuple[int, int, int],
         sparsity_block_size (int): The size of the sparsity blocks.
         sparsity_layout_output (Tensor): The desired sparsity layout of the output tensor (default ``None``).
         triton_block_size (int): The block size to use for the triton kernel (default ``None``).
+
+    Returns:
+        Tensor: A block-sparse tensor in compressed form containing the repeated values.
+        Tensor: The sparsity layout of the resulting output tensor.
+
     """
     x = x.contiguous()
 
@@ -66,6 +71,28 @@ def repeat_interleave(x: Tensor, sparsity_layout_x: Tensor, repeats: int,
                       sparsity_block_size: int, sparsity_layout_output: Tensor = None,
                       triton_block_size: int = None) -> (
         Tensor, Tensor):
+    """Repeats and interleaves the block-sparse tensor in compressed form.
+
+    Repeats each matrix contained in the tensors by ``repeats`` amount and places them consecutively in the output
+        tensor.
+
+    Note:
+        In similar fashion to the regular ``repeat`` an output sparsity layout can be provided. In this case only
+        non-sparse blocks will be filled.
+
+    Args:
+        x (Tensor): A block-sparse tensor in compressed form.
+        sparsity_layout_x (Tensor): The sparsity layout of the block-sparse tensor.
+        repeats (int): The number of times to repeat the matrices.
+        sparsity_block_size (int): The size of the sparsity blocks.
+        sparsity_layout_output (Tensor): The desired sparsity layout of the output tensor (default ``None``).
+        triton_block_size (int): The block size to use for the triton kernel (default ``None``).
+
+    Returns:
+        Tensor: A block-sparse tensor in compressed form containing the repeated and interleaved matrices.
+        Tensor: The sparsity layout of the resulting output tensor.
+
+    """
     x = x.contiguous()
 
     validate_dimensions(x)

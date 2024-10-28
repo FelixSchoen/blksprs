@@ -434,17 +434,23 @@ def test_repeat_interleave():
                 x_stock = x.clone().requires_grad_(True)
                 x_blksprs = x.clone().requires_grad_(True)
 
+                sparsity_layout_o_bs = _get_blocksparse_layout(b * num_repeats, m, n,
+                                                               sparsity_block_size, sparsity_percentage)
+                if torch.all(sparsity_layout_x):
+                    sparsity_layout_o_bs = torch.ones_like(sparsity_layout_o_bs)
+
                 stock_repeat_interleave_out = _blocksparse_roundtrip(
                     torch.repeat_interleave(x_stock, num_repeats, dim=0),
-                    torch.repeat_interleave(sparsity_layout_x, num_repeats, dim=0),
+                    sparsity_layout_o_bs,
                     sparsity_block_size,
                     triton_block_size)
 
-                blksprs_repeat_interleave_out, sparsity_layout_repeat_interleave = repeat_interleave(
+                blksprs_repeat_interleave_out, sparsity_layout_output = repeat_interleave(
                     to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
-                    sparsity_layout_x, num_repeats, sparsity_block_size, triton_block_size=triton_block_size)
+                    sparsity_layout_x, num_repeats,
+                    sparsity_block_size, sparsity_layout_o_bs, triton_block_size)
                 blksprs_repeat_interleave_dense_out = to_dense(blksprs_repeat_interleave_out,
-                                                               sparsity_layout_repeat_interleave,
+                                                               sparsity_layout_output,
                                                                sparsity_block_size, triton_block_size=triton_block_size)
 
                 assert torch.allclose(blksprs_repeat_interleave_dense_out, stock_repeat_interleave_out, atol=ATOL,
