@@ -1,4 +1,4 @@
-from blksprs.ops.conversion import to_dense, to_sparse
+from blksprs.ops.conversion import to_dense, to_sparse, from_blksprs, to_blksprs
 from blksprs.ops.distribution import gather, scatter, scatter_reduce
 from blksprs.ops.exp import exp
 from blksprs.ops.matmul import matmul

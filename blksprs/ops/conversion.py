@@ -8,7 +8,12 @@ from triton import language as tl
 from blksprs.layouting.sparsity_layout import build_sparsity_layout_adaption
 from blksprs.utils.tools import get_triton_block_size, stride
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
-    validate_sparsity, validate_sparsity_block_size, validate_triton_block_size
+    validate_sparsity, validate_sparsity_block_size, validate_triton_block_size, validate_sparsity_dense
+
+
+def from_blksprs(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, fill_value: float = 0,
+                 triton_block_size: int = None) -> Tensor:
+    return to_dense(x, sparsity_layout, sparsity_block_size, fill_value, triton_block_size)
 
 
 def to_dense(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, fill_value: float = 0,
@@ -144,6 +149,11 @@ class _BlocksparseToDense(torch.autograd.Function):
             tl.store(o + o_idx, blk, o_msk)
 
 
+def to_blksprs(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int,
+               triton_block_size: int = None) -> Tensor:
+    return to_sparse(x, sparsity_layout, sparsity_block_size, triton_block_size)
+
+
 def to_sparse(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
     """Converts a block-sparse tensor in regular form to a block-sparse tensor in compressed form based on the given
     sparsity layout.
@@ -163,6 +173,7 @@ def to_sparse(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, trit
     validate_dimensions(x)
     validate_contiguous(x)
     validate_device(x)
+    validate_sparsity_dense(sparsity_block_size, (x, sparsity_layout))
     validate_sparsity_block_size(sparsity_block_size, x)
     validate_triton_block_size(triton_block_size, sparsity_block_size)
 
