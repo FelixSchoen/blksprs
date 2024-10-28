@@ -25,11 +25,4 @@ def disable_validation():
     _set_skip_validation(True)
 
 def stride(x: Tensor):
-    if x.dim() == 1:
-        return 1
-    elif x.dim() == 2:
-        return x.size(1), 1
-    elif x.dim() == 3:
-        return x.size(1) * x.size(2), x.size(2), 1
-    else:
-        raise NotImplementedError(f"Stride for {x.dim()}D tensor is not implemented.")
+    return x.view(x.shape).stride()

@@ -103,7 +103,7 @@ RTOL = 1e-2
 
 @pytest.fixture(scope="session", autouse=True)
 def setup():
-    use_random_seed = False
+    use_random_seed = True
 
     if use_random_seed:
         seed = random.randint(0, 2 ** 32 - 1)
