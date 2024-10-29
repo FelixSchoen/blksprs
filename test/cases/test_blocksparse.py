@@ -348,7 +348,8 @@ def test_blksprs_matmul():
 
         for x, sparsity_layout_x, y, sparsity_layout_y, sparsity_layout_o in [
             (x_d, sparsity_layout_x_d, y_d, sparsity_layout_y_d, sparsity_layout_o_d),
-            (x_bs, sparsity_layout_x_bs, y_bs, sparsity_layout_y_bs, sparsity_layout_o_bs)]:
+            (x_bs, sparsity_layout_x_bs, y_bs, sparsity_layout_y_bs, sparsity_layout_o_bs),
+            (x_bs, sparsity_layout_x_bs, y_bs, sparsity_layout_y_bs, sparsity_layout_o_d)]:
             x_stock = x.clone().requires_grad_(True)
             y_stock = y.clone().requires_grad_(True)
             x_blksprs = x.clone().requires_grad_(True)

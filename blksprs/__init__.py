@@ -10,7 +10,7 @@ from blksprs.misc.partitioning import split, merge
 class layout:
     from blksprs.layouting.distribution_layout import build_distribution_layout
     from blksprs.layouting.sparsity_layout import build_sparsity_layout, build_sparsity_layout_adaption, \
-        build_sparsity_layout_matmul
+        build_sparsity_layout_matmul, build_sparsity_layout_matmul_fast
 
 
 class misc:
