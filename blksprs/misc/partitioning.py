@@ -2,24 +2,25 @@ import torch
 from torch import Tensor
 
 from blksprs.ops.repeat import forward_flow
+from blksprs.utils.blksprs_tensor import BlksprsTensor
 
 from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_device, \
     validate_sparsity, validate_sparsity_block_size, validate_triton_block_size
 
 
-def split(x: Tensor, sparsity_layout: Tensor, partitions: int,
-          sparsity_block_size: int, triton_block_size: int = None) -> (Tensor, Tensor):
+def split(x: BlksprsTensor, sparsity_layout: Tensor, partitions: int,
+          sparsity_block_size: int, triton_block_size: int = None) -> (BlksprsTensor, Tensor):
     """Splits a block-sparse tensor in compressed form along the last dimension into partitions.
 
     Args:
-        x (Tensor): A block-sparse tensor in compressed form.
+        x (BlksprsTensor): A block-sparse tensor in compressed form.
         sparsity_layout (Tensor): The sparsity layout of the block-sparse tensor.
         partitions (int): The number of partitions to split the block-sparse tensor into.
         sparsity_block_size (int): The size of the sparsity blocks.
         triton_block_size (int): The block size to use for the triton kernel (default ``None``).
 
     Returns:
-        Tensor: The block-sparse tensor split into partitions in compressed form.
+        BlksprsTensor: The block-sparse tensor split into partitions in compressed form.
         Tensor: The sparsity layout of the output tensor.
 
     """
@@ -53,8 +54,8 @@ def split(x: Tensor, sparsity_layout: Tensor, partitions: int,
 
     validate_contiguous(sparsity_layout_output, sparsity_lut, sparsity_reverse_lut)
 
-    return _BlocksparseSplit.apply(x, sparsity_layout_output, sparsity_lut, sparsity_reverse_lut, partitions,
-                                   sparsity_block_size, n_sparse_blocks, triton_block_size), sparsity_layout_output
+    return BlksprsTensor(_BlocksparseSplit.apply(x, sparsity_layout_output, sparsity_lut, sparsity_reverse_lut, partitions,
+                                   sparsity_block_size, n_sparse_blocks, triton_block_size)), sparsity_layout_output
 
 
 class _BlocksparseSplit(torch.autograd.Function):
@@ -79,19 +80,19 @@ class _BlocksparseSplit(torch.autograd.Function):
                      sparsity_block_size, triton_block_size)[0], None, None, None, None, None, None, None
 
 
-def merge(x: Tensor, sparsity_layout: Tensor, partitions: int,
-          sparsity_block_size: int, triton_block_size: int = None) -> (Tensor, Tensor):
+def merge(x: BlksprsTensor, sparsity_layout: Tensor, partitions: int,
+          sparsity_block_size: int, triton_block_size: int = None) -> (BlksprsTensor, Tensor):
     """Merges the specified partitions of a block-sparse tensor in compressed form along the last dimension.
 
     Args:
-        x (Tensor): A block-sparse tensor in compressed form.
+        x (BlksprsTensor): A block-sparse tensor in compressed form.
         sparsity_layout (Tensor): The sparsity layout of the block-sparse tensor.
         partitions (int): The number of partitions to be merged.
         sparsity_block_size (int): The size of the sparsity blocks.
         triton_block_size (int): The block size to use for the triton kernel (default ``None``).
 
     Returns:
-        Tensor: The merged block-sparse tensor in compressed form.
+        BlksprsTensor: The merged block-sparse tensor in compressed form.
         Tensor: The sparsity layout of the output tensor.
 
     """
@@ -127,8 +128,8 @@ def merge(x: Tensor, sparsity_layout: Tensor, partitions: int,
 
     validate_contiguous(sparsity_layout_output, sparsity_lut, sparsity_reverse_lut)
 
-    return _BlocksparseMerge.apply(x, sparsity_layout_output, sparsity_lut, sparsity_reverse_lut, partitions,
-                                   sparsity_block_size, n_sparse_blocks, triton_block_size), sparsity_layout_output
+    return BlksprsTensor(_BlocksparseMerge.apply(x, sparsity_layout_output, sparsity_lut, sparsity_reverse_lut, partitions,
+                                   sparsity_block_size, n_sparse_blocks, triton_block_size)), sparsity_layout_output
 
 
 class _BlocksparseMerge(torch.autograd.Function):

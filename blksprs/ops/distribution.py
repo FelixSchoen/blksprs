@@ -3,25 +3,26 @@ import triton
 from torch import Tensor
 from triton import language as tl
 
+from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import get_triton_block_size, stride
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity, validate_dtype_int, validate_sparsity_block_size, validate_triton_block_size
 
 
-def gather(src: Tensor, sparsity_layout_src: Tensor, idx: Tensor, sparsity_layout_idx: Tensor,
-           sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
+def gather(src: BlksprsTensor, sparsity_layout_src: Tensor, idx: BlksprsTensor, sparsity_layout_idx: Tensor,
+           sparsity_block_size: int, triton_block_size: int = None) -> BlksprsTensor:
     """Applies a gather operation on a block-sparse tensor in compressed form.
 
     Args:
-        src (Tensor): The source block-sparse tensor in compressed form to gather from.
+        src (BlksprsTensor): The source block-sparse tensor in compressed form to gather from.
         sparsity_layout_src (Tensor): The sparsity layout of the source block-sparse tensor.
-        idx (Tensor): The block-sparse indices tensor in compressed form specifying how to gather from the source tensor.
+        idx (BlksprsTensor): The block-sparse indices tensor in compressed form specifying how to gather from the source tensor.
         sparsity_layout_idx (Tensor): The sparsity layout of the indices block-sparse tensor.
         sparsity_block_size (int): The size of the sparsity blocks.
         triton_block_size (int, optional): The block size to use for the triton kernel (default ``None``).
 
     Returns:
-        Tensor: The result of the gather operation as a block-sparse tensor in compressed form.
+        BlksprsTensor: The result of the gather operation as a block-sparse tensor in compressed form.
 
     """
     src = src.contiguous()
@@ -45,9 +46,9 @@ def gather(src: Tensor, sparsity_layout_src: Tensor, idx: Tensor, sparsity_layou
     validate_contiguous(sparsity_layout_src, sparsity_reverse_lut_x,
                         sparsity_layout_idx, sparsity_lut_i)
 
-    return _BlocksparseGather.apply(src, sparsity_layout_src, sparsity_reverse_lut_x,
+    return BlksprsTensor(_BlocksparseGather.apply(src, sparsity_layout_src, sparsity_reverse_lut_x,
                                     idx, sparsity_layout_idx, sparsity_lut_i,
-                                    sparsity_block_size, triton_block_size)
+                                    sparsity_block_size, triton_block_size))
 
 
 class _BlocksparseGather(torch.autograd.Function):
@@ -168,10 +169,10 @@ class _BlocksparseGather(torch.autograd.Function):
         tl.store(o + blk_o_idx, blk_x, mask=blk_o_msk)
 
 
-def scatter(src: Tensor, sparsity_layout_src: Tensor,
-            idx: Tensor,
+def scatter(src: BlksprsTensor, sparsity_layout_src: Tensor,
+            idx: BlksprsTensor,
             sparsity_layout_tgt: Tensor,
-            sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
+            sparsity_block_size: int, triton_block_size: int = None) -> BlksprsTensor:
     """Wrapper for ``scatter_reduce`` with ``reduce_op="none"``.
 
     """
@@ -182,17 +183,17 @@ def scatter(src: Tensor, sparsity_layout_src: Tensor,
                           reduce_op="none", triton_block_size=triton_block_size)
 
 
-def scatter_reduce(src: Tensor, sparsity_layout_src: Tensor,
-                   idx: Tensor,
+def scatter_reduce(src: BlksprsTensor, sparsity_layout_src: Tensor,
+                   idx: BlksprsTensor,
                    sparsity_layout_tgt: Tensor,
                    sparsity_block_size: int,
-                   reduce_op: str = "sum", triton_block_size: int = None) -> Tensor:
+                   reduce_op: str = "sum", triton_block_size: int = None) -> BlksprsTensor:
     """Applies a scatter operation on a block-sparse tensor in compressed form.
 
     Args:
-        src (Tensor): The source block-sparse tensor in compressed form to scatter from.
+        src (BlksprsTensor): The source block-sparse tensor in compressed form to scatter from.
         sparsity_layout_src (Tensor): The sparsity layout of the source block-sparse tensor.
-        idx (Tensor): The block-sparse indices tensor in compressed form specifying how to scatter to the target tensor.
+        idx (BlksprsTensor): The block-sparse indices tensor in compressed form specifying how to scatter to the target tensor.
         sparsity_layout_tgt (Tensor): The sparsity layout of the target block-sparse tensor.
         sparsity_block_size (int): The size of the sparsity blocks.
         reduce_op (str, optional): The reduction operation to apply during the scatter operation (default ``"sum"``).
@@ -200,7 +201,7 @@ def scatter_reduce(src: Tensor, sparsity_layout_src: Tensor,
         triton_block_size (int, optional): The block size to use for the triton kernel (default ``None``).
 
     Returns:
-        Tensor: The result of the scatter operation as a block-sparse tensor in compressed form.
+        BlksprsTensor: The result of the scatter operation as a block-sparse tensor in compressed form.
 
     """
     src = src.contiguous()
@@ -229,11 +230,11 @@ def scatter_reduce(src: Tensor, sparsity_layout_src: Tensor,
     validate_contiguous(sparsity_layout_src, sparsity_lut_x,
                         sparsity_layout_tgt, sparsity_reverse_lut_o)
 
-    return _BlocksparseScatterReduce.apply(src, sparsity_layout_src, sparsity_lut_x,
+    return BlksprsTensor(_BlocksparseScatterReduce.apply(src, sparsity_layout_src, sparsity_lut_x,
                                            idx,
                                            sparsity_layout_tgt, sparsity_reverse_lut_o,
                                            sparsity_block_size, n_sparse_blocks,
-                                           reduce_op, triton_block_size)
+                                           reduce_op, triton_block_size))
 
 
 class _BlocksparseScatterReduce(torch.autograd.Function):

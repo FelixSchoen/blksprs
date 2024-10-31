@@ -6,23 +6,27 @@ from torch import Tensor
 from triton import language as tl
 
 from blksprs.layouting.sparsity_layout import build_sparsity_layout_adaption
+from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import get_triton_block_size, stride
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity, validate_sparsity_block_size, validate_triton_block_size, validate_sparsity_dense
 
 
-def from_blksprs(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, fill_value: float = 0,
+def from_blksprs(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int, fill_value: float = 0,
                  triton_block_size: int = None) -> Tensor:
+    """Wrapper for ``to_dense``.
+
+    """
     return to_dense(x, sparsity_layout, sparsity_block_size, fill_value, triton_block_size)
 
 
-def to_dense(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, fill_value: float = 0,
+def to_dense(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int, fill_value: float = 0,
              triton_block_size: int = None) -> Tensor:
     """Converts a block-sparse tensor in compressed form to a block-sparse tensor in regular form based on the given
         sparsity layout.
 
     Args:
-        x (Tensor): A block-sparse tensor in compressed form.
+        x (BlksprsTensor): A block-sparse tensor in compressed form.
         sparsity_layout (Tensor): The sparsity layout of the block-sparse tensor.
         sparsity_block_size (int): The size of the sparsity blocks.
         fill_value (float): The value to fill the resulting dense tensor with where the block-sparse tensor is not
@@ -50,12 +54,12 @@ def to_dense(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, fill_
     validate_contiguous(sparsity_reverse_lut)
 
     if sparsity_layout.size(1) == 1 and sparsity_layout.size(2) == 1 and torch.all(sparsity_layout):
-        return x
+        return BlksprsTensor(x)
 
-    return _BlocksparseToDense.apply(x,
-                                     sparsity_layout, sparsity_reverse_lut,
-                                     sparsity_block_size, fill_value,
-                                     triton_block_size)
+    return BlksprsTensor(_BlocksparseToDense.apply(x,
+                                                   sparsity_layout, sparsity_reverse_lut,
+                                                   sparsity_block_size, fill_value,
+                                                   triton_block_size))
 
 
 class _BlocksparseToDense(torch.autograd.Function):
@@ -150,11 +154,15 @@ class _BlocksparseToDense(torch.autograd.Function):
 
 
 def to_blksprs(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int,
-               triton_block_size: int = None) -> Tensor:
+               triton_block_size: int = None) -> BlksprsTensor:
+    """Wrapper for ``to_sparse``.
+
+    """
     return to_sparse(x, sparsity_layout, sparsity_block_size, triton_block_size)
 
 
-def to_sparse(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
+def to_sparse(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int,
+              triton_block_size: int = None) -> BlksprsTensor:
     """Converts a block-sparse tensor in regular form to a block-sparse tensor in compressed form based on the given
     sparsity layout.
 
@@ -165,7 +173,7 @@ def to_sparse(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, trit
         triton_block_size (int): The block size to use for the triton kernel (default ``None``).
 
     Returns:
-        Tensor: The block-sparse tensor converted to compressed form.
+        BlksprsTensor: The block-sparse tensor converted to compressed form.
 
     """
     x = x.contiguous()
@@ -183,12 +191,12 @@ def to_sparse(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, trit
     validate_contiguous(sparsity_layout, sparsity_lut)
 
     if sparsity_layout.size(1) == 1 and sparsity_layout.size(2) == 1 and torch.all(sparsity_layout):
-        return x
+        return BlksprsTensor(x)
 
-    return _BlocksparseToSparse.apply(x,
-                                      sparsity_layout, sparsity_lut,
-                                      sparsity_block_size, n_sparse_blocks,
-                                      triton_block_size)
+    return BlksprsTensor(_BlocksparseToSparse.apply(x,
+                                                    sparsity_layout, sparsity_lut,
+                                                    sparsity_block_size, n_sparse_blocks,
+                                                    triton_block_size))
 
 
 class _BlocksparseToSparse(torch.autograd.Function):
@@ -280,13 +288,14 @@ class _BlocksparseToSparse(torch.autograd.Function):
         tl.store(o + blk_o_idx, blk_d, mask=blk_o_msk)
 
 
-def adapt_layout(x: Tensor, sparsity_layout_from: Tensor, sparsity_block_size_from: int, sparsity_block_size_to: int,
-                 preprocess_data: dict = None, triton_block_size: int = None) -> Tensor:
+def adapt_layout(x: BlksprsTensor, sparsity_layout_from: Tensor, sparsity_block_size_from: int,
+                 sparsity_block_size_to: int,
+                 preprocess_data: dict = None, triton_block_size: int = None) -> BlksprsTensor:
     """Adapts the sparsity layout of a block-sparse tensor, resulting in a new block-sparse tensor in compressed form
         conforming to the new sparsity layout (and sparsity block size) definition.
 
     Args:
-        x (Tensor): A block-sparse tensor in compressed form.
+        x (BlksprsTensor): A block-sparse tensor in compressed form.
         sparsity_layout_from (Tensor): The sparsity layout of the input block-sparse tensor.
         sparsity_block_size_from (int): The size of the sparsity blocks of the input sparsity layout.
         sparsity_block_size_to (int): The size of the sparsity blocks of the output sparsity layout.
@@ -294,7 +303,7 @@ def adapt_layout(x: Tensor, sparsity_layout_from: Tensor, sparsity_block_size_fr
         triton_block_size (int): The block size to use for the triton kernel (default ``None``).
 
     Returns:
-        Tensor: The block-sparse tensor in compressed form with the adapted sparsity layout and sparsity block size.
+        BlksprsTensor: The block-sparse tensor in compressed form with the adapted sparsity layout and sparsity block size.
 
     """
     x = x.contiguous()
@@ -339,12 +348,13 @@ def adapt_layout(x: Tensor, sparsity_layout_from: Tensor, sparsity_block_size_fr
     validate_contiguous(sparsity_layout_to, sparsity_reverse_lut_from, sparsity_lut_to)
 
     if (sparsity_block_size_from == sparsity_block_size_to) and torch.equal(sparsity_layout_from, sparsity_layout_to):
-        return x
+        return BlksprsTensor(x)
 
-    return _BlocksparseAdaptLayout.apply(x,
-                                         sparsity_layout_from, sparsity_reverse_lut_from, sparsity_block_size_from,
-                                         sparsity_layout_to, sparsity_lut_to, sparsity_block_size_to,
-                                         n_sparse_blocks_to, min_sparsity_block_size, triton_block_size)
+    return BlksprsTensor(_BlocksparseAdaptLayout.apply(x,
+                                                       sparsity_layout_from, sparsity_reverse_lut_from,
+                                                       sparsity_block_size_from,
+                                                       sparsity_layout_to, sparsity_lut_to, sparsity_block_size_to,
+                                                       n_sparse_blocks_to, min_sparsity_block_size, triton_block_size))
 
 
 class _BlocksparseAdaptLayout(torch.autograd.Function):

@@ -3,13 +3,14 @@ import triton
 from torch import Tensor
 from triton import language as tl
 
+from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import get_triton_block_size, stride
 from blksprs.utils.validation import validate_contiguous, validate_device, \
     validate_sparsity_block_size, validate_triton_block_size
 
 
 def broadcast_add(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
-                  sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
+                  sparsity_block_size: int, triton_block_size: int = None) -> BlksprsTensor:
     """Performs a broadcast and subsequent addition of two dense tensors x and y. Returns a block-sparse tensor in
         compressed form.
 
@@ -21,7 +22,7 @@ def broadcast_add(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
         triton_block_size (int, optional): The block size to use for the triton kernel (default ``None``).
 
     Returns:
-        Tensor: The result of the operation as a block-sparse tensor in compressed form. Each element o(i, j) of the
+        BlksprsTensor: The result of the operation as a block-sparse tensor in compressed form. Each element o(i, j) of the
             output tensor corresponds to x(i) + y(j).
 
     """
@@ -70,11 +71,11 @@ def broadcast_add(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
       sparsity_block_size,
       triton_block_size))
 
-    return output
+    return BlksprsTensor(output)
 
 
 def broadcast_sub(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
-                  sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
+                  sparsity_block_size: int, triton_block_size: int = None) -> BlksprsTensor:
     """Wrapper for ``broadcast_add`` with negated y.
 
     """

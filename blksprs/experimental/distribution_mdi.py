@@ -3,17 +3,18 @@ import triton
 from torch import Tensor
 from triton import language as tl
 
+from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import get_triton_block_size, stride
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity, validate_dtype_int, validate_sparsity_block_size, validate_triton_block_size
 
 
-def gather_mdi(src: Tensor, sparsity_layout_src: Tensor,
-               idx_bat: Tensor,
-               idx_row: Tensor,
-               idx_col: Tensor,
+def gather_mdi(src: BlksprsTensor, sparsity_layout_src: Tensor,
+               idx_bat: BlksprsTensor,
+               idx_row: BlksprsTensor,
+               idx_col: BlksprsTensor,
                sparsity_layout_idx: Tensor,
-               sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
+               sparsity_block_size: int, triton_block_size: int = None) -> BlksprsTensor:
     src = src.contiguous()
     idx_bat = idx_bat.contiguous()
     idx_col = idx_col.contiguous()
@@ -37,9 +38,9 @@ def gather_mdi(src: Tensor, sparsity_layout_src: Tensor,
     validate_contiguous(sparsity_layout_src, sparsity_reverse_lut_x,
                         sparsity_layout_idx, sparsity_lut_i)
 
-    return _BlocksparseGatherMDI.apply(src, sparsity_layout_src, sparsity_reverse_lut_x,
-                                       idx_bat, idx_col, sparsity_layout_idx, sparsity_lut_i,
-                                       sparsity_block_size, triton_block_size)
+    return BlksprsTensor(_BlocksparseGatherMDI.apply(src, sparsity_layout_src, sparsity_reverse_lut_x,
+                                                     idx_bat, idx_col, sparsity_layout_idx, sparsity_lut_i,
+                                                     sparsity_block_size, triton_block_size))
 
 
 class _BlocksparseGatherMDI(torch.autograd.Function):
@@ -167,13 +168,13 @@ class _BlocksparseGatherMDI(torch.autograd.Function):
         tl.store(o + blk_o_idx, blk_x, mask=blk_o_msk)
 
 
-def scatter_reduce_mdi(src: Tensor, sparsity_layout_src: Tensor,
-                       idx_bat: Tensor,
-                       idx_row: Tensor,
-                       idx_col: Tensor,
+def scatter_reduce_mdi(src: BlksprsTensor, sparsity_layout_src: Tensor,
+                       idx_bat: BlksprsTensor,
+                       idx_row: BlksprsTensor,
+                       idx_col: BlksprsTensor,
                        sparsity_layout_tgt: Tensor,
                        sparsity_block_size: int,
-                       reduce_op: str = "sum", triton_block_size: int = None) -> Tensor:
+                       reduce_op: str = "sum", triton_block_size: int = None) -> BlksprsTensor:
     src = src.contiguous()
     idx_bat = idx_bat.contiguous()
     idx_col = idx_col.contiguous()
@@ -203,12 +204,12 @@ def scatter_reduce_mdi(src: Tensor, sparsity_layout_src: Tensor,
     validate_contiguous(sparsity_layout_src, sparsity_lut_x,
                         sparsity_layout_tgt, sparsity_reverse_lut_o)
 
-    return _BlocksparseScatterReduceMDI.apply(src, sparsity_layout_src, sparsity_lut_x,
-                                              idx_bat,
-                                              idx_col,
-                                              sparsity_layout_tgt, sparsity_reverse_lut_o,
-                                              sparsity_block_size, n_sparse_blocks,
-                                              reduce_op, triton_block_size)
+    return BlksprsTensor(_BlocksparseScatterReduceMDI.apply(src, sparsity_layout_src, sparsity_lut_x,
+                                                            idx_bat,
+                                                            idx_col,
+                                                            sparsity_layout_tgt, sparsity_reverse_lut_o,
+                                                            sparsity_block_size, n_sparse_blocks,
+                                                            reduce_op, triton_block_size))
 
 
 class _BlocksparseScatterReduceMDI(torch.autograd.Function):
@@ -353,8 +354,8 @@ class _BlocksparseScatterReduceMDI(torch.autograd.Function):
             tl.atomic_add(o + blk_o_idx, blk_x, mask=blk_o_msk)
 
 
-def build_distribution_layout_mdi(idx_bat: Tensor, idx_row: Tensor, idx_col: Tensor, sparsity_layout_idx: Tensor,
-                                  size_target: torch.Size,
+def build_distribution_layout_mdi(idx_bat: BlksprsTensor, idx_row: BlksprsTensor, idx_col: BlksprsTensor,
+                                  sparsity_layout_idx: Tensor, size_target: torch.Size,
                                   sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
     validate_dimensions(idx_bat, idx_col)
     validate_contiguous(idx_bat, idx_col)

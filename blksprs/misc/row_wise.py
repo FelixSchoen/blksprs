@@ -3,13 +3,14 @@ import triton
 from torch import Tensor
 from triton import language as tl
 
+from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import get_triton_block_size, stride
 from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_device, validate_sparsity, \
     validate_sparsity_block_size, validate_triton_block_size
 
 
-def row_wise_sum(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int,
-                 flag_slice_only: bool = False, triton_block_size: int = None) -> tuple[Tensor, Tensor]:
+def row_wise_sum(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
+                 flag_slice_only: bool = False, triton_block_size: int = None) -> (BlksprsTensor, Tensor):
     """Computes the row-wise sum of a block-sparse tensor.
 
     Returns a block-sparse tensor in compressed form with only one block per row, where the first entry contains the sum
@@ -19,7 +20,7 @@ def row_wise_sum(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int,
         If ``flag_slice_only`` is set the output will be of shape ``[x.size(0), x.size(1), 1]``.
 
     Args:
-        x (Tensor): A block-sparse tensor in compressed form.
+        x (BlksprsTensor): A block-sparse tensor in compressed form.
         sparsity_layout (Tensor): The sparsity layout of the block-sparse tensor.
         sparsity_block_size (int): The size of the sparsity blocks.
         flag_slice_only (bool, optional): If set the output will be of shape ``[x.size(0), x.size(1), 1]``
@@ -27,7 +28,7 @@ def row_wise_sum(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int,
         triton_block_size (int): The block size to use for the triton kernel (default ``None``).
 
     Returns:
-        tuple[Tensor, Tensor]: A tuple containing a block-sparse tensor in compressed form containing the row-wise sum
+        tuple[BlksprsTensor, Tensor]: A tuple containing a block-sparse tensor in compressed form containing the row-wise sum
             of the input and the sparsity layout of the output tensor.
 
     """
@@ -85,7 +86,7 @@ def row_wise_sum(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int,
       sparsity_reverse_lut_output,
       triton_block_size))
 
-    return (output, sparsity_layout_output)
+    return BlksprsTensor(output), sparsity_layout_output
 
 
 @triton.jit
@@ -131,8 +132,8 @@ def kernel_blocksparse_row_wise_sum(x,
     tl.atomic_add(o + o_idx, buf, o_msk)
 
 
-def row_wise_max(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int,
-                 flag_slice_only: bool = False, triton_block_size: int = None) -> tuple[Tensor, Tensor]:
+def row_wise_max(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
+                 flag_slice_only: bool = False, triton_block_size: int = None) -> (BlksprsTensor, Tensor):
     """Computes the row-wise max of a block-sparse tensor.
 
     Returns a block-sparse tensor in compressed form with only one block per row, where the first entry contains the
@@ -142,7 +143,7 @@ def row_wise_max(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int,
         If ``flag_slice_only`` is set the output will be of shape ``[x.size(0), x.size(1), 1]``.
 
     Args:
-        x (Tensor): A block-sparse tensor in compressed form.
+        x (BlksprsTensor): A block-sparse tensor in compressed form.
         sparsity_layout (Tensor): The sparsity layout of the block-sparse tensor.
         sparsity_block_size (int): The size of the sparsity blocks.
         flag_slice_only (bool, optional): If set the output will be of shape ``[x.size(0), x.size(1), 1]``
@@ -150,7 +151,7 @@ def row_wise_max(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int,
         triton_block_size (int): The block size to use for the triton kernel (default ``None``).
 
     Returns:
-        tuple[Tensor, Tensor]: A tuple containing a block-sparse tensor in compressed form containing the row-wise max
+        tuple[BlksprsTensor, Tensor]: A tuple containing a block-sparse tensor in compressed form containing the row-wise max
             of the input and the sparsity layout of the output tensor.
 
     """
@@ -208,7 +209,7 @@ def row_wise_max(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int,
       sparsity_reverse_lut_output,
       triton_block_size))
 
-    return output, sparsity_layout_output
+    return BlksprsTensor(output), sparsity_layout_output
 
 
 @triton.jit
@@ -254,19 +255,19 @@ def kernel_blocksparse_row_wise_max(x,
     tl.atomic_max(o + o_idx, buf, o_msk)
 
 
-def row_wise_add(x: Tensor, sparsity_layout_x: Tensor, y: Tensor,
-                 sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
+def row_wise_add(x: BlksprsTensor, sparsity_layout_x: Tensor, y: Tensor,
+                 sparsity_block_size: int, triton_block_size: int = None) -> BlksprsTensor:
     """For each row in ``y`` adds the value to each value in the corresponding row of the block-sparse tensor ``x``.
 
     Args:
-        x (Tensor): A block-sparse tensor in compressed form.
+        x (BlksprsTensor): A block-sparse tensor in compressed form.
         sparsity_layout_x (Tensor): The sparsity layout of the block-sparse tensor.
-        y (Tensor): A block-sparse tensor in compressed form with only one value per row and a single column of sparse blocks.
+        y (BlksprsTensor): A block-sparse tensor in compressed form with only one value per row and a single column of sparse blocks.
         sparsity_block_size (int): The size of the sparsity blocks.
         triton_block_size (int): The block size to use for the triton kernel (default ``None``).
 
     Returns:
-        Tensor: The values of ``x`` with the first value of ``y`` in each row added to them as a block-sparse tensor in
+        BlksprsTensor: The values of ``x`` with the first value of ``y`` in each row added to them as a block-sparse tensor in
             compressed form.
 
     """
@@ -319,11 +320,11 @@ def row_wise_add(x: Tensor, sparsity_layout_x: Tensor, y: Tensor,
       triton_block_size
       ))
 
-    return output
+    return BlksprsTensor(output)
 
 
-def row_wise_sub(x: Tensor, sparsity_layout_x: Tensor, y: Tensor,
-                 sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
+def row_wise_sub(x: BlksprsTensor, sparsity_layout_x: Tensor, y: Tensor,
+                 sparsity_block_size: int, triton_block_size: int = None) -> BlksprsTensor:
     """Wrapper for ``row_wise_add`` with negated y.
 
     """
