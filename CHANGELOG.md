@@ -9,6 +9,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - Expose validation functions
+- Add ``bs.utils.apply_torch_linear`` function
 
 ### Changed
 

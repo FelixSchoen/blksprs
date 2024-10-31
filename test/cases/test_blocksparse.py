@@ -9,6 +9,7 @@ from matplotlib import pyplot as plt
 import blksprs as bs
 from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs import BlksprsTensor
+from blksprs.utils.processing import apply_torch_linear
 
 # TODO Benchmarking
 
@@ -106,7 +107,7 @@ def setup():
 
 def override_pytorch_repr():
     normal_repr = torch.Tensor.__repr__
-    torch.Tensor.__repr__ = lambda self: f"{self.shape}, {self.dtype}:\n{normal_repr(self)}"
+    torch.Tensor.__repr__ = lambda self, *args, **kwargs: f"{self.shape}, {self.dtype}:\n{normal_repr(self)}"
 
 
 # Ops
@@ -772,11 +773,11 @@ def test_build_sparsity_layout_adaption():
 
                 x_bs_to_cmp = bs.ops.to_sparse(x_stock, sparsity_layout_to, sparsity_block_size_to, triton_block_size_c)
                 blksprs_x_bs_to_cmp = bs.ops.adapt_layout(bs.ops.to_sparse(x_blksprs, sparsity_layout_from,
-                                                                                 sparsity_block_size_from,
-                                                                                 triton_block_size_c),
-                                                                sparsity_layout_from,
-                                                                sparsity_block_size_from, sparsity_block_size_to,
-                                                                triton_block_size=triton_block_size_c)
+                                                                           sparsity_block_size_from,
+                                                                           triton_block_size_c),
+                                                          sparsity_layout_from,
+                                                          sparsity_block_size_from, sparsity_block_size_to,
+                                                          triton_block_size=triton_block_size_c)
 
                 x_bs_to_reg = bs.ops.to_dense(x_bs_to_cmp, sparsity_layout_to, sparsity_block_size_to)
                 blksprs_x_bs_to_reg = bs.ops.to_dense(blksprs_x_bs_to_cmp, sparsity_layout_to, sparsity_block_size_to)
@@ -801,7 +802,8 @@ def test_build_sparsity_layout_matmul():
         sparsity_layout_y_bs = _get_blocksparse_layout(b, k, n, sparsity_block_size, sparsity_percentage)
 
         sparsity_layout_matmul = bs.layouting.build_sparsity_layout_matmul(sparsity_layout_x_bs, sparsity_layout_y_bs)
-        sparsity_layout_matmul_fast = bs.layouting.build_sparsity_layout_matmul_fast(sparsity_layout_x_bs, sparsity_layout_y_bs)
+        sparsity_layout_matmul_fast = bs.layouting.build_sparsity_layout_matmul_fast(sparsity_layout_x_bs,
+                                                                                     sparsity_layout_y_bs)
 
 
 def test_build_distribution_layout():
@@ -829,7 +831,7 @@ def test_build_distribution_layout():
                 stock_out_buffer.scatter_reduce(dim=-1, index=i.to(torch.int64), src=src, reduce="sum"),
                 sparsity_layout_tgt, sparsity_block_size, triton_block_size)
             stock_distribution_layout = bs.layouting.build_sparsity_layout(stock_scatter_out, sparsity_block_size,
-                                                              triton_block_size)
+                                                                           triton_block_size)
 
             blksprs_distribution_layout = bs.layouting.build_distribution_layout(
                 bs.ops.to_sparse(i, sparsity_layout_i, sparsity_block_size, triton_block_size),
@@ -837,6 +839,32 @@ def test_build_distribution_layout():
 
             torch.allclose(blksprs_distribution_layout.to(torch.int), stock_distribution_layout.to(torch.int),
                            atol=ATOL, rtol=RTOL)
+
+
+# Utils
+
+def test_apply_torch_linear():
+    for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+        x_d = torch.randn(size=(b, m, k), device=DEVICE)
+        sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
+
+        sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
+        x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size, triton_block_size)
+
+        for bias in [True, False]:
+            linear = torch.nn.Linear(k, n, bias=bias, device=DEVICE)
+
+            for x, sparsity_layout_x in [(x_d, sparsity_layout_x_d), (x_bs, sparsity_layout_x_bs)]:
+                x_stock = x.clone().requires_grad_(True)
+                x_blksprs = x.clone().requires_grad_(True)
+
+                stock_linear_out = linear(x_stock)
+                blksprs_linear_out, sparsity_layout_xl = bs.utils.apply_torch_linear(
+                    bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
+                    sparsity_layout_x, sparsity_block_size, linear)
+                blksprs_linear_dense_out = bs.ops.to_dense(blksprs_linear_out, sparsity_layout_xl, sparsity_block_size)
+
+                assert torch.allclose(blksprs_linear_dense_out, stock_linear_out, atol=ATOL, rtol=RTOL)
 
 
 # Misc
@@ -854,17 +882,19 @@ def test_broadcast_addition():
                                                               sparsity_layout_o, sparsity_block_size,
                                                               triton_block_size).to(torch.float)
             blksprs_broadcast_addition_out = bs.ops.misc.broadcast_add(x, y, sparsity_layout_o,
-                                                           sparsity_block_size, triton_block_size)
+                                                                       sparsity_block_size, triton_block_size)
             blksprs_broadcast_addition_dense_out = bs.ops.to_dense(blksprs_broadcast_addition_out, sparsity_layout_o,
-                                                            sparsity_block_size, triton_block_size=triton_block_size)
+                                                                   sparsity_block_size,
+                                                                   triton_block_size=triton_block_size)
 
             stock_broadcast_subtraction = _blocksparse_roundtrip(torch.sub(x.unsqueeze(-1), y.unsqueeze(-2)),
                                                                  sparsity_layout_o, sparsity_block_size,
                                                                  triton_block_size).to(torch.float)
             blksprs_broadcast_subtraction = bs.ops.misc.broadcast_sub(x, y, sparsity_layout_o,
-                                                          sparsity_block_size, triton_block_size)
+                                                                      sparsity_block_size, triton_block_size)
             blksprs_broadcast_subtraction_dense_out = bs.ops.to_dense(blksprs_broadcast_subtraction, sparsity_layout_o,
-                                                               sparsity_block_size, triton_block_size=triton_block_size)
+                                                                      sparsity_block_size,
+                                                                      triton_block_size=triton_block_size)
 
             assert torch.allclose(blksprs_broadcast_addition_dense_out.to(torch.float),
                                   stock_broadcast_addition.to(torch.float),
@@ -929,7 +959,7 @@ def test_blksprs_gather_mdi():
                 sparsity_layout_i,
                 sparsity_block_size, triton_block_size)
             blksprs_gather_mdi_dense_out = bs.ops.to_dense(blksprs_gather_mdi_out, sparsity_layout_i,
-                                                    sparsity_block_size, triton_block_size=triton_block_size)
+                                                           sparsity_block_size, triton_block_size=triton_block_size)
 
             assert torch.allclose(blksprs_gather_mdi_dense_out.to(torch.float), stock_gather_out.to(torch.float),
                                   atol=ATOL, rtol=RTOL)
@@ -996,8 +1026,9 @@ def test_blksprs_scatter_mdi():
                 sparsity_layout_o,
                 sparsity_block_size,
                 reduce_op="sum", triton_block_size=triton_block_size)
-            blksprs_scatter_mdi_dense_out = bs.ops.to_dense(blksprs_scatter_mdi_out, sparsity_layout_o, sparsity_block_size,
-                                                     triton_block_size=triton_block_size)
+            blksprs_scatter_mdi_dense_out = bs.ops.to_dense(blksprs_scatter_mdi_out, sparsity_layout_o,
+                                                            sparsity_block_size,
+                                                            triton_block_size=triton_block_size)
 
             assert torch.allclose(blksprs_scatter_mdi_dense_out, stock_scatter_out, atol=ATOL, rtol=RTOL)
 

@@ -15,7 +15,7 @@ class ops:
         from blksprs.ops.misc.exp import exp
 
     class experimental:
-        from blksprs.experimental.distribution_mdi import gather_mdi, scatter_reduce_mdi
+        from blksprs.ops.experimental.distribution_mdi import gather_mdi, scatter_reduce_mdi
 
 
 class layouting:
@@ -24,10 +24,11 @@ class layouting:
         build_sparsity_layout_matmul, build_sparsity_layout_matmul_fast
 
     class experimental:
-        from blksprs.experimental.distribution_mdi import build_distribution_layout_mdi
+        from blksprs.ops.experimental.distribution_mdi import build_distribution_layout_mdi
 
 
 class utils:
+    from blksprs.utils.processing import apply_torch_linear
     from blksprs.utils.tools import do_shape_blocksparse, undo_shape_blocksparse
     from blksprs.utils.validation import disable_validation
 
