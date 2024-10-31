@@ -4,22 +4,23 @@ from torch import Tensor
 from triton import language as tl
 
 from blksprs.ops.transpose import transpose
+from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import get_triton_block_size, stride
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity, validate_sparsity_block_size, validate_triton_block_size, validate_dtype_float
 
 
-def matmul(x: Tensor, sparsity_layout_x: Tensor,
-           y: Tensor, sparsity_layout_y: Tensor,
+def matmul(x: BlksprsTensor, sparsity_layout_x: Tensor,
+           y: BlksprsTensor, sparsity_layout_y: Tensor,
            sparsity_layout_output: Tensor,
-           sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
+           sparsity_block_size: int, triton_block_size: int = None) -> BlksprsTensor:
     """Performs matrix multiplication between two block-sparse tensors.
 
     The sparsity layout of the output tensor is used to only calculate blocks that will be present in the output.
 
     Args:
-        x (Tensor): A block-sparse tensor in compressed form.
-        y (Tensor): A block-sparse tensor in compressed form.
+        x (BlksprsTensor): A block-sparse tensor in compressed form.
+        y (BlksprsTensor): A block-sparse tensor in compressed form.
         sparsity_layout_x (Tensor): The sparsity layout of the first block-sparse tensor.
         sparsity_layout_y (Tensor): The sparsity layout of the second block-sparse tensor.
         sparsity_layout_output (Tensor): The sparsity layout of the output tensor.
@@ -27,7 +28,7 @@ def matmul(x: Tensor, sparsity_layout_x: Tensor,
         triton_block_size (int, optional): The block size to use for the triton kernel (default ``None``).
 
     Returns:
-        Tensor: The result of the matrix multiplication as a block-sparse tensor in compressed form.
+        BlksprsTensor: The result of the matrix multiplication as a block-sparse tensor in compressed form.
 
     """
     x = x.contiguous()
@@ -61,13 +62,13 @@ def matmul(x: Tensor, sparsity_layout_x: Tensor,
                         sparsity_layout_y, sparsity_reverse_lut_y,
                         sparsity_layout_output, sparsity_lut_o)
 
-    return _BlocksparseMatmulSSS.apply(x, y,
-                                       sparsity_layout_x, sparsity_reverse_lut_x,
-                                       sparsity_layout_y, sparsity_reverse_lut_y,
-                                       sparsity_layout_output, sparsity_lut_o,
-                                       sparsity_block_size,
-                                       n_sparse_blocks,
-                                       triton_block_size)
+    return BlksprsTensor(_BlocksparseMatmulSSS.apply(x, y,
+                                                     sparsity_layout_x, sparsity_reverse_lut_x,
+                                                     sparsity_layout_y, sparsity_reverse_lut_y,
+                                                     sparsity_layout_output, sparsity_lut_o,
+                                                     sparsity_block_size,
+                                                     n_sparse_blocks,
+                                                     triton_block_size))
 
 
 class _BlocksparseMatmulSSS(torch.autograd.Function):

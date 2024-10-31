@@ -5,25 +5,26 @@ from triton import language as tl
 
 from blksprs.misc.exp import exp
 from blksprs.misc.row_wise import row_wise_sum, row_wise_max, row_wise_sub
+from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import get_triton_block_size, stride
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity, validate_sparsity_block_size, validate_triton_block_size
 
 
-def softmax(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
+def softmax(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int, triton_block_size: int = None) -> BlksprsTensor:
     """Computes the softmax of a block-sparse tensor in compressed form.
 
     Note:
         Sparse blocks are not considered for the calculation of the softmax, i.e., all values are assumed to be ``-inf``.
 
     Args:
-        x (Tensor): A block-sparse tensor in compressed form.
+        x (BlksprsTensor): A block-sparse tensor in compressed form.
         sparsity_layout (Tensor): The sparsity layout of the block-sparse tensor.
         sparsity_block_size (int): The size of the sparsity blocks.
         triton_block_size (int): The block size to use for the triton kernel (default ``None``).
 
     Returns:
-        Tensor: The result of the softmax operation as a block-sparse tensor in compressed form.
+        BlksprsTensor: The result of the softmax operation as a block-sparse tensor in compressed form.
 
     """
     x = x.contiguous()
@@ -45,10 +46,10 @@ def softmax(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int, triton
 
     validate_contiguous(sparsity_layout, sparsity_lut, sparsity_reverse_lut_rws)
 
-    return _BlocksparseSoftmax.apply(x, sparsity_layout,
+    return BlksprsTensor(_BlocksparseSoftmax.apply(x, sparsity_layout,
                                      sparsity_lut,
                                      sparsity_reverse_lut_rws,
-                                     sparsity_block_size, triton_block_size)
+                                     sparsity_block_size, triton_block_size))
 
 
 class _BlocksparseSoftmax(torch.autograd.Function):

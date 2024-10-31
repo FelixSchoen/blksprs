@@ -5,6 +5,7 @@ import triton
 from torch import Tensor
 from triton import language as tl
 
+from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import get_triton_block_size, stride
 from blksprs.utils.validation import validate_triton_block_size, validate_dimensions, validate_device, \
     validate_contiguous, validate_sparsity, validate_sparsity_block_size
@@ -82,14 +83,14 @@ def kernel_sparsity_layout(x,
         tl.store(o + blk_o_idx, 1, mask=blk_o_msk)
 
 
-def build_sparsity_layout_adaption(x: Tensor, sparsity_layout_from: Tensor,
+def build_sparsity_layout_adaption(x: BlksprsTensor, sparsity_layout_from: Tensor,
                                    sparsity_block_size_from: int, sparsity_block_size_to: int,
                                    triton_block_size: int = None) -> Tensor:
     """Builds the sparsity layout of a block-sparse tensor in compressed form if a different sparsity block size were
         used.
         
     Args:
-        x (Tensor): A block-sparse tensor in compressed form.
+        x (BlksprsTensor): A block-sparse tensor in compressed form.
         sparsity_layout_from (Tensor): The sparsity layout of the input block-sparse tensor.
         sparsity_block_size_from (int): The size of the sparsity blocks of the input tensor.
         sparsity_block_size_to (int): The desired size of the sparsity blocks for the resulting layout.

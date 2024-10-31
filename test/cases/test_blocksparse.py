@@ -20,6 +20,7 @@ from blksprs.misc.partitioning import split, merge
 from blksprs.ops.repeat import repeat, repeat_interleave
 from blksprs.ops.softmax import softmax
 from blksprs.ops.transpose import transpose
+from blksprs.utils.blksprs_tensor import BlksprsTensor
 
 # TODO Benchmarking
 
@@ -864,6 +865,16 @@ def test_broadcast_addition():
             assert torch.allclose(blksprs_broadcast_subtraction_dense_out.to(torch.float),
                                   stock_broadcast_subtraction.to(torch.float),
                                   atol=ATOL, rtol=RTOL)
+
+def test_subclass():
+    for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+        x_d = torch.randn(size=(b, m, k), device=DEVICE)
+        sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
+        x_bs = BlksprsTensor(_blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size, triton_block_size))
+
+        assert type(x_bs).__name__ == BlksprsTensor.__name__
+
+
 
 
 # Experimental

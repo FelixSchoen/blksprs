@@ -3,18 +3,19 @@ import triton
 from torch import Tensor
 from triton import language as tl
 
+from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import get_triton_block_size, stride
 from blksprs.utils.validation import validate_triton_block_size, validate_dimensions, validate_device, \
     validate_contiguous
 
 
-def build_distribution_layout(indices: Tensor, sparsity_layout_indices: Tensor,
+def build_distribution_layout(indices: BlksprsTensor, sparsity_layout_indices: Tensor,
                               size_target: torch.Size,
                               sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
     """Builds the sparsity layout of either the source of a gather or the target of a scatter operation.
 
     Args:
-        indices (Tensor): The block-sparse indices tensor in compressed form used for the gather or scatter operation.
+        indices (BlksprsTensor): The block-sparse indices tensor in compressed form used for the gather or scatter operation.
         sparsity_layout_indices (Tensor): The sparsity layout of the indices block-sparse tensor.
         size_target (torch.Size): The size of the block-sparse target tensor in regular form.
         sparsity_block_size (int): The size of the sparsity blocks.

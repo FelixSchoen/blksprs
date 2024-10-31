@@ -3,12 +3,13 @@ import triton
 from torch import Tensor
 from triton import language as tl
 
+from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import get_triton_block_size, stride
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity_block_size, validate_triton_block_size
 
 
-def exp(x: Tensor, sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
+def exp(x: BlksprsTensor, sparsity_block_size: int, triton_block_size: int = None) -> BlksprsTensor:
     """Applies the element-wise exponential function to a block-sparse tensor.
 
     Note:
@@ -16,12 +17,12 @@ def exp(x: Tensor, sparsity_block_size: int, triton_block_size: int = None) -> T
         Consider this when converting back to tensors in regular form.
 
     Args:
-        x (Tensor): A block-sparse tensor in compressed form.
+        x (BlksprsTensor): A block-sparse tensor in compressed form.
         sparsity_block_size (int): The size of the sparsity blocks.
         triton_block_size (int): The block size to use for the triton kernel (default ``None``).
 
     Returns:
-        Tensor: The exponential function applied to all elements of the input tensor as a block-sparse tensor in
+        BlksprsTensor: The exponential function applied to all elements of the input tensor as a block-sparse tensor in
             compressed form.
 
     """
@@ -33,7 +34,7 @@ def exp(x: Tensor, sparsity_block_size: int, triton_block_size: int = None) -> T
     validate_sparsity_block_size(sparsity_block_size, x)
     validate_triton_block_size(triton_block_size, sparsity_block_size)
 
-    return _BlocksparseExp.apply(x, sparsity_block_size, triton_block_size)
+    return BlksprsTensor(_BlocksparseExp.apply(x, sparsity_block_size, triton_block_size))
 
 
 class _BlocksparseExp(torch.autograd.Function):

@@ -3,14 +3,15 @@ import triton
 from triton import language as tl
 from torch import Tensor
 
+from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import get_triton_block_size, stride
 from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_device, \
     validate_sparsity, validate_sparsity_block_size, validate_triton_block_size
 
 
-def repeat(x: Tensor, sparsity_layout_x: Tensor, repeats: tuple[int, int, int],
+def repeat(x: BlksprsTensor, sparsity_layout_x: Tensor, repeats: tuple[int, int, int],
            sparsity_block_size: int, sparsity_layout_output: Tensor = None, triton_block_size: int = None) -> (
-        Tensor, Tensor):
+        BlksprsTensor, Tensor):
     """Repeats a block-spare tensor in compressed form according to the given repeats.
     
     Repeats is a 3-tuple of integers, where each integer represents the number of times the tensor should be repeated in
@@ -22,7 +23,7 @@ def repeat(x: Tensor, sparsity_layout_x: Tensor, repeats: tuple[int, int, int],
         them to be sparse.
     
     Args:
-        x (Tensor): A block-sparse tensor in compressed form.
+        x (BlksprsTensor): A block-sparse tensor in compressed form.
         sparsity_layout_x (Tensor): The sparsity layout of the block-sparse tensor.
         repeats (tuple[int, int, int]): The number of times the tensor should be repeated in the first, second and
             third dimension respectively.
@@ -31,7 +32,7 @@ def repeat(x: Tensor, sparsity_layout_x: Tensor, repeats: tuple[int, int, int],
         triton_block_size (int): The block size to use for the triton kernel (default ``None``).
 
     Returns:
-        Tensor: A block-sparse tensor in compressed form containing the repeated values.
+        BlksprsTensor: A block-sparse tensor in compressed form containing the repeated values.
         Tensor: The sparsity layout of the resulting output tensor.
 
     """
@@ -63,14 +64,14 @@ def repeat(x: Tensor, sparsity_layout_x: Tensor, repeats: tuple[int, int, int],
 
     validate_contiguous(sparsity_layout_o, sparsity_lut, sparsity_reverse_lut)
 
-    return _BlocksparseRepeat.apply(x, sparsity_layout_x, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut,
-                                    sparsity_block_size, n_sparse_blocks, triton_block_size), sparsity_layout_o
+    return BlksprsTensor(_BlocksparseRepeat.apply(x, sparsity_layout_x, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut,
+                                    sparsity_block_size, n_sparse_blocks, triton_block_size)), sparsity_layout_o
 
 
-def repeat_interleave(x: Tensor, sparsity_layout_x: Tensor, repeats: int,
+def repeat_interleave(x: BlksprsTensor, sparsity_layout_x: Tensor, repeats: int,
                       sparsity_block_size: int, sparsity_layout_output: Tensor = None,
                       triton_block_size: int = None) -> (
-        Tensor, Tensor):
+        BlksprsTensor, Tensor):
     """Repeats and interleaves the block-sparse tensor in compressed form.
 
     Repeats each matrix contained in the tensors by ``repeats`` amount and places them consecutively in the output
@@ -81,7 +82,7 @@ def repeat_interleave(x: Tensor, sparsity_layout_x: Tensor, repeats: int,
         non-sparse blocks will be filled.
 
     Args:
-        x (Tensor): A block-sparse tensor in compressed form.
+        x (BlksprsTensor): A block-sparse tensor in compressed form.
         sparsity_layout_x (Tensor): The sparsity layout of the block-sparse tensor.
         repeats (int): The number of times to repeat the matrices.
         sparsity_block_size (int): The size of the sparsity blocks.
@@ -89,7 +90,7 @@ def repeat_interleave(x: Tensor, sparsity_layout_x: Tensor, repeats: int,
         triton_block_size (int): The block size to use for the triton kernel (default ``None``).
 
     Returns:
-        Tensor: A block-sparse tensor in compressed form containing the repeated and interleaved matrices.
+        BlksprsTensor: A block-sparse tensor in compressed form containing the repeated and interleaved matrices.
         Tensor: The sparsity layout of the resulting output tensor.
 
     """
@@ -121,8 +122,8 @@ def repeat_interleave(x: Tensor, sparsity_layout_x: Tensor, repeats: int,
 
     validate_contiguous(sparsity_layout_o, sparsity_lut, sparsity_reverse_lut)
 
-    return _BlocksparseRepeat.apply(x, sparsity_layout_x, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut,
-                                    sparsity_block_size, n_sparse_blocks, triton_block_size), sparsity_layout_o
+    return BlksprsTensor(_BlocksparseRepeat.apply(x, sparsity_layout_x, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut,
+                                    sparsity_block_size, n_sparse_blocks, triton_block_size)), sparsity_layout_o
 
 
 class _BlocksparseRepeat(torch.autograd.Function):
