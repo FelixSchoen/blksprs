@@ -3,6 +3,14 @@
 [![GitHub Release](https://img.shields.io/github/v/release/FelixSchoen/blksprs?include_prereleases&label=Latest%20Release)](https://github.com/FelixSchoen/blksprs/releases)
 [![Python Version](https://img.shields.io/badge/Python%20Version-3.11-blue)](https://www.python.org/downloads/release/python-3119/)
 
+## Important Notice
+
+🚨 **Non-Final API** 🚨
+
+Although it already supports a wide variety of functions, this library is still under active development and the API is
+subject to change. For feature requests or bug reports, please open an [issue](https://github.com/FelixSchoen/blksprs/issues).
+We also encourage [pull requests](https://github.com/FelixSchoen/blksprs/pulls).
+
 ## Overview
 
 A lightweight and efficient library for operations on block-sparse matrices in PyTorch using Triton.
@@ -38,8 +46,8 @@ Further helpful operations (included in the ``bs.ops.misc`` module) that do **no
 - Broadcast addition and subtraction between slices
 
 Furthermore, the library provides a set of utility functions for the creation of sparsity layouts based on existing
-dense tensors and for the scatter operation (module ``bs.layouting``), as well as utility functions to ensure correct input
-dimensionality (module ``bs.utils``).
+dense tensors and for the scatter operation (module ``bs.layouting``), as well as utility functions to apply linear layers,
+ensure correct input dimensionality, and validate input (module ``bs.utils``).
 
 ## Installation
 

@@ -7,7 +7,7 @@ class ops:
     from blksprs.ops.softmax import softmax
     from blksprs.ops.transpose import transpose
     from blksprs.ops.repeat import repeat, repeat_interleave
-    from blksprs.ops.misc.partitioning import split, merge
+    from blksprs.ops.partitioning import split, merge
 
     class misc:
         from blksprs.ops.misc.row_wise import row_wise_sum, row_wise_max, row_wise_add, row_wise_sub
