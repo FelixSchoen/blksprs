@@ -124,3 +124,7 @@ def _check_skip_validation():
 def _set_skip_validation(skip_validation: bool):
     global VALIDATION
     VALIDATION = not skip_validation
+
+
+def disable_validation():
+    _set_skip_validation(True)

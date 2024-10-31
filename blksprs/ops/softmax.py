@@ -3,8 +3,8 @@ import triton
 from torch import Tensor
 from triton import language as tl
 
-from blksprs.misc.exp import exp
-from blksprs.misc.row_wise import row_wise_sum, row_wise_max, row_wise_sub
+from blksprs.ops.misc.exp import exp
+from blksprs.ops.misc.row_wise import row_wise_sum, row_wise_max, row_wise_sub
 from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import get_triton_block_size, stride
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
