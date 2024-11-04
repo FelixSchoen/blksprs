@@ -65,9 +65,6 @@ class _BlocksparseGather(torch.autograd.Function):
                 sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
         output = torch.empty_like(i, dtype=x.dtype)
 
-        # TODO
-        output = torch.zeros_like(output)
-
         x_b, x_r, x_c = x.size()
         x_b_s, x_r_s, x_c_s = stride(x)
         s_l_x_b, s_l_x_r, s_l_x_c = sparsity_layout_x.size()

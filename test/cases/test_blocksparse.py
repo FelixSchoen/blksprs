@@ -10,7 +10,6 @@ import blksprs as bs
 from blksprs import BlksprsTensor
 
 # TODO Benchmarking
-# TODO dim mit modulo (-1)
 # TODO Check overall no -1 blocks (implement mask)
 
 # Device setup
@@ -215,18 +214,20 @@ def test_blksprs_transpose():
 
 def test_blksprs_gather():
     for b, m, _, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
-        dims = [0, 1, 2]
+        dims = [-2, -1, 0, 1, 2]
         for dim in dims:
             x_d = torch.randn(size=(b * 2, m * 2, k * 2), device=DEVICE)
             sparsity_layout_x_d = torch.ones(size=(b * 2, m * 2 // sparsity_block_size, k * 2 // sparsity_block_size),
                                              device=DEVICE)
 
-            if dim == 0:
+            if dim % 3 == 0:
                 dist_lim = b * 2
-            elif dim == 1:
+            elif dim % 3 == 1:
                 dist_lim = m * 2
-            else:
+            elif dim % 3 == 2:
                 dist_lim = k * 2
+            else:
+                raise ValueError("Invalid dim")
 
             i_d = (torch.randint(0, dist_lim, size=(b, m, k), dtype=torch.int, device=DEVICE).contiguous())
             sparsity_layout_i_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size),
@@ -263,32 +264,35 @@ def test_blksprs_gather():
 
                 pass
 
-                # target = torch.randn_like(stock_gather_out)
-                # stock_loss = torch.nn.L1Loss()
-                # blksprs_loss = torch.nn.L1Loss()
-                # stock_loss = stock_loss(stock_gather_out, target)
-                # blksprs_loss = blksprs_loss(blksprs_gather_dense_out, target)
-                #
-                # stock_loss.backward()
-                # blksprs_loss.backward()
-                #
-                # assert torch.allclose(x_blksprs.grad.to(torch.float), x_stock.grad.to(torch.float), atol=ATOL, rtol=RTOL)
+                target = torch.randn_like(stock_gather_out)
+                stock_loss = torch.nn.L1Loss()
+                blksprs_loss = torch.nn.L1Loss()
+                stock_loss = stock_loss(stock_gather_out, target)
+                blksprs_loss = blksprs_loss(blksprs_gather_dense_out, target)
+
+                stock_loss.backward()
+                blksprs_loss.backward()
+
+                assert torch.allclose(x_blksprs.grad.to(torch.float), x_stock.grad.to(torch.float), atol=ATOL,
+                                      rtol=RTOL)
 
 
 def test_blksprs_scatter():
     for b, m, _, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
-        dims = [0, 1, 2]
+        dims = [-2, -1, 0, 1, 2]
         for dim in dims:
             x_d = torch.randn(size=(b, m, k), device=DEVICE)
             sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size),
                                              device=DEVICE)
 
-            if dim == 0:
+            if dim % 3 == 0:
                 dist_lim = b * 2
-            elif dim == 1:
+            elif dim % 3 == 1:
                 dist_lim = m * 2
-            else:
+            elif dim % 3 == 2:
                 dist_lim = k * 2
+            else:
+                raise ValueError("Invalid dim")
 
             i_d = (torch.randint(0, dist_lim, size=(b, m, k), dtype=torch.int, device=DEVICE).contiguous())
 
@@ -301,26 +305,6 @@ def test_blksprs_scatter():
             sparsity_layout_o_bs = bs.layouting.build_distribution_layout(
                 bs.ops.to_sparse(i_d, sparsity_layout_x_d, sparsity_block_size, triton_block_size),
                 sparsity_layout_x_d, dim, torch.Size((b * 2, m * 2, k * 2)), sparsity_block_size, triton_block_size)
-
-            # # OLD
-            #
-            # x_d = torch.randn(size=(b, k, n), device=DEVICE)
-            # sparsity_layout_x_d = torch.ones(size=(b, k // sparsity_block_size, n // sparsity_block_size),
-            #                                  device=DEVICE)
-            #
-            # i_d = (
-            #     torch.randint(0, m, size=(b, k, n), dtype=torch.int, device=DEVICE).contiguous())
-            #
-            # sparsity_layout_o_d = torch.ones(size=(b, k // sparsity_block_size, m // sparsity_block_size),
-            #                                  device=DEVICE)
-            #
-            # sparsity_layout_x_bs = _get_blocksparse_layout(b, k, n, sparsity_block_size, sparsity_percentage)
-            # x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size, triton_block_size)
-            # i_bs = _blocksparse_roundtrip(i_d, sparsity_layout_x_bs, sparsity_block_size, triton_block_size)
-            #
-            # sparsity_layout_o_bs = bs.layouting.build_distribution_layout(
-            #     bs.ops.to_sparse(i_d, sparsity_layout_x_d, sparsity_block_size, triton_block_size),
-            #     sparsity_layout_x_d, torch.Size((b, k, m)), sparsity_block_size, triton_block_size)
 
             for x, sparsity_layout_x, i, sparsity_layout_i, sparsity_layout_o in [
                 (x_d, sparsity_layout_x_d, i_d, sparsity_layout_x_d, sparsity_layout_o_d),
@@ -349,16 +333,16 @@ def test_blksprs_scatter():
 
                 assert torch.allclose(blksprs_scatter_dense_out, stock_scatter_out, atol=ATOL, rtol=RTOL)
 
-                # target = torch.randn_like(stock_scatter_out)
-                # stock_loss = torch.nn.L1Loss()
-                # blksprs_loss = torch.nn.L1Loss()
-                # stock_loss = stock_loss(stock_scatter_out, target)
-                # blksprs_loss = blksprs_loss(blksprs_scatter_dense_out, target)
-                #
-                # stock_loss.backward()
-                # blksprs_loss.backward()
-                #
-                # assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
+                target = torch.randn_like(stock_scatter_out)
+                stock_loss = torch.nn.L1Loss()
+                blksprs_loss = torch.nn.L1Loss()
+                stock_loss = stock_loss(stock_scatter_out, target)
+                blksprs_loss = blksprs_loss(blksprs_scatter_dense_out, target)
+
+                stock_loss.backward()
+                blksprs_loss.backward()
+
+                assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
 
 
 def test_blksprs_matmul():
@@ -410,7 +394,7 @@ def test_blksprs_matmul():
 
 
 def test_repeat():
-    for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+    for b, m, _, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
@@ -455,7 +439,7 @@ def test_repeat():
 
 
 def test_repeat_interleave():
-    for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+    for b, m, n, _, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
         x_d = torch.randn(size=(b, m, n), device=DEVICE)
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, n // sparsity_block_size), device=DEVICE)
 
@@ -505,7 +489,7 @@ def test_repeat_interleave():
 
 
 def test_blksprs_softmax():
-    for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+    for b, m, _, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
@@ -537,7 +521,7 @@ def test_blksprs_softmax():
 
 
 def test_blksprs_split():
-    for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+    for b, m, _, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
@@ -581,7 +565,7 @@ def test_blksprs_split():
 
 
 def test_blksprs_merge():
-    for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+    for b, m, _, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
@@ -633,7 +617,7 @@ def test_blksprs_merge():
 
 
 def test_blksprs_row_wise_sum():
-    for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+    for b, m, _, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
@@ -657,7 +641,7 @@ def test_blksprs_row_wise_sum():
 
 
 def test_blksprs_row_wise_max():
-    for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+    for b, m, _, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
@@ -679,12 +663,11 @@ def test_blksprs_row_wise_max():
 
             blksprs_row_wise_max_out_slice = blksprs_row_wise_max_dense_out[..., 0]
 
-            assert torch.allclose(blksprs_row_wise_max_out_slice, stock_max_out, atol=ATOL,
-                                  rtol=RTOL), f"{b}, {m}, {n}, {k}, {sparsity_block_size}"
+            assert torch.allclose(blksprs_row_wise_max_out_slice, stock_max_out, atol=ATOL, rtol=RTOL)
 
 
 def test_blksprs_row_wise_add():
-    for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+    for b, m, _, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
@@ -717,7 +700,7 @@ def test_blksprs_row_wise_add():
 
 
 def test_blksprs_exp():
-    for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+    for b, m, _, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
@@ -751,7 +734,7 @@ def test_blksprs_exp():
 # Layouting
 
 def test_build_sparsity_layout():
-    for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+    for b, m, _, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
         x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size, triton_block_size)
@@ -772,7 +755,7 @@ def test_build_sparsity_layout():
 
 
 def test_build_sparsity_layout_adaption():
-    for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+    for b, m, _, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
 
         for sparsity_block_size_from, sparsity_block_size_to in [(sparsity_block_size, sparsity_block_size),
@@ -918,7 +901,7 @@ def test_apply_torch_linear():
 # Misc
 
 def test_broadcast_addition():
-    for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+    for b, m, _, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
         x_d = torch.randint(high=m, size=(b, m), device=DEVICE)
         y_d = torch.randint(high=m, size=(b, m), device=DEVICE)
 
@@ -953,7 +936,7 @@ def test_broadcast_addition():
 
 
 def test_subclass():
-    for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+    for b, m, _, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
         x_bs = BlksprsTensor(_blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size, triton_block_size))
