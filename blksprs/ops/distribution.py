@@ -10,7 +10,9 @@ from blksprs.utils.validation import validate_contiguous, validate_dimensions, v
     validate_sparsity, validate_dtype_int, validate_sparsity_block_size, validate_triton_block_size
 
 
-def gather(src: BlksprsTensor, sparsity_layout_src: Tensor, dim: int, idx: BlksprsTensor, sparsity_layout_idx: Tensor,
+def gather(src: BlksprsTensor, sparsity_layout_src: Tensor,
+           dim: int,
+           idx: BlksprsTensor, sparsity_layout_idx: Tensor,
            sparsity_block_size: int, triton_block_size: int = None) -> BlksprsTensor:
     """Applies a gather operation on a block-sparse tensor in compressed form.
 
@@ -48,8 +50,10 @@ def gather(src: BlksprsTensor, sparsity_layout_src: Tensor, dim: int, idx: Blksp
     validate_contiguous(sparsity_layout_src, sparsity_reverse_lut_x,
                         sparsity_layout_idx, sparsity_lut_i)
 
+    adjusted_dim = dim % 3
+
     return BlksprsTensor(_BlocksparseGather.apply(src, sparsity_layout_src, sparsity_reverse_lut_x,
-                                                  dim, idx, sparsity_layout_idx, sparsity_lut_i,
+                                                  adjusted_dim, idx, sparsity_layout_idx, sparsity_lut_i,
                                                   sparsity_block_size, triton_block_size))
 
 
@@ -60,6 +64,7 @@ class _BlocksparseGather(torch.autograd.Function):
                 dim: int, i: Tensor, sparsity_layout_i: Tensor, sparsity_lut_i: Tensor,
                 sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
         output = torch.empty_like(i, dtype=x.dtype)
+
         # TODO
         output = torch.zeros_like(output)
 
@@ -81,8 +86,6 @@ class _BlocksparseGather(torch.autograd.Function):
                                     triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),
                                     triton.cdiv(o_c, meta["TRITON_BLOCK_SIZE"])]
 
-        debug_tensor = torch.zeros_like(output)
-
         (_BlocksparseGather.kernel_blocksparse_gather[triton_grid]
          (x,
           x_b, x_b_s, x_r_s, x_c_s,
@@ -95,10 +98,7 @@ class _BlocksparseGather(torch.autograd.Function):
           o_b, o_b_s, o_r_s, o_c_s,
           sparsity_lut_i, s_lut_i_r, s_lut_i_r_s, s_lut_i_c_s,
           sparsity_block_size,
-          debug_tensor,
           triton_block_size))
-
-        asdf = to_dense(debug_tensor, sparsity_layout_i, sparsity_block_size)
 
         ctx.save_for_backward(sparsity_layout_x, i, sparsity_layout_i)
         ctx.dim = dim
@@ -115,11 +115,10 @@ class _BlocksparseGather(torch.autograd.Function):
         triton_block_size = ctx.triton_block_size
 
         return scatter_reduce(grad_output, sparsity_layout_i,
-                              i,
-                              sparsity_layout_x,
-                              sparsity_block_size,
+                              dim, i,
+                              sparsity_layout_x, sparsity_block_size,
                               reduce_op="sum",
-                              triton_block_size=triton_block_size), None, None, None, None, None, None, None
+                              triton_block_size=triton_block_size), None, None, None, None, None, None, None, None
 
     @staticmethod
     @triton.jit
@@ -134,7 +133,6 @@ class _BlocksparseGather(torch.autograd.Function):
                                   o_b, o_b_s, o_r_s, o_c_s,
                                   s_lut_o, s_lut_o_r, s_lut_o_r_s, s_lut_o_c_s,
                                   sparsity_block_size,
-                                  debug_tensor,
                                   TRITON_BLOCK_SIZE: tl.constexpr) -> None:
         # Get triton block indices
         pid_blk = tl.program_id(axis=0)
@@ -188,13 +186,6 @@ class _BlocksparseGather(torch.autograd.Function):
         rev_idx_spa_x_msk = (rev_idx_spa_x_idx < s_l_x_b * s_l_x_b_s)
         rev_idx_spa_x = tl.load(r_lut_x + rev_idx_spa_x_idx, mask=rev_idx_spa_x_msk).to(tl.int32)
 
-        # todo debug
-        blk_o_idx = ((pid_blk * o_b_s) +
-                     ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
-                     ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
-        blk_o_msk = (blk_o_idx < o_b * o_b_s)
-        tl.store(debug_tensor + blk_o_idx, rev_idx_spa_x_idx, mask=blk_o_msk)
-
         # Load x values
         blk_x_idx = ((rev_idx_spa_x * x_b_s) +
                      dst_row_x +
@@ -211,6 +202,7 @@ class _BlocksparseGather(torch.autograd.Function):
 
 
 def scatter(src: BlksprsTensor, sparsity_layout_src: Tensor,
+            dim: int,
             idx: BlksprsTensor,
             sparsity_layout_tgt: Tensor,
             sparsity_block_size: int, triton_block_size: int = None) -> BlksprsTensor:
@@ -225,6 +217,7 @@ def scatter(src: BlksprsTensor, sparsity_layout_src: Tensor,
 
 
 def scatter_reduce(src: BlksprsTensor, sparsity_layout_src: Tensor,
+                   dim: int,
                    idx: BlksprsTensor,
                    sparsity_layout_tgt: Tensor,
                    sparsity_block_size: int,
@@ -234,6 +227,7 @@ def scatter_reduce(src: BlksprsTensor, sparsity_layout_src: Tensor,
     Args:
         src (BlksprsTensor): The source block-sparse tensor in compressed form to scatter from.
         sparsity_layout_src (Tensor): The sparsity layout of the source block-sparse tensor.
+        dim (int): The dimension along which to scatter.
         idx (BlksprsTensor): The block-sparse indices tensor in compressed form specifying how to scatter to the target tensor.
         sparsity_layout_tgt (Tensor): The sparsity layout of the target block-sparse tensor.
         sparsity_block_size (int): The size of the sparsity blocks.
@@ -271,8 +265,10 @@ def scatter_reduce(src: BlksprsTensor, sparsity_layout_src: Tensor,
     validate_contiguous(sparsity_layout_src, sparsity_lut_x,
                         sparsity_layout_tgt, sparsity_reverse_lut_o)
 
+    adjusted_dim = dim % 3
+
     return BlksprsTensor(_BlocksparseScatterReduce.apply(src, sparsity_layout_src, sparsity_lut_x,
-                                                         idx,
+                                                         adjusted_dim, idx,
                                                          sparsity_layout_tgt, sparsity_reverse_lut_o,
                                                          sparsity_block_size, n_sparse_blocks,
                                                          reduce_op, triton_block_size))
@@ -282,7 +278,7 @@ class _BlocksparseScatterReduce(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x: Tensor, sparsity_layout_x: Tensor, sparsity_lut_x: Tensor,
-                i: Tensor,
+                dim: int, i: Tensor,
                 sparsity_layout_o: Tensor, sparsity_reverse_lut_o: Tensor,
                 sparsity_block_size: int, n_sparse_blocks: int,
                 reduce_op: str, triton_block_size: int) -> Tensor:
@@ -315,6 +311,7 @@ class _BlocksparseScatterReduce(torch.autograd.Function):
          (x,
           x_b, x_b_s, x_r_s, x_c_s,
           sparsity_lut_x, s_lut_x_r, s_lut_x_r_s, s_lut_x_c_s,
+          dim,
           i,
           i_b, i_b_s, i_r_s, i_c_s,
           output,
@@ -326,6 +323,7 @@ class _BlocksparseScatterReduce(torch.autograd.Function):
           triton_block_size))
 
         ctx.save_for_backward(sparsity_layout_x, i, sparsity_layout_o)
+        ctx.dim = dim
         ctx.sparsity_block_size = sparsity_block_size
         ctx.reduce_op = reduce_op
         ctx.triton_block_size = triton_block_size
@@ -335,13 +333,14 @@ class _BlocksparseScatterReduce(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         sparsity_layout_x, i, sparsity_layout_o = ctx.saved_tensors
+        dim = ctx.dim
         sparsity_block_size = ctx.sparsity_block_size
         reduce_op = ctx.reduce_op
         triton_block_size = ctx.triton_block_size
 
         if reduce_op == "sum":
-            return gather(grad_output, sparsity_layout_o, 2, i, sparsity_layout_x, sparsity_block_size,
-                          triton_block_size=triton_block_size), None, None, None, None, None, None, None, None, None
+            return gather(grad_output, sparsity_layout_o, dim, i, sparsity_layout_x, sparsity_block_size,
+                          triton_block_size=triton_block_size), None, None, None, None, None, None, None, None, None, None
         else:
             raise ValueError(f"Reduction operation '{reduce_op}' does not support backward pass")
 
@@ -350,6 +349,7 @@ class _BlocksparseScatterReduce(torch.autograd.Function):
     def kernel_blocksparse_scatter(x,
                                    x_b, x_b_s, x_r_s, x_c_s,
                                    s_lut_x, s_lut_x_r, s_lut_x_r_s, s_lut_x_c_s,
+                                   dim,
                                    i,
                                    i_b, i_b_s, i_r_s, i_c_s,
                                    o,
@@ -373,6 +373,10 @@ class _BlocksparseScatterReduce(torch.autograd.Function):
         spa_row_x_msk = (spa_row_x_idx < s_lut_x_r * s_lut_x_r_s)
         spa_row_x = tl.load(s_lut_x + spa_row_x_idx, mask=spa_row_x_msk)
 
+        spa_col_x_idx = (pid_blk * s_lut_x_r_s + 2 * s_lut_x_c_s)
+        spa_col_x_msk = (spa_col_x_idx < s_lut_x_r * s_lut_x_r_s)
+        spa_col_x = tl.load(s_lut_x + spa_col_x_idx, mask=spa_col_x_msk)
+
         # Load x values
         blk_x_idx = ((pid_blk * x_b_s) +
                      ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
@@ -387,21 +391,37 @@ class _BlocksparseScatterReduce(torch.autograd.Function):
         blk_i_msk = (blk_i_idx < i_b * i_b_s)
         blk_i = tl.load(i + blk_i_idx, mask=blk_i_msk).to(tl.int32)
 
-        # Get positions of sparsity blocks
-        pos_spa_blk_o = blk_i // sparsity_block_size
-        pos_spa_col_o = blk_i % sparsity_block_size
+        # Get indices of sparsity blocks and positions within the blocks
+        pos_spa_blk_x = blk_i // sparsity_block_size
+        pos_spa_int_x = blk_i % sparsity_block_size
+
+        rev_dst_bat_o = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), spa_bat_x, dtype=tl.int32)
+        rev_dst_row_o = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), spa_row_x, dtype=tl.int32)
+        rev_dst_col_o = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), spa_col_x, dtype=tl.int32)
+        dst_row_o = (((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None]
+                     .broadcast_to((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE)))
+        dst_col_o = (((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :]
+                     .broadcast_to((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE)))
+        if dim == 0:
+            rev_dst_bat_o = blk_i
+        elif dim == 1:
+            rev_dst_row_o = pos_spa_blk_x
+            dst_row_o = pos_spa_int_x * x_r_s
+        elif dim == 2:
+            rev_dst_col_o = pos_spa_blk_x
+            dst_col_o = pos_spa_int_x * x_c_s
 
         # Load reverse sparsity indices for o
-        rev_idx_spa_o_idx = ((spa_bat_x * s_l_o_b_s) +
-                             (spa_row_x * s_l_o_r_s) +
-                             (pos_spa_blk_o * s_l_o_c_s))
+        rev_idx_spa_o_idx = ((rev_dst_bat_o * s_l_o_b_s) +
+                             (rev_dst_row_o * s_l_o_r_s) +
+                             (rev_dst_col_o * s_l_o_c_s))
         rev_idx_spa_o_msk = (rev_idx_spa_o_idx < s_l_o_b * s_l_o_b_s)
         rev_idx_spa_o = tl.load(r_lut_o + rev_idx_spa_o_idx, mask=rev_idx_spa_o_msk).to(tl.int32)
 
         # Store output
         blk_o_idx = ((rev_idx_spa_o * o_b_s) +
-                     ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
-                     (pos_spa_col_o * o_c_s))
+                     dst_row_o +
+                     dst_col_o)
         blk_o_msk = (blk_o_idx < o_b * o_b_s)
 
         if reduce_op_ind == 0:

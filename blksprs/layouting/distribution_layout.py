@@ -98,7 +98,6 @@ def kernel_distribution_layout(i,
                  ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * i_c_s)[None, :])
     blk_i_msk = (blk_i_idx < i_b * i_b_s)
     blk_i = tl.load(i + blk_i_idx, mask=blk_i_msk)
-    blk_i = blk_i // sparsity_block_size
 
     dst_bat_idx = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), spa_bat_i, dtype=tl.int32)
     dst_row_idx = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), spa_row_i, dtype=tl.int32)
@@ -106,9 +105,9 @@ def kernel_distribution_layout(i,
     if dim == 0:
         dst_bat_idx = blk_i
     elif dim == 1:
-        dst_row_idx = blk_i
+        dst_row_idx = blk_i // sparsity_block_size
     elif dim == 2:
-        dst_col_idx = blk_i
+        dst_col_idx = blk_i // sparsity_block_size
 
     blk_v = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), 1, dtype=tl.int32)
 
