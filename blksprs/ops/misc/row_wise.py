@@ -117,6 +117,10 @@ def kernel_blocksparse_row_wise_sum(x,
     rev_idx_spa_msk = (rev_idx_spa_idx < s_l_o_b * s_l_o_b_s)
     rev_idx_spa = tl.load(r_lut_o + rev_idx_spa_idx, mask=rev_idx_spa_msk).to(tl.int32)
 
+    if rev_idx_spa == -1:
+        tl.device_assert(False)
+        return
+
     blk_idx = ((pid_blk * x_b_s) +
                ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
                ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
@@ -239,6 +243,10 @@ def kernel_blocksparse_row_wise_max(x,
                        spa_row * s_l_o_r_s)
     rev_idx_spa_msk = (rev_idx_spa_idx < s_l_o_b * s_l_o_b_s)
     rev_idx_spa = tl.load(r_lut_o + rev_idx_spa_idx, mask=rev_idx_spa_msk).to(tl.int32)
+
+    if rev_idx_spa == -1:
+        tl.device_assert(False)
+        return
 
     blk_idx = ((pid_blk * x_b_s) +
                ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +

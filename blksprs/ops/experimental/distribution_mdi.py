@@ -153,6 +153,10 @@ class _BlocksparseGatherMDI(torch.autograd.Function):
         rev_idx_spa_x_msk = (rev_idx_spa_x_idx < s_l_x_b * s_l_x_b_s)
         rev_idx_spa_x = tl.load(r_lut_x + rev_idx_spa_x_idx, mask=rev_idx_spa_x_msk).to(tl.int32)
 
+        if rev_idx_spa_x == -1:
+            tl.device_assert(False)
+            return
+
         # Load x values
         blk_x_idx = ((rev_idx_spa_x * x_b_s) +
                      ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
@@ -341,6 +345,10 @@ class _BlocksparseScatterReduceMDI(torch.autograd.Function):
                              (pos_spa_blk_o * s_l_o_c_s))
         rev_idx_spa_o_msk = (rev_idx_spa_o_idx < s_l_o_b * s_l_o_b_s)
         rev_idx_spa_o = tl.load(r_lut_o + rev_idx_spa_o_idx, mask=rev_idx_spa_o_msk).to(tl.int32)
+
+        if rev_idx_spa_o == -1:
+            tl.device_assert(False)
+            return
 
         # Store output
         blk_o_idx = ((rev_idx_spa_o * o_b_s) +

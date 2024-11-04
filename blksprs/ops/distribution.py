@@ -187,14 +187,14 @@ class _BlocksparseGather(torch.autograd.Function):
         blk_x_idx = ((rev_idx_spa_x * x_b_s) +
                      dst_row_x +
                      dst_col_x)
-        blk_x_msk = (blk_x_idx < x_b * x_b_s)
+        blk_x_msk = ((blk_x_idx < x_b * x_b_s) & rev_idx_spa_x_msk != -1)
         blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
 
         # Store output
         blk_o_idx = ((pid_blk * o_b_s) +
                      ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
                      ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
-        blk_o_msk = (blk_o_idx < o_b * o_b_s)
+        blk_o_msk = ((blk_o_idx < o_b * o_b_s) &  rev_idx_spa_x_msk != -1)
         tl.store(o + blk_o_idx, blk_x, mask=blk_o_msk)
 
 
@@ -312,7 +312,7 @@ class _BlocksparseScatterReduce(torch.autograd.Function):
           i,
           i_b, i_b_s, i_r_s, i_c_s,
           output,
-          o_b, o_b_s, o_r_s, o_c_s,
+          o_b, o_b_s,
           s_l_o_b, s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
           sparsity_reverse_lut_o,
           reduce_op_ind,
@@ -350,7 +350,7 @@ class _BlocksparseScatterReduce(torch.autograd.Function):
                                    i,
                                    i_b, i_b_s, i_r_s, i_c_s,
                                    o,
-                                   o_b, o_b_s, o_r_s, o_c_s,
+                                   o_b, o_b_s,
                                    s_l_o_b, s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
                                    r_lut_o,
                                    reduce_op_ind,
@@ -419,7 +419,7 @@ class _BlocksparseScatterReduce(torch.autograd.Function):
         blk_o_idx = ((rev_idx_spa_o * o_b_s) +
                      dst_row_o +
                      dst_col_o)
-        blk_o_msk = (blk_o_idx < o_b * o_b_s)
+        blk_o_msk = ((blk_o_idx < o_b * o_b_s) & rev_idx_spa_o_msk != -1)
 
         if reduce_op_ind == 0:
             tl.store(o + blk_o_idx, blk_x, mask=blk_o_msk)

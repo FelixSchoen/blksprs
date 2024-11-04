@@ -238,6 +238,10 @@ class _BlocksparseSoftmax(torch.autograd.Function):
         rev_idx_spa_s_msk = (rev_idx_spa_s_idx < s_l_s_b * s_l_s_b_s)
         rev_idx_spa_s = tl.load(r_lut_s + rev_idx_spa_s_idx, mask=rev_idx_spa_s_msk).to(tl.int32)
 
+        if rev_idx_spa_s == -1:
+            tl.device_assert(False)
+            return
+
         blk_s_idx = (rev_idx_spa_s * s_b_s +
                      ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * s_r_s)[:, None] +
                      (tl.arange(0, 1) * s_c_s)[None, :])
