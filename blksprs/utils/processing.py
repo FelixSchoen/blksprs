@@ -1,6 +1,7 @@
 import torch
 from torch import Tensor, nn
 from triton.language import dtype
+import blksprs as bs
 
 from blksprs.layouting.sparsity_layout import build_sparsity_layout_matmul_fast
 from blksprs.ops.conversion import to_sparse
@@ -10,7 +11,7 @@ from blksprs.utils.blksprs_tensor import BlksprsTensor
 
 
 def apply_torch_linear(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
-                       linear: nn.Linear) -> (BlksprsTensor, Tensor):
+                       linear: nn.Linear, bias: nn.Parameter = None) -> (BlksprsTensor, Tensor):
     # Extract weight and bias
     w = linear.weight
     b = linear.bias
@@ -27,6 +28,8 @@ def apply_torch_linear(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block
     interim = xw
 
     # Apply bias
+    if bias is not None:
+        b = bias
     if b is not None:
         b_slice = b.unsqueeze(0).unsqueeze(0).repeat(1, sparsity_block_size, 1)
         sparsity_layout_b_slice = torch.ones(size=(1, b_slice.size(1) // sparsity_block_size,
@@ -39,3 +42,10 @@ def apply_torch_linear(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block
         interim = interim + b_bs
 
     return interim, sparsity_layout_xw
+
+
+def apply_torch_normalisation(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
+                              normalisation: nn.Module) -> BlksprsTensor:
+    # At the moment naively converts to dense and back to block-sparse
+    return bs.ops.to_sparse(normalisation(bs.ops.to_dense(x, sparsity_layout, sparsity_block_size)),
+                            sparsity_layout, sparsity_block_size)

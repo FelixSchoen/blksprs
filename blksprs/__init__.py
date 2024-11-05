@@ -1,5 +1,6 @@
 from blksprs.utils.blksprs_tensor import BlksprsTensor
 
+
 class ops:
     from blksprs.ops.conversion import to_dense, to_sparse, from_blksprs, to_blksprs, adapt_layout
     from blksprs.ops.distribution import gather, scatter, scatter_reduce
@@ -22,13 +23,14 @@ class layouting:
     from blksprs.layouting.distribution_layout import build_distribution_layout
     from blksprs.layouting.sparsity_layout import build_sparsity_layout, build_sparsity_layout_adaption, \
         build_sparsity_layout_matmul, build_sparsity_layout_matmul_fast
+    from blksprs.utils.layout_utils import build_full_sparsity_layout
 
     class experimental:
         from blksprs.ops.experimental.distribution_mdi import build_distribution_layout_mdi
 
 
 class utils:
-    from blksprs.utils.processing import apply_torch_linear
+    from blksprs.utils.processing import apply_torch_linear, apply_torch_normalisation
     from blksprs.utils.tools import do_shape_blocksparse, undo_shape_blocksparse
     from blksprs.utils.validation import disable_validation
 

@@ -10,7 +10,7 @@ import blksprs as bs
 from blksprs import BlksprsTensor
 
 # TODO Benchmarking
-# TODO Check overall no -1 blocks (implement mask)
+# TODO Refactor backward for flow methods in own function
 
 # Device setup
 DEVICE = torch.device("cuda:0")

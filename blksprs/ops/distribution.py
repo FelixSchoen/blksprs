@@ -207,6 +207,7 @@ def scatter(src: BlksprsTensor, sparsity_layout_src: Tensor,
 
     """
     return scatter_reduce(src, sparsity_layout_src,
+                          dim,
                           idx,
                           sparsity_layout_tgt,
                           sparsity_block_size,
