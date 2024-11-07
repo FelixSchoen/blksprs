@@ -14,4 +14,4 @@ from blksprs.utils.validation import validate_triton_block_size, validate_dimens
 
 def build_full_sparsity_layout(x: Tensor, sparsity_block_size: int) -> Tensor:
     return torch.ones(size=(x.size(0), x.size(1) // sparsity_block_size, x.size(2) // sparsity_block_size),
-                      device=x.device)
+                      dtype=torch.bool, device=x.device)

@@ -36,7 +36,8 @@ def validate_dtype_int(*tensors: Tensor) -> None:
         return
 
     for tensor in tensors:
-        if tensor.dtype != torch.int32 and tensor.dtype != torch.int64:
+        if (tensor.dtype !=
+                torch.int32 and tensor.dtype != torch.int64):
             raise ValueError("Tensor must have int32 or int64 dtype")
 
 

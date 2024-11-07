@@ -289,8 +289,8 @@ class _BlocksparseToSparse(torch.autograd.Function):
 
 
 def adapt_layout(x: BlksprsTensor, sparsity_layout_from: Tensor, sparsity_block_size_from: int,
-                 sparsity_block_size_to: int,
-                 preprocess_data: dict = None, triton_block_size: int = None) -> BlksprsTensor:
+                 sparsity_block_size_to: int, sparsity_layout_to: Tensor = None,
+                 triton_block_size: int = None) -> (BlksprsTensor, Tensor):
     """Adapts the sparsity layout of a block-sparse tensor, resulting in a new block-sparse tensor in compressed form
         conforming to the new sparsity layout (and sparsity block size) definition.
 
@@ -299,11 +299,13 @@ def adapt_layout(x: BlksprsTensor, sparsity_layout_from: Tensor, sparsity_block_
         sparsity_layout_from (Tensor): The sparsity layout of the input block-sparse tensor.
         sparsity_block_size_from (int): The size of the sparsity blocks of the input sparsity layout.
         sparsity_block_size_to (int): The size of the sparsity blocks of the output sparsity layout.
+        sparsity_layout_to (Tensor): The sparsity layout of the output block-sparse tensor (default ``None``).
         preprocess_data (dict): A dictionary containing data otherwise computed by the function (default ``None``).
         triton_block_size (int): The block size to use for the triton kernel (default ``None``).
 
     Returns:
         BlksprsTensor: The block-sparse tensor in compressed form with the adapted sparsity layout and sparsity block size.
+        Tensor: The sparsity layout of the resulting output tensor.
 
     """
     x = x.contiguous()
@@ -317,52 +319,42 @@ def adapt_layout(x: BlksprsTensor, sparsity_layout_from: Tensor, sparsity_block_
     min_sparsity_block_size = min(sparsity_block_size_from, sparsity_block_size_to)
     validate_triton_block_size(triton_block_size, min_sparsity_block_size)
 
-    if preprocess_data is None:
-        preprocess_data = {}
+    sparsity_layout_from_flat = sparsity_layout_from.reshape(-1)
+    sparsity_reverse_lut_from = ((torch.cumsum(sparsity_layout_from_flat, dim=-1) - 1) *
+                                 (sparsity_layout_from_flat == 1) -
+                                 (1 * (sparsity_layout_from_flat == 0)))
 
-    if "sparsity_reverse_lut_from" not in preprocess_data:
-        sparsity_layout_from_flat = sparsity_layout_from.reshape(-1)
-        sparsity_reverse_lut_from = ((torch.cumsum(sparsity_layout_from_flat, dim=-1) - 1) *
-                                     (sparsity_layout_from_flat == 1) -
-                                     (1 * (sparsity_layout_from_flat == 0)))
-    else:
-        sparsity_reverse_lut_from = preprocess_data["sparsity_reverse_lut_from"]
-
-    if "sparsity_layout_to" not in preprocess_data:
+    if sparsity_layout_to is None:
         sparsity_layout_to = build_sparsity_layout_adaption(x, sparsity_layout_from,
                                                             sparsity_block_size_from, sparsity_block_size_to,
                                                             triton_block_size)
-    else:
-        sparsity_layout_to = preprocess_data["sparsity_layout_to"]
 
-    if "sparsity_lut_to" not in preprocess_data:
-        sparsity_lut_to = torch.nonzero(sparsity_layout_to).contiguous()
-    else:
-        sparsity_lut_to = preprocess_data["sparsity_lut_to"]
+    sparsity_lut_to = torch.nonzero(sparsity_layout_to).contiguous()
 
-    if "n_sparse_blocks_to" not in preprocess_data:
-        n_sparse_blocks_to = torch.sum(sparsity_layout_to.to(torch.int)).item()
-    else:
-        n_sparse_blocks_to = preprocess_data["n_sparse_blocks_to"]
+    n_sparse_blocks_to = torch.sum(sparsity_layout_to.to(torch.int)).item()
 
-    validate_contiguous(sparsity_layout_to, sparsity_reverse_lut_from, sparsity_lut_to)
+    validate_contiguous(sparsity_reverse_lut_from, sparsity_layout_to, sparsity_lut_to)
 
     if (sparsity_block_size_from == sparsity_block_size_to) and torch.equal(sparsity_layout_from, sparsity_layout_to):
-        return BlksprsTensor(x)
+        return BlksprsTensor(x), sparsity_layout_to
 
     return BlksprsTensor(_BlocksparseAdaptLayout.apply(x,
                                                        sparsity_layout_from, sparsity_reverse_lut_from,
                                                        sparsity_block_size_from,
-                                                       sparsity_layout_to, sparsity_lut_to, sparsity_block_size_to,
-                                                       n_sparse_blocks_to, min_sparsity_block_size, triton_block_size))
+                                                       sparsity_layout_to, sparsity_lut_to,
+                                                       sparsity_block_size_to,
+                                                       n_sparse_blocks_to, min_sparsity_block_size,
+                                                       triton_block_size)), sparsity_layout_to
 
 
 class _BlocksparseAdaptLayout(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x: Tensor,
-                sparsity_layout_from: Tensor, sparsity_reverse_lut_from: Tensor, sparsity_block_size_from: int,
-                sparsity_layout_to: Tensor, sparsity_lut_to: Tensor, sparsity_block_size_to: int,
+                sparsity_layout_from: Tensor, sparsity_reverse_lut_from: Tensor,
+                sparsity_block_size_from: int,
+                sparsity_layout_to: Tensor, sparsity_lut_to: Tensor,
+                sparsity_block_size_to: int,
                 n_sparse_blocks_to: int, min_sparsity_block_size: int, triton_block_size: int) -> Tensor:
         output = torch.zeros(size=(n_sparse_blocks_to, sparsity_block_size_to, sparsity_block_size_to),
                              dtype=x.dtype, device=x.device)
@@ -409,9 +401,10 @@ class _BlocksparseAdaptLayout(torch.autograd.Function):
         sparsity_block_size_to = ctx.sparsity_block_size_to
         triton_block_size = ctx.triton_block_size
 
-        return adapt_layout(grad_output, sparsity_layout_to, sparsity_block_size_to, sparsity_block_size_from,
-                            preprocess_data={"sparsity_layout_to": sparsity_layout_from},
-                            triton_block_size=triton_block_size), None, None, None, None, None, None, None, None, None
+        return adapt_layout(
+            grad_output, sparsity_layout_to, sparsity_block_size_to, sparsity_block_size_from,
+            sparsity_layout_to=sparsity_layout_from,
+            triton_block_size=triton_block_size)[0], None, None, None, None, None, None, None, None, None
 
     @staticmethod
     @triton.jit
@@ -448,7 +441,7 @@ class _BlocksparseAdaptLayout(torch.autograd.Function):
         spa_row_x = (spa_row_o * sparsity_block_size_to + pid_row * TRITON_BLOCK_SIZE) // sparsity_block_size_from
         spa_col_x = (spa_col_o * sparsity_block_size_to + pid_col * TRITON_BLOCK_SIZE) // sparsity_block_size_from
 
-        # # Get reverse sparsity indices for x
+        # Get reverse sparsity indices for x
         rev_idx_spa_x_idx = (spa_bat_x * s_l_x_b_s +
                              spa_row_x * s_l_x_r_s +
                              spa_col_x * s_l_x_c_s)
