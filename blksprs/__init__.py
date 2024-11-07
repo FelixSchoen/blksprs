@@ -30,7 +30,8 @@ class layouting:
 
 
 class utils:
-    from blksprs.utils.processing import apply_torch_linear, apply_torch_normalisation
+    from blksprs.utils.processing import apply_torch_linear, apply_torch_normalisation, apply_torch_dropout, \
+        apply_function_applicable_row_wise
     from blksprs.utils.tools import do_shape_blocksparse, undo_shape_blocksparse
     from blksprs.utils.validation import disable_validation
 

@@ -8,7 +8,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- Add ``bs.utils.apply_torch_normalisation`` wrapper function (currently **not** memory efficient)
+- Add ``bs.utils.apply_torch_normalisation`` wrapper function
+- Add ``bs.utils.apply_torch_dropout`` wrapper function
 - Add ``bias`` parameter to ``apply_torch_linear``
 - Implement target layout specification for ``adapt_layout``
 

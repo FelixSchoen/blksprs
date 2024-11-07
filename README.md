@@ -45,8 +45,12 @@ Further helpful operations (included in the ``bs.ops.misc`` module) that do **no
 - Row-wise sum, max, addition, and subtraction
 - Broadcast addition and subtraction between slices
 
-Furthermore, the library provides a set of utility functions for the creation of sparsity layouts based on existing
-dense tensors and for the scatter operation (module ``bs.layouting``), as well as utility functions to apply linear layers,
+Furthermore, the library provides a set of utility functions 
+
+- for the creation of sparsity layouts based on existing
+dense tensors and for the scatter operation (module ``bs.layouting``),
+- for the application of ``nn.Linear``, ``nn.Dropout``, and ``nn.LayerNorm`` layers to block-sparse tensors,
+- as well as utility functions to apply linear layers,
 ensure correct input dimensionality, and validate input (module ``bs.utils``).
 
 ## Installation
