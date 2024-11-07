@@ -1,8 +1,9 @@
+from collections.abc import Callable
+
 import torch
 from torch import Tensor, nn
-from triton.language import dtype
-import blksprs as bs
 
+import blksprs as bs
 from blksprs.layouting.sparsity_layout import build_sparsity_layout_matmul_fast
 from blksprs.ops.conversion import to_sparse
 from blksprs.ops.matmul import matmul
@@ -46,6 +47,28 @@ def apply_torch_linear(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block
 
 def apply_torch_normalisation(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
                               normalisation: nn.Module) -> BlksprsTensor:
-    # At the moment naively converts to dense and back to block-sparse
-    return bs.ops.to_sparse(normalisation(bs.ops.to_dense(x, sparsity_layout, sparsity_block_size)),
-                            sparsity_layout, sparsity_block_size)
+    return apply_function_applicable_row_wise(x, sparsity_layout, sparsity_block_size, normalisation)
+
+
+def apply_torch_dropout(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
+                        dropout: nn.Dropout) -> BlksprsTensor:
+    return apply_function_applicable_row_wise(x, sparsity_layout, sparsity_block_size, dropout)
+
+
+def apply_function_applicable_row_wise(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
+                                       function: Callable) -> BlksprsTensor:
+    sparsity_layout_packed = _pack_layout(sparsity_layout)
+    blksprs_pseudo_dense = bs.ops.to_dense(x, sparsity_layout_packed, sparsity_block_size)
+    normalisation_out = function(blksprs_pseudo_dense)
+    blksprs_sparse = bs.ops.to_sparse(normalisation_out, sparsity_layout_packed, sparsity_block_size)
+
+    return blksprs_sparse
+
+
+def _pack_layout(sparsity_layout: Tensor) -> BlksprsTensor:
+    sparsity_layout_resized = sparsity_layout.resize(1, sparsity_layout.size(0) * sparsity_layout.size(1),
+                                                     sparsity_layout.size(2))
+    non_zero_rows = torch.any(sparsity_layout_resized, dim=-1)
+    sparsity_layout_filtered = sparsity_layout_resized[non_zero_rows].unsqueeze(0)
+
+    return sparsity_layout_filtered

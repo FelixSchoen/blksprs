@@ -86,16 +86,19 @@ BENCHMARK_TRITON_BLOCK_SIZES = [16, 16, 32, 32, 64, 64, 64, 64]
 # Tolerances
 ATOL = 2e-2
 RTOL = 1e-2
+SEED = 0
 
 
 @pytest.fixture(scope="session", autouse=True)
 def setup():
+    global SEED
     use_random_seed = False
 
     if use_random_seed:
         seed = random.randint(0, 2 ** 32 - 1)
+        SEED = seed
     else:
-        seed = 0
+        seed = SEED
         print("NOT USING RANDOM SEED")
 
     print("Random Seed:", seed)
@@ -872,7 +875,7 @@ def test_build_distribution_layout():
                                atol=ATOL, rtol=RTOL)
 
 
-# Utils
+# Processing
 
 def test_apply_torch_linear():
     for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
@@ -897,6 +900,60 @@ def test_apply_torch_linear():
 
                 assert torch.allclose(blksprs_linear_dense_out, stock_linear_out, atol=ATOL, rtol=RTOL)
 
+
+def test_apply_torch_normalisation():
+    for b, m, _, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+        x_d = torch.randn(size=(b, m, k), device=DEVICE)
+        sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
+
+        sparsity_layout_x_bs = _get_blocksparse_layout_sparse_rows(b, m, k, sparsity_block_size, sparsity_percentage)
+        x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size, triton_block_size)
+
+        normalisation = torch.nn.LayerNorm(k, device=DEVICE)
+
+        for x, sparsity_layout_x in [
+            (x_d, sparsity_layout_x_d),
+            (x_bs, sparsity_layout_x_bs)]:
+            x_stock = x.clone().requires_grad_(True)
+            x_blksprs = x.clone().requires_grad_(True)
+
+            stock_normalisation_out = _blocksparse_roundtrip(normalisation(x_stock), sparsity_layout_x,
+                                                             sparsity_block_size, triton_block_size)
+            blksprs_normalisation_out = bs.utils.apply_torch_normalisation(
+                bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
+                sparsity_layout_x, sparsity_block_size, normalisation)
+            blksprs_normalisation_dense_out = bs.ops.to_dense(blksprs_normalisation_out, sparsity_layout_x,
+                                                              sparsity_block_size)
+
+            assert torch.allclose(blksprs_normalisation_dense_out, stock_normalisation_out, atol=ATOL, rtol=RTOL)
+
+def test_apply_torch_dropout():
+    for b, m, _, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+        x_d = torch.randn(size=(b, m, k), device=DEVICE)
+        sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
+
+        sparsity_layout_x_bs = _get_blocksparse_layout_sparse_rows(b, m, k, sparsity_block_size, sparsity_percentage)
+        x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size, triton_block_size)
+
+        dropout = torch.nn.Dropout(p=1)
+
+        for x, sparsity_layout_x in [
+            (x_d, sparsity_layout_x_d),
+            (x_bs, sparsity_layout_x_bs)]:
+            x_stock = x.clone().requires_grad_(True)
+            x_blksprs = x.clone().requires_grad_(True)
+
+            stock_normalisation_out = _blocksparse_roundtrip(dropout(x_stock), sparsity_layout_x,
+                                                             sparsity_block_size, triton_block_size)
+            global SEED
+            torch.manual_seed(SEED)
+            blksprs_normalisation_out = bs.utils.apply_torch_normalisation(
+                bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
+                sparsity_layout_x, sparsity_block_size, dropout)
+            blksprs_normalisation_dense_out = bs.ops.to_dense(blksprs_normalisation_out, sparsity_layout_x,
+                                                              sparsity_block_size)
+
+            assert torch.allclose(blksprs_normalisation_dense_out, stock_normalisation_out, atol=ATOL, rtol=RTOL)
 
 # Misc
 
@@ -1087,6 +1144,22 @@ def _get_blocksparse_layout(b, m, n, sparsity_block_size, sparsity_percentage):
     for b_i in range(b):
         indices = torch.randperm(m_s * n_s)[:num_zero_elements]
         sparsity_layout[b_i, indices // n_s, indices % n_s] = False
+
+    return sparsity_layout
+
+
+def _get_blocksparse_layout_sparse_rows(b, m, n, sparsity_block_size, sparsity_percentage):
+    m_s = m // sparsity_block_size
+    n_s = n // sparsity_block_size
+
+    sparsity_layout = torch.ones(size=(b, m_s, n_s), dtype=torch.bool, device=DEVICE)
+
+    # Calculate the number of rows to be set to False
+    num_zero_rows = int(m_s * (1 - sparsity_percentage))
+    for b_i in range(b):
+        # Randomly select rows to set to False
+        row_indices = torch.randperm(m_s)[:num_zero_rows]
+        sparsity_layout[b_i, row_indices, :] = False
 
     return sparsity_layout
 

@@ -300,7 +300,6 @@ def adapt_layout(x: BlksprsTensor, sparsity_layout_from: Tensor, sparsity_block_
         sparsity_block_size_from (int): The size of the sparsity blocks of the input sparsity layout.
         sparsity_block_size_to (int): The size of the sparsity blocks of the output sparsity layout.
         sparsity_layout_to (Tensor): The sparsity layout of the output block-sparse tensor (default ``None``).
-        preprocess_data (dict): A dictionary containing data otherwise computed by the function (default ``None``).
         triton_block_size (int): The block size to use for the triton kernel (default ``None``).
 
     Returns:
