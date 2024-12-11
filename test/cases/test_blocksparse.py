@@ -927,6 +927,7 @@ def test_apply_torch_normalisation():
 
             assert torch.allclose(blksprs_normalisation_dense_out, stock_normalisation_out, atol=ATOL, rtol=RTOL)
 
+
 def test_apply_torch_dropout():
     for b, m, _, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
@@ -954,6 +955,7 @@ def test_apply_torch_dropout():
                                                               sparsity_block_size)
 
             assert torch.allclose(blksprs_normalisation_dense_out, stock_normalisation_out, atol=ATOL, rtol=RTOL)
+
 
 # Misc
 

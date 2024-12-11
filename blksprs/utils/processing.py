@@ -66,9 +66,9 @@ def apply_function_applicable_row_wise(x: BlksprsTensor, sparsity_layout: Tensor
 
 
 def _pack_layout(sparsity_layout: Tensor) -> BlksprsTensor:
-    sparsity_layout_resized = sparsity_layout.resize(1, sparsity_layout.size(0) * sparsity_layout.size(1),
-                                                     sparsity_layout.size(2))
-    non_zero_rows = torch.any(sparsity_layout_resized, dim=-1)
-    sparsity_layout_filtered = sparsity_layout_resized[non_zero_rows].unsqueeze(0)
+    sparsity_layout_reshaped = sparsity_layout.reshape(1, sparsity_layout.size(0) * sparsity_layout.size(1),
+                                                       sparsity_layout.size(2))
+    non_zero_rows = torch.any(sparsity_layout_reshaped, dim=-1)
+    sparsity_layout_filtered = sparsity_layout_reshaped[non_zero_rows].unsqueeze(0)
 
     return sparsity_layout_filtered
