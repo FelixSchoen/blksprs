@@ -64,7 +64,8 @@ We recommend installing blksprs from [PyPI](https://pypi.org/project/blksprs/) u
 
 ### Dependencies
 
-- [PyTorch](https://pytorch.org/) (built with v2.5.0)
+- [PyTorch](https://pytorch.org/) (built with v2.5.1)
+- _[NumPy](https://numpy.org/) (to get rid of warnings, built with v2.2.0)_
 - _[Triton](https://github.com/triton-lang/triton) (included with PyTorch)_
 
 ## Changelog
