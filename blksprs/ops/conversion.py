@@ -131,7 +131,7 @@ class _BlocksparseToDense(torch.autograd.Function):
 
         # Get reverse sparsity index for current block
         rev_idx_spa_idx = (pid_blk * s_l_b_s + spa_row * s_l_r_s + spa_col * s_l_c_s)
-        rev_idx_spa_msk = (rev_idx_spa_idx < s_l_b * s_l_b_s)
+        rev_idx_spa_msk = (rev_idx_spa_idx >= 0 and rev_idx_spa_idx < s_l_b * s_l_b_s)
         rev_idx_spa = tl.load(sparsity_reverse_lut + rev_idx_spa_idx, mask=rev_idx_spa_msk).to(tl.int32)
 
         # If block is present commence operations
@@ -141,13 +141,13 @@ class _BlocksparseToDense(torch.autograd.Function):
                          tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
                        (((pid_col % (sparsity_block_size // TRITON_BLOCK_SIZE)) * TRITON_BLOCK_SIZE +
                          tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-            blk_msk = (blk_idx < x_b * x_b_s)
+            blk_msk = (blk_idx >= 0 and blk_idx < x_b * x_b_s)
             blk = tl.load(x + blk_idx, mask=blk_msk)
 
             o_idx = (pid_blk * o_b_s +
                      ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
                      ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
-            o_msk = (o_idx < o_b * o_b_s)
+            o_msk = (o_idx >= 0 and o_idx < o_b * o_b_s)
             tl.store(o + o_idx, blk, o_msk)
 
 
@@ -258,15 +258,15 @@ class _BlocksparseToSparse(torch.autograd.Function):
 
         # Get sparsity index of current output block consisting of its batch, row, and column index
         spa_bat_idx = (pid_blk * s_lut_r_s + 0 * s_lut_c_s)
-        spa_bat_msk = (spa_bat_idx < s_lut_r * s_lut_r_s)
+        spa_bat_msk = (spa_bat_idx >= 0 and spa_bat_idx < s_lut_r * s_lut_r_s)
         spa_bat = tl.load(s_lut + spa_bat_idx, mask=spa_bat_msk)
 
         spa_row_idx = (pid_blk * s_lut_r_s + 1 * s_lut_c_s)
-        spa_row_msk = (spa_row_idx < s_lut_r * s_lut_r_s)
+        spa_row_msk = (spa_row_idx >= 0 and spa_row_idx < s_lut_r * s_lut_r_s)
         spa_row = tl.load(s_lut + spa_row_idx, mask=spa_row_msk)
 
         spa_col_idx = (pid_blk * s_lut_r_s + 2 * s_lut_c_s)
-        spa_col_msk = (spa_col_idx < s_lut_r * s_lut_r_s)
+        spa_col_msk = (spa_col_idx >= 0 and spa_col_idx < s_lut_r * s_lut_r_s)
         spa_col = tl.load(s_lut + spa_col_idx, mask=spa_col_msk)
 
         # Load block from dense tensor
@@ -275,14 +275,14 @@ class _BlocksparseToSparse(torch.autograd.Function):
                        tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
                      ((spa_col * sparsity_block_size + pid_col * TRITON_BLOCK_SIZE +
                        tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-        blk_d_msk = (blk_d_idx < x_b * x_b_s)
+        blk_d_msk = (blk_d_idx >= 0 and blk_d_idx < x_b * x_b_s)
         blk_d = tl.load(x + blk_d_idx, mask=blk_d_msk)
 
         # Store block in sparse tensor
         blk_o_idx = ((pid_blk * o_b_s) +
                      ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
                      ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE) * o_c_s))[None, :])
-        blk_o_msk = (blk_o_idx < (pid_blk + 1) * o_b_s)
+        blk_o_msk = (blk_o_idx >= 0 and blk_o_idx < (pid_blk + 1) * o_b_s)
         tl.store(o + blk_o_idx, blk_d, mask=blk_o_msk)
 
 
@@ -422,15 +422,15 @@ class _BlocksparseAdaptLayout(torch.autograd.Function):
 
         # Get position of current sparsity block consisting of its batch, row, and column index
         spa_bat_o_idx = (pid_blk * s_lut_o_r_s + 0 * s_lut_o_c_s)
-        spa_bat_o_msk = (spa_bat_o_idx < s_lut_o_r * s_lut_o_r_s)
+        spa_bat_o_msk = (spa_bat_o_idx >= 0 and spa_bat_o_idx < s_lut_o_r * s_lut_o_r_s)
         spa_bat_o = tl.load(s_lut_o + spa_bat_o_idx, mask=spa_bat_o_msk)
 
         spa_row_o_idx = (pid_blk * s_lut_o_r_s + 1 * s_lut_o_c_s)
-        spa_row_o_msk = (spa_row_o_idx < s_lut_o_r * s_lut_o_r_s)
+        spa_row_o_msk = (spa_row_o_idx >= 0 and spa_row_o_idx < s_lut_o_r * s_lut_o_r_s)
         spa_row_o = tl.load(s_lut_o + spa_row_o_idx, mask=spa_row_o_msk)
 
         spa_col_o_idx = (pid_blk * s_lut_o_r_s + 2 * s_lut_o_c_s)
-        spa_col_o_msk = (spa_col_o_idx < s_lut_o_r * s_lut_o_r_s)
+        spa_col_o_msk = (spa_col_o_idx >= 0 and spa_col_o_idx < s_lut_o_r * s_lut_o_r_s)
         spa_col_o = tl.load(s_lut_o + spa_col_o_idx, mask=spa_col_o_msk)
 
         # Get equivalent sparsity block in from layout
@@ -442,7 +442,7 @@ class _BlocksparseAdaptLayout(torch.autograd.Function):
         rev_idx_spa_x_idx = (spa_bat_x * s_l_x_b_s +
                              spa_row_x * s_l_x_r_s +
                              spa_col_x * s_l_x_c_s)
-        rev_idx_spa_x_msk = (rev_idx_spa_x_idx < s_l_x_b * s_l_x_b_s)
+        rev_idx_spa_x_msk = (rev_idx_spa_x_idx >= 0 and rev_idx_spa_x_idx < s_l_x_b * s_l_x_b_s)
         rev_idx_spa_x = tl.load(r_lut_x + rev_idx_spa_x_idx, mask=rev_idx_spa_x_msk).to(tl.int32)
 
         # If block is present commence operations
@@ -457,12 +457,12 @@ class _BlocksparseAdaptLayout(torch.autograd.Function):
             blk_x_idx = ((rev_idx_spa_x * x_b_s) +
                          ((shift_row_x * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
                          ((shift_col_x * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-            blk_x_msk = (blk_x_idx < x_b * x_b_s)
+            blk_x_msk = (blk_x_idx >= 0 and blk_x_idx < x_b * x_b_s)
             blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
 
             # Store output
             blk_o_idx = ((pid_blk * o_b_s) +
                          ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
                          ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
-            blk_o_msk = (blk_o_idx < o_b * o_b_s)
+            blk_o_msk = (blk_o_idx >= 0 and blk_o_idx < o_b * o_b_s)
             tl.store(o + blk_o_idx, blk_x, mask=blk_o_msk)
