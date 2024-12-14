@@ -548,7 +548,7 @@ def test_blksprs_split():
                                             x_stock.size(2) // num_partitions))
                 blksprs_split_out, sparsity_layout_output = bs.ops.split(
                     bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
-                    sparsity_layout_x, num_partitions,
+                    sparsity_layout_x, num_partitions, -1,
                     sparsity_block_size, triton_block_size)
                 blksprs_split_dense_out = bs.ops.to_dense(blksprs_split_out, sparsity_layout_output,
                                                           sparsity_block_size)
@@ -597,10 +597,10 @@ def test_blksprs_merge():
                                                                 stock_split_out.size(2) * num_partitions))
                 blksprs_split_out, sparsity_layout_split = bs.ops.split(
                     bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
-                    sparsity_layout_x, num_partitions,
+                    sparsity_layout_x, num_partitions, -1,
                     sparsity_block_size, triton_block_size)
                 blksprs_merge_out, sparsity_layout_merge = bs.ops.merge(blksprs_split_out, sparsity_layout_split,
-                                                                        num_partitions, sparsity_block_size,
+                                                                        num_partitions, -1, sparsity_block_size,
                                                                         triton_block_size)
                 blksprs_merge_dense_out = bs.ops.to_dense(blksprs_merge_out, sparsity_layout_merge, sparsity_block_size)
 
