@@ -104,17 +104,17 @@ def kernel_blocksparse_row_wise_sum(x,
 
     # Get position of current sparsity block consisting of its batch and row index
     spa_bat_idx = (pid_blk * s_lut_x_r_s + 0 * s_lut_x_c_s)
-    spa_bat_msk = (spa_bat_idx < s_lut_x_r * s_lut_x_r_s)
+    spa_bat_msk = (spa_bat_idx >= 0 and spa_bat_idx < s_lut_x_r * s_lut_x_r_s)
     spa_bat = tl.load(s_lut_x + spa_bat_idx, mask=spa_bat_msk)
 
     spa_row_idx = (pid_blk * s_lut_x_r_s + 1 * s_lut_x_c_s)
-    spa_row_msk = (spa_row_idx < s_lut_x_r * s_lut_x_r_s)
+    spa_row_msk = (spa_row_idx >= 0 and spa_row_idx < s_lut_x_r * s_lut_x_r_s)
     spa_row = tl.load(s_lut_x + spa_row_idx, mask=spa_row_msk)
 
     # Load reverse sparsity index for current block
     rev_idx_spa_idx = (spa_bat * s_l_o_b_s +
                        spa_row * s_l_o_r_s)
-    rev_idx_spa_msk = (rev_idx_spa_idx < s_l_o_b * s_l_o_b_s)
+    rev_idx_spa_msk = (rev_idx_spa_idx >= 0 and rev_idx_spa_idx < s_l_o_b * s_l_o_b_s)
     rev_idx_spa = tl.load(r_lut_o + rev_idx_spa_idx, mask=rev_idx_spa_msk).to(tl.int32)
 
     if rev_idx_spa == -1:
@@ -124,7 +124,7 @@ def kernel_blocksparse_row_wise_sum(x,
     blk_idx = ((pid_blk * x_b_s) +
                ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
                ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-    blk_msk = (blk_idx < x_b * x_b_s)
+    blk_msk = (blk_idx >= 0 and blk_idx < x_b * x_b_s)
     blk = tl.load(x + blk_idx, mask=blk_msk)
 
     buf = tl.reshape(tl.sum(blk, axis=-1), (TRITON_BLOCK_SIZE, 1))
@@ -132,7 +132,7 @@ def kernel_blocksparse_row_wise_sum(x,
     o_idx = (rev_idx_spa * o_b_s +
              ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
              (tl.arange(0, 1))[None, :])
-    o_msk = (o_idx < o_b * o_b_s)
+    o_msk = (o_idx >= 0 and o_idx < o_b * o_b_s)
     tl.atomic_add(o + o_idx, buf, o_msk)
 
 
@@ -231,17 +231,17 @@ def kernel_blocksparse_row_wise_max(x,
 
     # Get position of current sparsity block consisting of its batch and row index
     spa_bat_idx = (pid_blk * s_lut_x_r_s + 0 * s_lut_x_c_s)
-    spa_bat_msk = (spa_bat_idx < s_lut_x_r * s_lut_x_r_s)
+    spa_bat_msk = (spa_bat_idx >= 0 and spa_bat_idx < s_lut_x_r * s_lut_x_r_s)
     spa_bat = tl.load(s_lut_x + spa_bat_idx, mask=spa_bat_msk)
 
     spa_row_idx = (pid_blk * s_lut_x_r_s + 1 * s_lut_x_c_s)
-    spa_row_msk = (spa_row_idx < s_lut_x_r * s_lut_x_r_s)
+    spa_row_msk = (spa_row_idx >= 0 and spa_row_idx < s_lut_x_r * s_lut_x_r_s)
     spa_row = tl.load(s_lut_x + spa_row_idx, mask=spa_row_msk)
 
     # Load reverse sparsity index for current block
     rev_idx_spa_idx = (spa_bat * s_l_o_b_s +
                        spa_row * s_l_o_r_s)
-    rev_idx_spa_msk = (rev_idx_spa_idx < s_l_o_b * s_l_o_b_s)
+    rev_idx_spa_msk = (rev_idx_spa_idx >= 0 and rev_idx_spa_idx < s_l_o_b * s_l_o_b_s)
     rev_idx_spa = tl.load(r_lut_o + rev_idx_spa_idx, mask=rev_idx_spa_msk).to(tl.int32)
 
     if rev_idx_spa == -1:
@@ -251,7 +251,7 @@ def kernel_blocksparse_row_wise_max(x,
     blk_idx = ((pid_blk * x_b_s) +
                ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
                ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-    blk_msk = (blk_idx < x_b * x_b_s)
+    blk_msk = (blk_idx >= 0 and blk_idx < x_b * x_b_s)
     blk = tl.load(x + blk_idx, mask=blk_msk)
 
     buf = tl.reshape(tl.max(blk, axis=-1), (TRITON_BLOCK_SIZE, 1))
@@ -259,7 +259,7 @@ def kernel_blocksparse_row_wise_max(x,
     o_idx = (rev_idx_spa * o_b_s +
              ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
              (tl.arange(0, 1))[None, :])
-    o_msk = (o_idx < o_b * o_b_s)
+    o_msk = (o_idx >= 0 and o_idx < o_b * o_b_s)
     tl.atomic_max(o + o_idx, buf, o_msk)
 
 
@@ -356,17 +356,17 @@ def kernel_blocksparse_row_wise_add(x,
 
     # Get position of current sparsity block consisting of its batch and row index
     spa_bat_idx = (pid_blk * s_lut_r_s + 0 * s_lut_c_s)
-    spa_bat_msk = (spa_bat_idx < s_lut_r * s_lut_r_s)
+    spa_bat_msk = (spa_bat_idx >= 0 and spa_bat_idx < s_lut_r * s_lut_r_s)
     spa_bat = tl.load(s_lut + spa_bat_idx, mask=spa_bat_msk)
 
     spa_row_idx = (pid_blk * s_lut_r_s + 1 * s_lut_c_s)
-    spa_row_msk = (spa_row_idx < s_lut_r * s_lut_r_s)
+    spa_row_msk = (spa_row_idx >= 0 and spa_row_idx < s_lut_r * s_lut_r_s)
     spa_row = tl.load(s_lut + spa_row_idx, mask=spa_row_msk)
 
     # Get reverse sparsity indices for s
     rev_idx_spa_s_idx = (spa_bat * s_l_y_b_s +
                          spa_row * s_l_y_r_s)
-    rev_idx_spa_s_msk = (rev_idx_spa_s_idx < s_l_y_b * s_l_y_b_s)
+    rev_idx_spa_s_msk = (rev_idx_spa_s_idx >= 0 and rev_idx_spa_s_idx < s_l_y_b * s_l_y_b_s)
     rev_idx_spa_s = tl.load(r_lut_y + rev_idx_spa_s_idx, mask=rev_idx_spa_s_msk).to(tl.int32)
 
     if rev_idx_spa_s == -1:
@@ -377,25 +377,22 @@ def kernel_blocksparse_row_wise_add(x,
     blk_x_idx = ((pid_blk * x_b_s) +
                  ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
                  ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-    blk_x_msk = (blk_x_idx < x_b * x_b_s)
+    blk_x_msk = (blk_x_idx >= 0 and blk_x_idx < x_b * x_b_s)
     blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
 
     # Load sum block
     blk_s_idx = (rev_idx_spa_s * y_b_s +
                  ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * y_r_s)[:, None] +
                  (tl.arange(0, 1) * y_c_s)[None, :])
-    blk_s_msk = (blk_s_idx < y_b * y_b_s)
+    blk_s_msk = (blk_s_idx >= 0 and blk_s_idx < y_b * y_b_s)
     blk_s = tl.load(y + blk_s_idx, mask=blk_s_msk)
 
     # Compute exp
     buf = blk_x + tl.broadcast_to(blk_s, (TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE))
 
-    # debug
-    asdf = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), 1.0, dtype=tl.float32)
-
     # Store block
     blk_o_idx = ((pid_blk * o_b_s) +
                  ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
                  ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
-    blk_o_msk = (blk_o_idx < o_b * o_b_s)
+    blk_o_msk = (blk_o_idx >= 0 and blk_o_idx < o_b * o_b_s)
     tl.store(o + blk_o_idx, buf, mask=blk_o_msk)

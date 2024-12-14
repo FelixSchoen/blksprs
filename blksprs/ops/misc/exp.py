@@ -90,7 +90,7 @@ class _BlocksparseExp(torch.autograd.Function):
         blk_x_idx = ((pid_blk * x_b_s) +
                      ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
                      ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-        blk_x_msk = (blk_x_idx < x_b * x_b_s)
+        blk_x_msk = (blk_x_idx >= 0 and blk_x_idx < x_b * x_b_s)
         blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
 
         # Compute exp
@@ -100,5 +100,5 @@ class _BlocksparseExp(torch.autograd.Function):
         blk_o_idx = ((pid_blk * o_b_s) +
                      ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
                      ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
-        blk_o_msk = (blk_o_idx < o_b * o_b_s)
+        blk_o_msk = (blk_o_idx >= 0 and blk_o_idx < o_b * o_b_s)
         tl.store(o + blk_o_idx, buf, mask=blk_o_msk)

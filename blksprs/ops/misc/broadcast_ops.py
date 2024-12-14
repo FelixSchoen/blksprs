@@ -99,29 +99,29 @@ def kernel_broadcast_addition(x,
 
     # Get position of current sparsity block consisting of its batch, row, and column index
     spa_bat_o_idx = (pid_blk * s_lut_o_r_s + 0 * s_lut_o_c_s)
-    spa_bat_o_msk = (spa_bat_o_idx < s_lut_o_r * s_lut_o_r_s)
+    spa_bat_o_msk = (spa_bat_o_idx >= 0 and spa_bat_o_idx < s_lut_o_r * s_lut_o_r_s)
     spa_bat_o = tl.load(s_lut_o + spa_bat_o_idx, mask=spa_bat_o_msk)
 
     spa_row_o_idx = (pid_blk * s_lut_o_r_s + 1 * s_lut_o_c_s)
-    spa_row_o_msk = (spa_row_o_idx < s_lut_o_r * s_lut_o_r_s)
+    spa_row_o_msk = (spa_row_o_idx >= 0 and spa_row_o_idx < s_lut_o_r * s_lut_o_r_s)
     spa_row_o = tl.load(s_lut_o + spa_row_o_idx, mask=spa_row_o_msk)
 
     spa_col_o_idx = (pid_blk * s_lut_o_r_s + 2 * s_lut_o_c_s)
-    spa_col_o_msk = (spa_col_o_idx < s_lut_o_r * s_lut_o_r_s)
+    spa_col_o_msk = (spa_col_o_idx >= 0 and spa_col_o_idx < s_lut_o_r * s_lut_o_r_s)
     spa_col_o = tl.load(s_lut_o + spa_col_o_idx, mask=spa_col_o_msk)
 
     # Load x block
     blk_x_idx = (spa_bat_o * x_b_s +
                  ((spa_row_o * sparsity_block_size + pid_row * TRITON_BLOCK_SIZE +
                    tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-    blk_x_msk = (blk_x_idx < x_b * x_b_s)
+    blk_x_msk = (blk_x_idx >= 0 and blk_x_idx < x_b * x_b_s)
     blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
 
     # Load y block
     blk_y_idx = (spa_bat_o * y_b_s +
                  ((spa_col_o * sparsity_block_size + pid_col * TRITON_BLOCK_SIZE +
                    tl.arange(0, TRITON_BLOCK_SIZE)) * y_c_s)[None, :])
-    blk_y_msk = (blk_y_idx < y_b * y_b_s)
+    blk_y_msk = (blk_y_idx >= 0 and blk_y_idx < y_b * y_b_s)
     blk_y = tl.load(y + blk_y_idx, mask=blk_y_msk)
 
     # Compute sum
@@ -132,5 +132,5 @@ def kernel_broadcast_addition(x,
     blk_o_idx = ((pid_blk * o_b_s) +
                  ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
                  ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
-    blk_o_msk = (blk_o_idx < o_b * o_b_s)
+    blk_o_msk = (blk_o_idx >= 0 and blk_o_idx < o_b * o_b_s)
     tl.store(o + blk_o_idx, buf, mask=blk_o_msk)
