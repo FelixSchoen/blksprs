@@ -1,5 +1,3 @@
-from typing import Any
-
 import torch
 import triton
 from torch import Tensor

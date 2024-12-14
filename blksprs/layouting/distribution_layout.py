@@ -111,7 +111,7 @@ def kernel_distribution_layout(i,
     elif dim == 2:
         dst_col_idx = blk_i // sparsity_block_size
 
-    blk_v = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), 1, dtype=tl.int32)
+    blk_v = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), 1, dtype=tl.int1)
 
     blk_o_idx = ((dst_bat_idx * o_b_s) +
                  (dst_row_idx * o_r_s) +
