@@ -71,7 +71,7 @@ def kernel_sparsity_layout(x,
     blk_x_idx = (pid_bat * x_b_s +
                  ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
                  ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-    blk_x_msk = (blk_x_idx < x_b * x_b_s)
+    blk_x_msk = (blk_x_idx >= 0 and blk_x_idx < x_b * x_b_s)
     blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
 
     # Store sparsity layout value
@@ -79,7 +79,7 @@ def kernel_sparsity_layout(x,
         blk_o_idx = (pid_bat * o_b_s +
                      (((pid_row * TRITON_BLOCK_SIZE) // sparsity_block_size) * o_r_s +
                       ((pid_col * TRITON_BLOCK_SIZE) // sparsity_block_size) * o_c_s))
-        blk_o_msk = (blk_o_idx < o_b * o_b_s)
+        blk_o_msk = (blk_o_idx >= 0 and blk_o_idx < o_b * o_b_s)
         tl.store(o + blk_o_idx, 1, mask=blk_o_msk)
 
 
@@ -162,22 +162,22 @@ def kernel_sparsity_layout_adaption(x,
 
     # Get sparsity index of current output block consisting of its batch, row, and column index
     spa_bat_idx = (pid_blk * s_lut_r_s + 0 * s_lut_c_s)
-    spa_bat_msk = (spa_bat_idx < s_lut_r * s_lut_r_s)
+    spa_bat_msk = (spa_bat_idx >= 0 and spa_bat_idx < s_lut_r * s_lut_r_s)
     spa_bat = tl.load(s_lut + spa_bat_idx, mask=spa_bat_msk)
 
     spa_row_idx = (pid_blk * s_lut_r_s + 1 * s_lut_c_s)
-    spa_row_msk = (spa_row_idx < s_lut_r * s_lut_r_s)
+    spa_row_msk = (spa_row_idx >= 0 and spa_row_idx < s_lut_r * s_lut_r_s)
     spa_row = tl.load(s_lut + spa_row_idx, mask=spa_row_msk)
 
     spa_col_idx = (pid_blk * s_lut_r_s + 2 * s_lut_c_s)
-    spa_col_msk = (spa_col_idx < s_lut_r * s_lut_r_s)
+    spa_col_msk = (spa_col_idx >= 0 and spa_col_idx < s_lut_r * s_lut_r_s)
     spa_col = tl.load(s_lut + spa_col_idx, mask=spa_col_msk)
 
     # Load x values
     blk_x_idx = ((pid_blk * x_b_s) +
                  ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
                  ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-    blk_x_msk = (blk_x_idx < x_b * x_b_s)
+    blk_x_msk = (blk_x_idx >= 0 and blk_x_idx < x_b * x_b_s)
     blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
 
     # Store sparsity layout value
@@ -187,7 +187,7 @@ def kernel_sparsity_layout_adaption(x,
                        // sparsity_block_size_to) * o_r_s) +
                      (((spa_col * sparsity_block_size_from + pid_col * TRITON_BLOCK_SIZE)
                        // sparsity_block_size_to) * o_c_s))
-        blk_o_msk = (blk_o_idx < o_b * o_b_s)
+        blk_o_msk = (blk_o_idx >= 0 and blk_o_idx < o_b * o_b_s)
         tl.store(o + blk_o_idx, 1, mask=blk_o_msk)
 
 
