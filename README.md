@@ -3,14 +3,6 @@
 [![GitHub Release](https://img.shields.io/github/v/release/FelixSchoen/blksprs?include_prereleases&label=Latest%20Release)](https://github.com/FelixSchoen/blksprs/releases)
 [![Python Version](https://img.shields.io/badge/Python%20Version-3.11-blue)](https://www.python.org/downloads/release/python-3119/)
 
-## Important Notice
-
-🚨 **Non-Final API** 🚨
-
-Although it already supports a wide variety of functions, this library is still under active development and the API is
-subject to change. For feature requests or bug reports, please open an [issue](https://github.com/FelixSchoen/blksprs/issues).
-We also encourage [pull requests](https://github.com/FelixSchoen/blksprs/pulls).
-
 ## Overview
 
 A lightweight and efficient library for operations on block-sparse matrices in PyTorch using Triton.
@@ -24,7 +16,7 @@ Currently supported operations (includes gradient calculation):
 - Scatter (_supports either no reduction or summation, gradients are only available for summation_)
 - Repeat (_supports target sparsity layout_)
 - Repeat Interleave (_supports target sparsity layout_)
-- Splitting and merging of matrices along the last dimension
+- Splitting and merging of matrices (_currently* only supports splitting and merging along the last dimension_)
 - Conversion to and from sparse form
 - Conversion to different sparsity layouts and different sparsity block sizes
 
@@ -50,13 +42,15 @@ Furthermore, the library provides a set of utility functions
 - for the creation of sparsity layouts based on existing
 dense tensors and for the scatter operation (module ``bs.layouting``),
 - for the application of ``nn.Linear``, ``nn.Dropout``, and ``nn.LayerNorm`` layers to block-sparse tensors,
-- as well as utility functions to apply linear layers,
-ensure correct input dimensionality, and validate input (module ``bs.utils``).
+- as well as utility functions to ensure correct input dimensionality, and validate input (module ``bs.utils``).
+
+_* see the [Roadmap](#roadmap) section for more information_ 
 
 ## Installation
 
-Note that due to the dependency on [Triton](https://github.com/triton-lang/triton) this library is only compatible with
-the Linux platform.
+Note that due to the dependency on [Triton](https://github.com/triton-lang/triton) this library is **only compatible with
+the Linux platform**.
+Keep track of this [issue](https://github.com/triton-lang/triton/issues/1640) for updates.
 
 We recommend installing blksprs from [PyPI](https://pypi.org/project/blksprs/) using pip:
 
@@ -71,6 +65,16 @@ We recommend installing blksprs from [PyPI](https://pypi.org/project/blksprs/) u
 ## Changelog
 
 See [`CHANGELOG.md`](https://github.com/FelixSchoen/blksprs/blob/main/CHANGELOG.md) for a detailed changelog.
+
+## Roadmap
+
+Note that since this library covers all our current needs it is in a **bugfix-only** state.
+This means that there are no plans to add new features, e.g., support for dimension specification of the ``split`` and ``merge`` operations.
+We will continue to maintain the library and fix any issues that arise.
+Should you find any bugs please open an [issue](https://github.com/FelixSchoen/blksprs/issues).
+We also encourage [pull requests](https://github.com/FelixSchoen/blksprs/pulls).
+
+It might be that this changes with future projects, but as of December 2024, we are content with the current state of the library.
 
 ## Usage
 

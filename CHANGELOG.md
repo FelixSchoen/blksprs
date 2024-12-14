@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10] - 2024-12-14
+
+### Changed
+
+- Change dtype of sparsity layouts from ``int32`` to ``int1``
+- Change signature of ``split`` and ``merge`` to contain placeholder ``dim`` parameter
+
+### Fixed
+
+- Fix masking bounds of kernels not being tight
+
+### Removed
+
+- Remove ``bs.ops.experimental`` module
+
 ## [1.9.3] - 2024-12-03
 
 ### Fixed
