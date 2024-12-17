@@ -52,12 +52,12 @@ def to_dense(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int
     validate_contiguous(sparsity_reverse_lut)
 
     if sparsity_layout.size(1) == 1 and sparsity_layout.size(2) == 1 and torch.all(sparsity_layout):
-        return BlksprsTensor(x)
+        return x
 
-    return BlksprsTensor(_BlocksparseToDense.apply(x,
-                                                   sparsity_layout, sparsity_reverse_lut,
-                                                   sparsity_block_size, fill_value,
-                                                   triton_block_size))
+    return _BlocksparseToDense.apply(x,
+                                     sparsity_layout, sparsity_reverse_lut,
+                                     sparsity_block_size, fill_value,
+                                     triton_block_size)
 
 
 class _BlocksparseToDense(torch.autograd.Function):
