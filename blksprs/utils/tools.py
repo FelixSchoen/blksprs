@@ -1,3 +1,4 @@
+import torch
 from torch import Tensor, Size
 
 
@@ -20,4 +21,9 @@ def get_triton_block_size(sparsity_block_size: int, limit: int = 128):
 
 
 def stride(x: Tensor):
-    return x.view(x.shape).stride()
+    if x.dim() == 2:
+        return x.size(1), 1
+    elif x.dim() == 3:
+        return x.size(1) * x.size(2), x.size(2), 1
+    else:
+        raise NotImplementedError
