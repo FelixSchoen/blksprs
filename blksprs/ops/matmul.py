@@ -13,7 +13,7 @@ from blksprs.utils.validation import validate_contiguous, validate_dimensions, v
 def matmul(x: BlksprsTensor, sparsity_layout_x: Tensor,
            y: BlksprsTensor, sparsity_layout_y: Tensor,
            sparsity_layout_output: Tensor,
-           sparsity_block_size: int, triton_block_size: int = None) -> BlksprsTensor:
+           sparsity_block_size: int, triton_block_size: int = None, lut: dict = None) -> BlksprsTensor:
     """Performs matrix multiplication between two block-sparse tensors.
 
     The sparsity layout of the output tensor is used to only calculate blocks that will be present in the output.
@@ -26,6 +26,7 @@ def matmul(x: BlksprsTensor, sparsity_layout_x: Tensor,
         sparsity_layout_output (Tensor): The sparsity layout of the output tensor.
         sparsity_block_size (int): The size of the sparsity blocks.
         triton_block_size (int, optional): The block size to use for the triton kernel (default ``None``).
+        lut (dict, optional): A dictionary containing the look-up tables for the operation (default ``None``).
 
     Returns:
         BlksprsTensor: The result of the matrix multiplication as a block-sparse tensor in compressed form.
@@ -44,34 +45,51 @@ def matmul(x: BlksprsTensor, sparsity_layout_x: Tensor,
     validate_sparsity_block_size(sparsity_block_size, x, y)
     validate_triton_block_size(triton_block_size, sparsity_block_size)
 
-    sparsity_layout_x_flat = sparsity_layout_x.reshape(-1)
-    sparsity_reverse_lut_x = ((torch.cumsum(sparsity_layout_x_flat, dim=-1) - 1) *
-                              (sparsity_layout_x_flat == 1) -
-                              (1 * (sparsity_layout_x_flat == 0)))
-
-    sparsity_layout_y_flat = sparsity_layout_y.reshape(-1)
-    sparsity_reverse_lut_y = ((torch.cumsum(sparsity_layout_y_flat, dim=-1) - 1) *
-                              (sparsity_layout_y_flat == 1) -
-                              (1 * (sparsity_layout_y_flat == 0)))
-
-    sparsity_lut_o = torch.nonzero(sparsity_layout_output).contiguous()
-
-    n_sparse_blocks = torch.sum(sparsity_layout_output.to(torch.int)).item()
-
-    validate_contiguous(sparsity_layout_x, sparsity_reverse_lut_x,
-                        sparsity_layout_y, sparsity_reverse_lut_y,
-                        sparsity_layout_output, sparsity_lut_o)
+    lut = _BlocksparseMatmulSSS.build_lut(lut, sparsity_layout_x, sparsity_layout_y, sparsity_layout_output)
 
     return BlksprsTensor(_BlocksparseMatmulSSS.apply(x, y,
-                                                     sparsity_layout_x, sparsity_reverse_lut_x,
-                                                     sparsity_layout_y, sparsity_reverse_lut_y,
-                                                     sparsity_layout_output, sparsity_lut_o,
+                                                     sparsity_layout_x, lut["sparsity_reverse_lut_x"],
+                                                     sparsity_layout_y, lut["sparsity_reverse_lut_y"],
+                                                     sparsity_layout_output, lut["sparsity_lut_o"],
                                                      sparsity_block_size,
-                                                     n_sparse_blocks,
+                                                     lut["n_sparse_blocks"],
                                                      triton_block_size))
 
 
 class _BlocksparseMatmulSSS(torch.autograd.Function):
+
+    @staticmethod
+    def build_lut(lut: dict, sparsity_layout_x: Tensor, sparsity_layout_y: Tensor, sparsity_layout_output: Tensor):
+        if lut is None:
+            lut = dict()
+
+        if "sparsity_reverse_lut_x" not in lut:
+            sparsity_layout_x_flat = sparsity_layout_x.reshape(-1)
+            sparsity_reverse_lut_x = ((torch.cumsum(sparsity_layout_x_flat, dim=-1) - 1) *
+                                      (sparsity_layout_x_flat == 1) -
+                                      (1 * (sparsity_layout_x_flat == 0)))
+            lut["sparsity_reverse_lut_x"] = sparsity_reverse_lut_x
+
+        if "sparsity_reverse_lut_y" not in lut:
+            sparsity_layout_y_flat = sparsity_layout_y.reshape(-1)
+            sparsity_reverse_lut_y = ((torch.cumsum(sparsity_layout_y_flat, dim=-1) - 1) *
+                                      (sparsity_layout_y_flat == 1) -
+                                      (1 * (sparsity_layout_y_flat == 0)))
+            lut["sparsity_reverse_lut_y"] = sparsity_reverse_lut_y
+
+        if "sparsity_lut_o" not in lut:
+            sparsity_lut_o = torch.nonzero(sparsity_layout_output).contiguous()
+            lut["sparsity_lut_o"] = sparsity_lut_o
+
+        if "n_sparse_blocks" not in lut:
+            n_sparse_blocks = torch.sum(sparsity_layout_output.to(torch.int)).item()
+            lut["n_sparse_blocks"] = n_sparse_blocks
+
+        validate_contiguous(sparsity_layout_x, lut["sparsity_reverse_lut_x"],
+                            sparsity_layout_y, lut["sparsity_reverse_lut_y"],
+                            sparsity_layout_output, lut["sparsity_lut_o"])
+
+        return lut
 
     @staticmethod
     def forward(ctx, x: Tensor, y: Tensor,

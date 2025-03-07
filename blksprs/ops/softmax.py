@@ -3,7 +3,6 @@ import triton
 from torch import Tensor
 from triton import language as tl
 
-from blksprs.ops.misc.exp import exp
 from blksprs.ops.misc.row_wise import row_wise_sum, row_wise_max, row_wise_sub
 from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import get_triton_block_size, stride
@@ -12,7 +11,7 @@ from blksprs.utils.validation import validate_contiguous, validate_dimensions, v
 
 
 def softmax(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
-            triton_block_size: int = None) -> BlksprsTensor:
+            triton_block_size: int = None, lut: dict = None) -> BlksprsTensor:
     """Computes the softmax of a block-sparse tensor in compressed form.
 
     Note:
@@ -23,6 +22,7 @@ def softmax(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
         sparsity_layout (Tensor): The sparsity layout of the block-sparse tensor.
         sparsity_block_size (int): The size of the sparsity blocks.
         triton_block_size (int): The block size to use for the triton kernel (default ``None``).
+        lut (dict, optional): A dictionary containing the look-up tables for the operation (default ``None``).
 
     Returns:
         BlksprsTensor: The result of the softmax operation as a block-sparse tensor in compressed form.
@@ -37,23 +37,37 @@ def softmax(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
     validate_sparsity_block_size(sparsity_block_size, x)
     validate_triton_block_size(triton_block_size, sparsity_block_size)
 
-    sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
-
-    sparsity_layout_rws, _ = torch.max(sparsity_layout, dim=-1, keepdim=True)
-    sparsity_layout_rws_flat = sparsity_layout_rws.reshape(-1)
-    sparsity_reverse_lut_rws = ((torch.cumsum(sparsity_layout_rws_flat, dim=-1) - 1) *
-                                (sparsity_layout_rws_flat == 1) -
-                                (1 * (sparsity_layout_rws_flat == 0)))
-
-    validate_contiguous(sparsity_layout, sparsity_lut, sparsity_reverse_lut_rws)
+    lut = _BlocksparseSoftmax.build_lut(lut, sparsity_layout)
 
     return BlksprsTensor(_BlocksparseSoftmax.apply(x, sparsity_layout,
-                                                   sparsity_lut,
-                                                   sparsity_reverse_lut_rws,
+                                                   lut["sparsity_lut"],
+                                                   lut["sparsity_reverse_lut_rws"],
                                                    sparsity_block_size, triton_block_size))
 
 
 class _BlocksparseSoftmax(torch.autograd.Function):
+
+    @staticmethod
+    def build_lut(lut: dict, sparsity_layout: Tensor):
+        if lut is None:
+            lut = dict()
+
+        if "sparsity_lut" not in lut:
+            sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
+            lut["sparsity_lut"] = sparsity_lut
+
+
+        if "sparsity_reverse_lut_rws" not in lut:
+            sparsity_layout_rws, _ = torch.max(sparsity_layout, dim=-1, keepdim=True)
+            sparsity_layout_rws_flat = sparsity_layout_rws.reshape(-1)
+            sparsity_reverse_lut_rws = ((torch.cumsum(sparsity_layout_rws_flat, dim=-1) - 1) *
+                                        (sparsity_layout_rws_flat == 1) -
+                                        (1 * (sparsity_layout_rws_flat == 0)))
+            lut["sparsity_reverse_lut_rws"] = sparsity_reverse_lut_rws
+
+        validate_contiguous(sparsity_layout, lut["sparsity_lut"], lut["sparsity_reverse_lut_rws"])
+
+        return lut
 
     @staticmethod
     def forward(ctx, x: Tensor, sparsity_layout: Tensor,
@@ -72,7 +86,7 @@ class _BlocksparseSoftmax(torch.autograd.Function):
                                                            flag_slice_only=True,
                                                            triton_block_size=triton_block_size)
         x_scaled = row_wise_sub(x, sparsity_layout, x_row_wise_max, sparsity_block_size, triton_block_size)
-        x_exp = exp(x_scaled, sparsity_block_size, triton_block_size=triton_block_size)
+        x_exp = torch.exp(x_scaled)
         x_exp_row_wise_sum, sparsity_layout_rws = row_wise_sum(x_exp, sparsity_layout, sparsity_block_size,
                                                                flag_slice_only=True,
                                                                triton_block_size=triton_block_size)

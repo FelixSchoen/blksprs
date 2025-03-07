@@ -19,7 +19,7 @@ def from_blksprs(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size:
 
 
 def to_dense(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int, fill_value: float = 0,
-             triton_block_size: int = None) -> Tensor:
+             triton_block_size: int = None, lut: dict = None) -> Tensor:
     """Converts a block-sparse tensor in compressed form to a block-sparse tensor in regular form based on the given
         sparsity layout.
 
@@ -30,6 +30,7 @@ def to_dense(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int
         fill_value (float): The value to fill the resulting dense tensor with where the block-sparse tensor is not
             present (default ``0``).
         triton_block_size (int): The block size to use for the triton kernel (default ``None``).
+        lut (dict, optional): A dictionary containing the look-up tables for the operation (default ``None``).
 
     Returns:
         Tensor: The block-sparse tensor converted to regular form.
@@ -44,23 +45,34 @@ def to_dense(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int
     validate_sparsity_block_size(sparsity_block_size, x)
     validate_triton_block_size(triton_block_size, sparsity_block_size)
 
-    sparsity_layout_flat = sparsity_layout.reshape(-1)
-    sparsity_reverse_lut = ((torch.cumsum(sparsity_layout_flat, dim=-1) - 1) *
-                            (sparsity_layout_flat == 1) -
-                            (1 * (sparsity_layout_flat == 0)))
-
-    validate_contiguous(sparsity_reverse_lut)
+    lut = _BlocksparseToDense.build_lut(lut, sparsity_layout)
 
     if sparsity_layout.size(1) == 1 and sparsity_layout.size(2) == 1 and torch.all(sparsity_layout):
         return x
 
     return _BlocksparseToDense.apply(x,
-                                     sparsity_layout, sparsity_reverse_lut,
+                                     sparsity_layout, lut["sparsity_reverse_lut"],
                                      sparsity_block_size, fill_value,
                                      triton_block_size)
 
 
 class _BlocksparseToDense(torch.autograd.Function):
+
+    @staticmethod
+    def build_lut(lut: dict, sparsity_layout: Tensor):
+        if lut is None:
+            lut = dict()
+
+        if "sparsity_reverse_lut" not in lut:
+            sparsity_layout_flat = sparsity_layout.reshape(-1)
+            sparsity_reverse_lut = ((torch.cumsum(sparsity_layout_flat, dim=-1) - 1) *
+                                    (sparsity_layout_flat == 1) -
+                                    (1 * (sparsity_layout_flat == 0)))
+            lut["sparsity_reverse_lut"] = sparsity_reverse_lut
+
+        validate_contiguous(lut["sparsity_reverse_lut"])
+
+        return lut
 
     @staticmethod
     def forward(ctx, x: Tensor,
@@ -160,7 +172,7 @@ def to_blksprs(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int,
 
 
 def to_sparse(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int,
-              triton_block_size: int = None) -> BlksprsTensor:
+              triton_block_size: int = None, lut: dict = None) -> BlksprsTensor:
     """Converts a block-sparse tensor in regular form to a block-sparse tensor in compressed form based on the given
     sparsity layout.
 
@@ -169,6 +181,7 @@ def to_sparse(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int,
         sparsity_layout (Tensor): The sparsity layout of the block-sparse tensor.
         sparsity_block_size (int): The size of the sparsity blocks.
         triton_block_size (int): The block size to use for the triton kernel (default ``None``).
+        lut (dict, optional): A dictionary containing the look-up tables for the operation (default ``None``).
 
     Returns:
         BlksprsTensor: The block-sparse tensor converted to compressed form.
@@ -183,21 +196,35 @@ def to_sparse(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int,
     validate_sparsity_block_size(sparsity_block_size, x)
     validate_triton_block_size(triton_block_size, sparsity_block_size)
 
-    sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
-    n_sparse_blocks = torch.sum(sparsity_layout.to(torch.int)).item()
-
-    validate_contiguous(sparsity_layout, sparsity_lut)
+    lut = _BlocksparseToSparse.build_lut(lut, sparsity_layout)
 
     if sparsity_layout.size(1) == 1 and sparsity_layout.size(2) == 1 and torch.all(sparsity_layout):
         return BlksprsTensor(x)
 
     return BlksprsTensor(_BlocksparseToSparse.apply(x,
-                                                    sparsity_layout, sparsity_lut,
-                                                    sparsity_block_size, n_sparse_blocks,
+                                                    sparsity_layout, lut["sparsity_lut"],
+                                                    sparsity_block_size, lut["n_sparse_blocks"],
                                                     triton_block_size))
 
 
 class _BlocksparseToSparse(torch.autograd.Function):
+
+    @staticmethod
+    def build_lut(lut: dict, sparsity_layout: Tensor):
+        if lut is None:
+            lut = dict()
+
+        if "sparsity_lut" not in lut:
+            sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
+            lut["sparsity_lut"] = sparsity_lut
+
+        if "n_sparse_blocks" not in lut:
+            n_sparse_blocks = torch.sum(sparsity_layout.to(torch.int)).item()
+            lut["n_sparse_blocks"] = n_sparse_blocks
+
+        validate_contiguous(sparsity_layout, lut["sparsity_lut"])
+
+        return lut
 
     @staticmethod
     def forward(ctx, x: Tensor,

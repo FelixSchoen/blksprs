@@ -11,6 +11,7 @@ from blksprs import BlksprsTensor
 
 # TODO Benchmarking
 # TODO Refactor backward for flow methods in own function
+# TODO Use flow kernel for transpose
 
 # Device setup
 DEVICE = torch.device("cuda:0")
@@ -92,7 +93,7 @@ SEED = 0
 @pytest.fixture(scope="session", autouse=True)
 def setup():
     global SEED
-    use_random_seed = False
+    use_random_seed = True
 
     if use_random_seed:
         seed = random.randint(0, 2 ** 32 - 1)
@@ -700,38 +701,6 @@ def test_blksprs_row_wise_add():
                                                              sparsity_block_size)
 
             assert torch.allclose(blksprs_row_wise_add_dense_out, stock_rwa_out, atol=ATOL, rtol=RTOL)
-
-
-def test_blksprs_exp():
-    for b, m, _, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
-        x_d = torch.randn(size=(b, m, k), device=DEVICE)
-        sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
-
-        sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
-        x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size, triton_block_size)
-
-        for x, sparsity_layout_x in [(x_d, sparsity_layout_x_d), (x_bs, sparsity_layout_x_bs)]:
-            x_stock = x.clone().requires_grad_(True)
-            x_blksprs = x.clone().requires_grad_(True)
-
-            stock_exp_out = _blocksparse_roundtrip(torch.exp(x_stock), sparsity_layout_x,
-                                                   sparsity_block_size, triton_block_size)
-            blksprs_exp_out = bs.ops.misc.exp(bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
-                                              sparsity_block_size)
-            blksprs_exp_dense_out = bs.ops.to_dense(blksprs_exp_out, sparsity_layout_x, sparsity_block_size)
-
-            assert torch.allclose(blksprs_exp_dense_out, stock_exp_out, atol=ATOL, rtol=RTOL)
-
-            target = torch.randn_like(stock_exp_out)
-            stock_loss = torch.nn.L1Loss()
-            blksprs_loss = torch.nn.L1Loss()
-            stock_loss = stock_loss(stock_exp_out, target)
-            blksprs_loss = blksprs_loss(blksprs_exp_dense_out, target)
-
-            stock_loss.backward()
-            blksprs_loss.backward()
-
-            assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
 
 
 def test_blksprs_adapt_layout():

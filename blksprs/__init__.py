@@ -13,7 +13,6 @@ class ops:
     class misc:
         from blksprs.ops.misc.row_wise import row_wise_sum, row_wise_max, row_wise_add, row_wise_sub
         from blksprs.ops.misc.broadcast_ops import broadcast_add, broadcast_sub
-        from blksprs.ops.misc.exp import exp
 
 
 class layouting:

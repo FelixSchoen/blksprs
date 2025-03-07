@@ -40,21 +40,18 @@ def kernel_blocksparse_flow_pull(x,
     rev_idx_spa_msk = (rev_idx_spa_idx >= 0 and rev_idx_spa_idx < s_l_o_b * s_l_o_b_s)
     rev_idx_spa = tl.load(r_lut + rev_idx_spa_idx, mask=rev_idx_spa_msk).to(tl.int32)
 
-    if rev_idx_spa == -1:
-        tl.device_assert(False)
-        return
+    if rev_idx_spa >= 0:
+        blk_x_idx = (rev_idx_spa * x_b_s +
+                     ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
+                     ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
+        blk_x_msk = (blk_x_idx >= 0 and blk_x_idx < x_b * x_b_s)
+        blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
 
-    blk_x_idx = (rev_idx_spa * x_b_s +
-                 ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
-                 ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-    blk_x_msk = (blk_x_idx >= 0 and blk_x_idx < x_b * x_b_s)
-    blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
-
-    blk_o_idx = (pid_blk * o_b_s +
-                 ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
-                 ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
-    blk_o_msk = (blk_o_idx >= 0 and blk_o_idx < o_b * o_b_s)
-    tl.store(o + blk_o_idx, blk_x, mask=blk_o_msk)
+        blk_o_idx = (pid_blk * o_b_s +
+                     ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
+                     ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
+        blk_o_msk = (blk_o_idx >= 0 and blk_o_idx < o_b * o_b_s)
+        tl.store(o + blk_o_idx, blk_x, mask=blk_o_msk)
 
 
 @triton.jit
@@ -91,21 +88,18 @@ def kernel_blocksparse_flow_push(x,
     rev_idx_spa_msk = (rev_idx_spa_idx >= 0 and rev_idx_spa_idx < s_l_x_b * s_l_x_b_s)
     rev_idx_spa = tl.load(r_lut + rev_idx_spa_idx, mask=rev_idx_spa_msk).to(tl.int32)
 
-    if rev_idx_spa == -1:
-        tl.device_assert(False)
-        return
+    if rev_idx_spa >= 0:
+        blk_x_idx = (pid_blk * x_b_s +
+                     ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
+                     ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
+        blk_x_msk = (blk_x_idx >= 0 and blk_x_idx < x_b * x_b_s)
+        blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
 
-    blk_x_idx = (pid_blk * x_b_s +
-                 ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
-                 ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-    blk_x_msk = (blk_x_idx >= 0 and blk_x_idx < x_b * x_b_s)
-    blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
-
-    blk_o_idx = (rev_idx_spa * o_b_s +
-                 ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
-                 ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
-    blk_o_msk = (blk_o_idx >= 0 and blk_o_idx < o_b * o_b_s)
-    tl.atomic_add(o + blk_o_idx, blk_x, mask=blk_o_msk)
+        blk_o_idx = (rev_idx_spa * o_b_s +
+                     ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
+                     ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
+        blk_o_msk = (blk_o_idx >= 0 and blk_o_idx < o_b * o_b_s)
+        tl.atomic_add(o + blk_o_idx, blk_x, mask=blk_o_msk)
 
 
 def flow_forward(ctx, x: Tensor, sparsity_layout_o: Tensor, sparsity_lut: Tensor, sparsity_reverse_lut: Tensor,

@@ -13,7 +13,7 @@ from blksprs.utils.validation import validate_contiguous, validate_dimensions, v
 def gather(src: BlksprsTensor, sparsity_layout_src: Tensor,
            dim: int,
            idx: BlksprsTensor, sparsity_layout_idx: Tensor,
-           sparsity_block_size: int, triton_block_size: int = None) -> BlksprsTensor:
+           sparsity_block_size: int, triton_block_size: int = None, lut: dict = None) -> BlksprsTensor:
     """Applies a gather operation on a block-sparse tensor in compressed form.
 
     Args:
@@ -24,6 +24,7 @@ def gather(src: BlksprsTensor, sparsity_layout_src: Tensor,
         sparsity_layout_idx (Tensor): The sparsity layout of the indices block-sparse tensor.
         sparsity_block_size (int): The size of the sparsity blocks.
         triton_block_size (int, optional): The block size to use for the triton kernel (default ``None``).
+        lut (dict, optional): A dictionary containing the look-up tables for the operation (default ``None``).
 
     Returns:
         BlksprsTensor: The result of the gather operation as a block-sparse tensor in compressed form.
@@ -40,24 +41,37 @@ def gather(src: BlksprsTensor, sparsity_layout_src: Tensor,
     validate_sparsity_block_size(sparsity_block_size, src, idx)
     validate_triton_block_size(triton_block_size, sparsity_block_size)
 
-    sparsity_layout_x_flat = sparsity_layout_src.reshape(-1)
-    sparsity_reverse_lut_x = ((torch.cumsum(sparsity_layout_x_flat, dim=-1) - 1) *
-                              (sparsity_layout_x_flat == 1) -
-                              (1 * (sparsity_layout_x_flat == 0)))
-
-    sparsity_lut_i = torch.nonzero(sparsity_layout_idx).contiguous()
-
-    validate_contiguous(sparsity_layout_src, sparsity_reverse_lut_x,
-                        sparsity_layout_idx, sparsity_lut_i)
-
     adjusted_dim = dim % 3
 
-    return BlksprsTensor(_BlocksparseGather.apply(src, sparsity_layout_src, sparsity_reverse_lut_x,
-                                                  adjusted_dim, idx, sparsity_layout_idx, sparsity_lut_i,
+    lut = _BlocksparseGather.build_lut(lut, sparsity_layout_src, sparsity_layout_idx)
+
+    return BlksprsTensor(_BlocksparseGather.apply(src, sparsity_layout_src, lut["sparsity_reverse_lut_x"],
+                                                  adjusted_dim, idx, sparsity_layout_idx, lut["sparsity_lut_i"],
                                                   sparsity_block_size, triton_block_size))
 
 
 class _BlocksparseGather(torch.autograd.Function):
+
+    @staticmethod
+    def build_lut(lut: dict, sparsity_layout_src: Tensor, sparsity_layout_idx: Tensor):
+        if lut is None:
+            lut = dict()
+
+        if "sparsity_reverse_lut_x" not in lut:
+            sparsity_layout_x_flat = sparsity_layout_src.reshape(-1)
+            sparsity_reverse_lut_x = ((torch.cumsum(sparsity_layout_x_flat, dim=-1) - 1) *
+                                      (sparsity_layout_x_flat == 1) -
+                                      (1 * (sparsity_layout_x_flat == 0)))
+            lut["sparsity_reverse_lut_x"] = sparsity_reverse_lut_x
+
+        if "sparsity_lut_i" not in lut:
+            sparsity_lut_i = torch.nonzero(sparsity_layout_idx).contiguous()
+            lut["sparsity_lut_i"] = sparsity_lut_i
+
+        validate_contiguous(sparsity_layout_src, lut["sparsity_reverse_lut_x"],
+                            sparsity_layout_idx, lut["sparsity_lut_i"])
+
+        return lut
 
     @staticmethod
     def forward(ctx, x: Tensor, sparsity_layout_x: Tensor, sparsity_reverse_lut_x: Tensor,
@@ -202,7 +216,7 @@ def scatter(src: BlksprsTensor, sparsity_layout_src: Tensor,
             dim: int,
             idx: BlksprsTensor,
             sparsity_layout_tgt: Tensor,
-            sparsity_block_size: int, triton_block_size: int = None) -> BlksprsTensor:
+            sparsity_block_size: int, triton_block_size: int = None, lut: dict = None) -> BlksprsTensor:
     """Wrapper for ``scatter_reduce`` with ``reduce_op="none"``.
 
     """
@@ -219,7 +233,7 @@ def scatter_reduce(src: BlksprsTensor, sparsity_layout_src: Tensor,
                    idx: BlksprsTensor,
                    sparsity_layout_tgt: Tensor,
                    sparsity_block_size: int,
-                   reduce_op: str = "sum", triton_block_size: int = None) -> BlksprsTensor:
+                   reduce_op: str = "sum", triton_block_size: int = None, lut: dict = None) -> BlksprsTensor:
     """Applies a scatter operation on a block-sparse tensor in compressed form.
 
     Args:
@@ -232,6 +246,7 @@ def scatter_reduce(src: BlksprsTensor, sparsity_layout_src: Tensor,
         reduce_op (str, optional): The reduction operation to apply during the scatter operation (default ``"sum"``).
             Supported operations are ``"none"`` and ``"sum"``.
         triton_block_size (int, optional): The block size to use for the triton kernel (default ``None``).
+        lut (dict, optional): A dictionary containing the look-up tables for the operation (default ``None``).
 
     Returns:
         BlksprsTensor: The result of the scatter operation as a block-sparse tensor in compressed form.
@@ -251,28 +266,43 @@ def scatter_reduce(src: BlksprsTensor, sparsity_layout_src: Tensor,
     if reduce_op not in ["none", "sum"]:
         raise ValueError(f"Reduction operation '{reduce_op}' is not supported")
 
-    sparsity_lut_x = torch.nonzero(sparsity_layout_src).contiguous()
-
-    sparsity_layout_o_flat = sparsity_layout_tgt.reshape(-1)
-    sparsity_reverse_lut_o = ((torch.cumsum(sparsity_layout_o_flat, dim=-1) - 1) *
-                              (sparsity_layout_o_flat == 1) -
-                              (1 * (sparsity_layout_o_flat == 0)))
-
-    n_sparse_blocks = torch.sum(sparsity_layout_tgt.to(torch.int)).item()
-
-    validate_contiguous(sparsity_layout_src, sparsity_lut_x,
-                        sparsity_layout_tgt, sparsity_reverse_lut_o)
-
     adjusted_dim = dim % 3
 
-    return BlksprsTensor(_BlocksparseScatterReduce.apply(src, sparsity_layout_src, sparsity_lut_x,
+    lut = _BlocksparseScatterReduce.build_lut(lut, sparsity_layout_src, sparsity_layout_tgt)
+
+    return BlksprsTensor(_BlocksparseScatterReduce.apply(src, sparsity_layout_src, lut["sparsity_lut_x"],
                                                          adjusted_dim, idx,
-                                                         sparsity_layout_tgt, sparsity_reverse_lut_o,
-                                                         sparsity_block_size, n_sparse_blocks,
+                                                         sparsity_layout_tgt, lut["sparsity_reverse_lut_o"],
+                                                         sparsity_block_size, lut["n_sparse_blocks"],
                                                          reduce_op, triton_block_size))
 
 
 class _BlocksparseScatterReduce(torch.autograd.Function):
+
+    @staticmethod
+    def build_lut(lut: dict, sparsity_layout_src: Tensor, sparsity_layout_tgt: Tensor):
+        if lut is None:
+            lut = dict()
+
+        if "sparsity_lut_x" not in lut:
+            sparsity_lut_x = torch.nonzero(sparsity_layout_src).contiguous()
+            lut["sparsity_lut_x"] = sparsity_lut_x
+
+        if "sparsity_reverse_lut_o" not in lut:
+            sparsity_layout_o_flat = sparsity_layout_tgt.reshape(-1)
+            sparsity_reverse_lut_o = ((torch.cumsum(sparsity_layout_o_flat, dim=-1) - 1) *
+                                      (sparsity_layout_o_flat == 1) -
+                                      (1 * (sparsity_layout_o_flat == 0)))
+            lut["sparsity_reverse_lut_o"] = sparsity_reverse_lut_o
+
+        if "n_sparse_blocks" not in lut:
+            n_sparse_blocks = torch.sum(sparsity_layout_tgt.to(torch.int)).item()
+            lut["n_sparse_blocks"] = n_sparse_blocks
+
+        validate_contiguous(sparsity_layout_src, lut["sparsity_lut_x"],
+                            sparsity_layout_tgt, lut["sparsity_reverse_lut_o"])
+
+        return lut
 
     @staticmethod
     def forward(ctx, x: Tensor, sparsity_layout_x: Tensor, sparsity_lut_x: Tensor,
