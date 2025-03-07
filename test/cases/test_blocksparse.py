@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 import torch
 from matplotlib import pyplot as plt
+from torch import Tensor
 
 import blksprs as bs
 from blksprs import BlksprsTensor
@@ -1033,7 +1034,7 @@ def _visualise(*matrices, dim=0):
                           vmax=vmax, **add_args)
 
 
-def _visualise_matrix(matrix: torch.Tensor, output_path: str, grid_size=16, vmin=None, vmax=None):
+def _visualise_matrix(matrix: torch.Tensor, output_path: str = None, grid_size=16, vmin=None, vmax=None):
     while matrix.dim() > 2:
         matrix = matrix[0]
 
@@ -1052,6 +1053,8 @@ def _visualise_matrix(matrix: torch.Tensor, output_path: str, grid_size=16, vmin
 
     if output_path is not None:
         plt.savefig(f"{output_path}.svg", format="svg")
+    else:
+        plt.show()
 
 
 # Comparison
@@ -1102,5 +1105,22 @@ def slow_scatter_reduce_mdi(src, tgt_size, idx_bat, idx_row, idx_col):
         for k in range(idx_bat.size(1)):
             for n in range(idx_bat.size(2)):
                 output[idx_bat[b, k, n], k, idx_col[b, k, n]] += src[b, k, n]
+
+    return output
+
+
+# Debug
+
+def _debug_convert_tensor(x: Tensor):
+    output = torch.arange(0, x.size(-2) * x.size(-1), dtype=x.dtype, device=DEVICE).reshape(x.size(-2),
+                                                                                            x.size(-1)).unsqueeze(
+        0).repeat(x.size(0), 1, 1)
+
+    return output
+
+
+def _debug_convert_tensor_full(x: Tensor):
+    output = (torch.arange(0, x.size(-3) * x.size(-2) * x.size(-1), dtype=x.dtype, device=DEVICE)
+              .reshape(x.size(-3), x.size(-2), x.size(-1)))
 
     return output

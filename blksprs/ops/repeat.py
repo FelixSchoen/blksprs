@@ -179,8 +179,6 @@ class _BlocksparseRepeat(torch.autograd.Function):
                 sparsity_block_size: int, n_sparse_blocks: int,
                 triton_block_size: int) -> Tensor:
         ctx.save_for_backward(sparsity_layout_x, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut)
-        ctx.x_size = x.size()
-        ctx.x_stride = stride(x)
 
         return flow_forward_pull(ctx, x, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut, sparsity_block_size,
                                  n_sparse_blocks, triton_block_size)
@@ -188,8 +186,6 @@ class _BlocksparseRepeat(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         sparsity_layout_x, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut = ctx.saved_tensors
-        x_size = ctx.x_size
-        x_stride = ctx.x_stride
         sparsity_block_size = ctx.sparsity_block_size
         triton_block_size = ctx.triton_block_size
 

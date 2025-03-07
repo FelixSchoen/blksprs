@@ -3,6 +3,7 @@ import triton
 from torch import Tensor
 from triton import language as tl
 
+from blksprs.ops.flow import flow_forward_pull
 from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import get_triton_block_size, stride
 from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_device, \
@@ -29,6 +30,7 @@ def transpose(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: in
 
     """
     x = x.contiguous()
+    x_t = x.transpose(-1, -2).contiguous()
 
     validate_dimensions(x)
     validate_contiguous(x)
@@ -40,7 +42,8 @@ def transpose(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: in
     lut = _BlocksparseTranspose.build_lut(lut, sparsity_layout)
 
     return BlksprsTensor(
-        _BlocksparseTranspose.apply(x, lut["sparsity_layout_t"], lut["sparsity_lut"], lut["sparsity_reverse_lut"], sparsity_block_size,
+        _BlocksparseTranspose.apply(x_t, lut["sparsity_layout_t"], lut["sparsity_lut"], lut["sparsity_reverse_lut"],
+                                    sparsity_block_size,
                                     lut["n_sparse_blocks"], triton_block_size)), lut["sparsity_layout_t"]
 
 
@@ -79,41 +82,10 @@ class _BlocksparseTranspose(torch.autograd.Function):
     def forward(ctx, x: Tensor, sparsity_layout_o: Tensor, sparsity_lut: Tensor, sparsity_reverse_lut: Tensor,
                 sparsity_block_size: int,
                 n_sparse_blocks: int, triton_block_size: int) -> Tensor:
-        output = torch.empty(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
-                             dtype=x.dtype, device=x.device)
-
-        x_b, x_r, x_c = x.size()
-        x_b_s, x_r_s, x_c_s = stride(x)
-        s_l_b, s_l_r, s_l_c = sparsity_layout_o.size()
-        s_l_b_s, s_l_r_s, s_l_c_s = stride(sparsity_layout_o)
-        s_lut_r, s_lut_c = sparsity_lut.shape
-        s_lut_r_s, s_lut_c_s = stride(sparsity_lut)
-        o_b, o_r, o_c = output.size()
-        o_b_s, o_r_s, o_c_s = stride(output)
-
-        if triton_block_size is None:
-            triton_block_size = get_triton_block_size(sparsity_block_size)
-
-        triton_grid = lambda meta: [o_b,
-                                    triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),
-                                    triton.cdiv(o_c, meta["TRITON_BLOCK_SIZE"])]
-
-        (_BlocksparseTranspose.kernel_blocksparse_transpose[triton_grid]
-         (x,
-          x_b, x_b_s, x_r_s, x_c_s,
-          s_l_b, s_l_b_s, s_l_r_s, s_l_c_s,
-          sparsity_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
-          sparsity_reverse_lut,
-          output,
-          o_b, o_b_s,
-          triton_block_size))
-
-        # Save for backward pass
         ctx.save_for_backward(sparsity_layout_o)
-        ctx.sparsity_block_size = sparsity_block_size
-        ctx.triton_block_size = triton_block_size
 
-        return output
+        return flow_forward_pull(ctx, x, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut,
+                                 sparsity_block_size, n_sparse_blocks, triton_block_size)
 
     @staticmethod
     def backward(ctx, grad_output):

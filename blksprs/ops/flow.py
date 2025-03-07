@@ -140,15 +140,15 @@ def flow_forward_pull(ctx, x: Tensor, sparsity_layout_o: Tensor, sparsity_lut: T
     return output
 
 
-def flow_forward_push(ctx, x: Tensor, sparsity_layout_o: Tensor, sparsity_lut: Tensor, sparsity_reverse_lut: Tensor,
+def flow_forward_push(ctx, x: Tensor, sparsity_layout_x: Tensor, sparsity_lut: Tensor, sparsity_reverse_lut: Tensor,
                       sparsity_block_size: int, n_sparse_blocks: int, triton_block_size: int) -> Tensor:
     output = torch.zeros(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
                          dtype=x.dtype, device=x.device)
 
     x_b, x_r, x_c = x.size()
     x_b_s, x_r_s, x_c_s = stride(x)
-    s_l_x_b, s_l_x_r, s_l_x_c = sparsity_layout_o.size()
-    s_l_x_b_s, s_l_x_r_s, s_l_x_c_s = stride(sparsity_layout_o)
+    s_l_x_b, s_l_x_r, s_l_x_c = sparsity_layout_x.size()
+    s_l_x_b_s, s_l_x_r_s, s_l_x_c_s = stride(sparsity_layout_x)
     s_lut_r, s_lut_c = sparsity_lut.size()
     s_lut_r_s, s_lut_c_s = stride(sparsity_lut)
     o_b, o_r, o_c = output.size()
