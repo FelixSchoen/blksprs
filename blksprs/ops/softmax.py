@@ -196,29 +196,26 @@ class _BlocksparseSoftmax(torch.autograd.Function):
         rev_idx_spa_s_msk = (rev_idx_spa_s_idx >= 0 and rev_idx_spa_s_idx < s_l_s_b * s_l_s_b_s)
         rev_idx_spa_s = tl.load(r_lut_s + rev_idx_spa_s_idx, mask=rev_idx_spa_s_msk).to(tl.int32)
 
-        if rev_idx_spa_s == -1:
-            tl.device_assert(False)
-            return
+        if rev_idx_spa_s >= 0:
+            # Load x block
+            blk_x_idx = ((pid_blk * x_b_s) +
+                         ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
+                         ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
+            blk_x_msk = (blk_x_idx >= 0 and blk_x_idx < x_b * x_b_s)
+            blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
 
-        # Load x block
-        blk_x_idx = ((pid_blk * x_b_s) +
-                     ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
-                     ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-        blk_x_msk = (blk_x_idx >= 0 and blk_x_idx < x_b * x_b_s)
-        blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
+            # Load sum block
+            blk_s_idx = (rev_idx_spa_s * s_b_s +
+                         ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * s_r_s)[:, None] +
+                         (tl.arange(0, 1) * s_c_s)[None, :])
+            blk_s_msk = (blk_s_idx >= 0 and blk_s_idx < s_b * s_b_s)
+            blk_s = tl.load(s + blk_s_idx, mask=blk_s_msk)
 
-        # Load sum block
-        blk_s_idx = (rev_idx_spa_s * s_b_s +
-                     ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * s_r_s)[:, None] +
-                     (tl.arange(0, 1) * s_c_s)[None, :])
-        blk_s_msk = (blk_s_idx >= 0 and blk_s_idx < s_b * s_b_s)
-        blk_s = tl.load(s + blk_s_idx, mask=blk_s_msk)
+            # Compute softmax
+            buf = tl.div_rn(blk_x, blk_s)
 
-        # Compute softmax
-        buf = tl.div_rn(blk_x, blk_s)
-
-        # Store output
-        tl.store(o + blk_x_idx, buf, mask=blk_x_msk)
+            # Store output
+            tl.store(o + blk_x_idx, buf, mask=blk_x_msk)
 
     @staticmethod
     @triton.jit
@@ -253,32 +250,29 @@ class _BlocksparseSoftmax(torch.autograd.Function):
         rev_idx_spa_s_msk = (rev_idx_spa_s_idx >= 0 and rev_idx_spa_s_idx < s_l_s_b * s_l_s_b_s)
         rev_idx_spa_s = tl.load(r_lut_s + rev_idx_spa_s_idx, mask=rev_idx_spa_s_msk).to(tl.int32)
 
-        if rev_idx_spa_s == -1:
-            tl.device_assert(False)
-            return
+        if rev_idx_spa_s >= 0:
+            blk_s_idx = (rev_idx_spa_s * s_b_s +
+                         ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * s_r_s)[:, None] +
+                         (tl.arange(0, 1) * s_c_s)[None, :])
+            blk_s_msk = (blk_s_idx >= 0 and blk_s_idx < s_b * s_b_s)
+            blk_s = tl.load(s + blk_s_idx, mask=blk_s_msk)
 
-        blk_s_idx = (rev_idx_spa_s * s_b_s +
-                     ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * s_r_s)[:, None] +
-                     (tl.arange(0, 1) * s_c_s)[None, :])
-        blk_s_msk = (blk_s_idx >= 0 and blk_s_idx < s_b * s_b_s)
-        blk_s = tl.load(s + blk_s_idx, mask=blk_s_msk)
+            blk_g_idx = ((pid_blk * g_b_s) +
+                         ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * g_r_s)[:, None] +
+                         ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * g_c_s)[None, :])
+            blk_g_msk = (blk_g_idx >= 0 and blk_g_idx < g_b * g_b_s)
+            blk_g = tl.load(g + blk_g_idx, mask=blk_g_msk)
 
-        blk_g_idx = ((pid_blk * g_b_s) +
-                     ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * g_r_s)[:, None] +
-                     ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * g_c_s)[None, :])
-        blk_g_msk = (blk_g_idx >= 0 and blk_g_idx < g_b * g_b_s)
-        blk_g = tl.load(g + blk_g_idx, mask=blk_g_msk)
+            blk_x_idx = ((pid_blk * x_b_s) +
+                         ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
+                         ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
+            blk_x_msk = (blk_x_idx >= 0 and blk_x_idx < x_b * x_b_s)
+            blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
 
-        blk_x_idx = ((pid_blk * x_b_s) +
-                     ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
-                     ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-        blk_x_msk = (blk_x_idx >= 0 and blk_x_idx < x_b * x_b_s)
-        blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
+            buf = blk_x * (blk_g - blk_s)
 
-        buf = blk_x * (blk_g - blk_s)
-
-        blk_o_idx = ((pid_blk * o_b_s) +
-                     ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
-                     ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
-        blk_o_msk = (blk_o_idx >= 0 and blk_o_idx < o_b * o_b_s)
-        tl.store(o + blk_o_idx, buf, mask=blk_o_msk)
+            blk_o_idx = ((pid_blk * o_b_s) +
+                         ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
+                         ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
+            blk_o_msk = (blk_o_idx >= 0 and blk_o_idx < o_b * o_b_s)
+            tl.store(o + blk_o_idx, buf, mask=blk_o_msk)

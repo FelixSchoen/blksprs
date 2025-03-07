@@ -10,8 +10,6 @@ from torch import Tensor
 import blksprs as bs
 from blksprs import BlksprsTensor
 
-# TODO Use flow kernel for transpose
-
 # Device setup
 DEVICE = torch.device("cuda:0")
 
