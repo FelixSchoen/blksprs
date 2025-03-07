@@ -102,8 +102,8 @@ def kernel_blocksparse_flow_push(x,
         tl.atomic_add(o + blk_o_idx, blk_x, mask=blk_o_msk)
 
 
-def flow_forward(ctx, x: Tensor, sparsity_layout_o: Tensor, sparsity_lut: Tensor, sparsity_reverse_lut: Tensor,
-                 sparsity_block_size: int, n_sparse_blocks: int, triton_block_size: int) -> Tensor:
+def flow_forward_pull(ctx, x: Tensor, sparsity_layout_o: Tensor, sparsity_lut: Tensor, sparsity_reverse_lut: Tensor,
+                      sparsity_block_size: int, n_sparse_blocks: int, triton_block_size: int) -> Tensor:
     output = torch.empty(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
                          dtype=x.dtype, device=x.device)
 
@@ -136,5 +136,44 @@ def flow_forward(ctx, x: Tensor, sparsity_layout_o: Tensor, sparsity_lut: Tensor
     # Save for backward pass
     ctx.sparsity_block_size = sparsity_block_size
     ctx.triton_block_size = triton_block_size
+
+    return output
+
+
+def flow_forward_push(ctx, x: Tensor, sparsity_layout_o: Tensor, sparsity_lut: Tensor, sparsity_reverse_lut: Tensor,
+                      sparsity_block_size: int, n_sparse_blocks: int, triton_block_size: int) -> Tensor:
+    output = torch.zeros(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
+                         dtype=x.dtype, device=x.device)
+
+    x_b, x_r, x_c = x.size()
+    x_b_s, x_r_s, x_c_s = stride(x)
+    s_l_x_b, s_l_x_r, s_l_x_c = sparsity_layout_o.size()
+    s_l_x_b_s, s_l_x_r_s, s_l_x_c_s = stride(sparsity_layout_o)
+    s_lut_r, s_lut_c = sparsity_lut.size()
+    s_lut_r_s, s_lut_c_s = stride(sparsity_lut)
+    o_b, o_r, o_c = output.size()
+    o_b_s, o_r_s, o_c_s = stride(output)
+
+    if triton_block_size is None:
+        triton_block_size = get_triton_block_size(sparsity_block_size)
+
+    triton_grid = lambda meta: [x_b,
+                                triton.cdiv(x_r, meta["TRITON_BLOCK_SIZE"]),
+                                triton.cdiv(x_c, meta["TRITON_BLOCK_SIZE"])]
+
+    (kernel_blocksparse_flow_push[triton_grid]
+     (x,
+      x_b, x_b_s, x_r_s, x_c_s,
+      s_l_x_b, s_l_x_b_s, s_l_x_r_s, s_l_x_c_s,
+      sparsity_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
+      sparsity_reverse_lut,
+      output,
+      o_b, o_b_s, o_r_s, o_c_s,
+      triton_block_size))
+
+    # Save for backward pass
+    if ctx is not None:
+        ctx.sparsity_block_size = sparsity_block_size
+        ctx.triton_block_size = triton_block_size
 
     return output

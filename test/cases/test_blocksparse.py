@@ -9,8 +9,6 @@ from matplotlib import pyplot as plt
 import blksprs as bs
 from blksprs import BlksprsTensor
 
-# TODO Benchmarking
-# TODO Refactor backward for flow methods in own function
 # TODO Use flow kernel for transpose
 
 # Device setup

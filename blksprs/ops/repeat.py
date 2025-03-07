@@ -2,7 +2,7 @@ import torch
 import triton
 from torch import Tensor
 
-from blksprs.ops.flow import kernel_blocksparse_flow_push, flow_forward
+from blksprs.ops.flow import kernel_blocksparse_flow_push, flow_forward_pull, flow_forward_push
 from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import get_triton_block_size, stride
 from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_device, \
@@ -182,8 +182,8 @@ class _BlocksparseRepeat(torch.autograd.Function):
         ctx.x_size = x.size()
         ctx.x_stride = stride(x)
 
-        return flow_forward(ctx, x, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut, sparsity_block_size,
-                            n_sparse_blocks, triton_block_size)
+        return flow_forward_pull(ctx, x, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut, sparsity_block_size,
+                                 n_sparse_blocks, triton_block_size)
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -195,33 +195,6 @@ class _BlocksparseRepeat(torch.autograd.Function):
 
         n_sparse_blocks = torch.sum(sparsity_layout_x.to(torch.int)).item()
 
-        output = torch.zeros(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
-                             dtype=grad_output.dtype, device=grad_output.device)
-
-        x_b, x_r, x_c = grad_output.size()
-        x_b_s, x_r_s, x_c_s = stride(grad_output)
-        s_l_x_b, s_l_x_r, s_l_x_c = sparsity_layout_o.size()
-        s_l_x_b_s, s_l_x_r_s, s_l_x_c_s = stride(sparsity_layout_o)
-        s_lut_r, s_lut_c = sparsity_lut.size()
-        s_lut_r_s, s_lut_c_s = stride(sparsity_lut)
-        o_b, o_r, o_c = x_size
-        o_b_s, o_r_s, o_c_s = x_stride
-
-        if triton_block_size is None:
-            triton_block_size = get_triton_block_size(sparsity_block_size)
-
-        triton_grid = lambda meta: [x_b,
-                                    triton.cdiv(x_r, meta["TRITON_BLOCK_SIZE"]),
-                                    triton.cdiv(x_c, meta["TRITON_BLOCK_SIZE"])]
-
-        (kernel_blocksparse_flow_push[triton_grid]
-         (grad_output,
-          x_b, x_b_s, x_r_s, x_c_s,
-          s_l_x_b, s_l_x_b_s, s_l_x_r_s, s_l_x_c_s,
-          sparsity_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
-          sparsity_reverse_lut,
-          output,
-          o_b, o_b_s, o_r_s, o_c_s,
-          triton_block_size))
-
-        return output, None, None, None, None, None, None, None
+        return flow_forward_push(None, grad_output, sparsity_layout_o, sparsity_lut,
+                                 sparsity_reverse_lut, sparsity_block_size, n_sparse_blocks,
+                                 triton_block_size), None, None, None, None, None, None, None
