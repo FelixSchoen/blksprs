@@ -1,4 +1,5 @@
 import torch
+import triton
 from torch import Tensor, Size
 
 
@@ -27,3 +28,36 @@ def stride(x: Tensor):
         return x.size(1) * x.size(2), x.size(2), 1
     else:
         raise NotImplementedError
+
+
+@torch.compile
+def get_autotune_configs():
+    configs = []
+    config_parameters = [
+        (16, 3, 8),
+        (16, 4, 4),
+        (16, 4, 8),
+        (16, 5, 2),
+        (16, 5, 4),
+        (16, 5, 8),
+
+        (32, 3, 8),
+        (32, 4, 4),
+        (32, 4, 8),
+        (32, 5, 2),
+        (32, 5, 4),
+
+        (64, 3, 8),
+        (64, 4, 4),
+        (64, 4, 8),
+        (64, 5, 2),
+
+        (128, 3, 8),
+        (128, 4, 4),
+        (128, 5, 2),
+    ]
+
+    for block_size, num_stages, num_warps in config_parameters:
+        configs.append(triton.Config({"TRITON_BLOCK_SIZE": block_size}, num_stages=num_stages, num_warps=num_warps))
+
+    return configs

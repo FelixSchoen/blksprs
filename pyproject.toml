@@ -21,10 +21,8 @@ test = [
     "pytest-xdist",
     "pytest-cov",
     "coverage",
+    "build",
     "matplotlib"
-]
-build = [
-    "build"
 ]
 
 [build-system]
