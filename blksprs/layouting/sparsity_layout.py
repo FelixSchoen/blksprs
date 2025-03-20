@@ -36,8 +36,8 @@ def build_sparsity_layout(x: Tensor, sparsity_block_size: int) -> Tensor:
     o_b_s, o_r_s, o_c_s = stride(output)
 
     triton_grid = lambda meta: [x_b,
-                                triton.cdiv(x_r, meta["TRITON_BLOCK_SIZE"]),
-                                triton.cdiv(x_c, meta["TRITON_BLOCK_SIZE"])]
+                                triton.cdiv(x_r, min(meta["sparsity_block_size"], meta["TRITON_BLOCK_SIZE"])),
+                                triton.cdiv(x_c, min(meta["sparsity_block_size"], meta["TRITON_BLOCK_SIZE"]))]
 
     (wrap_triton(build_sparsity_layout_kernel)[triton_grid]
      (x,
@@ -52,6 +52,7 @@ def build_sparsity_layout(x: Tensor, sparsity_block_size: int) -> Tensor:
 @triton.autotune(
     configs=get_autotune_configs(),
     key=[],
+    reset_to_zero=["o"]
 )
 @triton.jit
 def build_sparsity_layout_kernel(x,
@@ -145,6 +146,7 @@ def build_sparsity_layout_adaption(x: BlksprsTensor, sparsity_layout_from: Tenso
 @triton.autotune(
     configs=get_autotune_configs(),
     key=[],
+    reset_to_zero=["o"]
 )
 @triton.jit
 def build_sparsity_layout_adaption_kernel(x,

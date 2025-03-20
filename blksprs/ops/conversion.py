@@ -430,6 +430,7 @@ def adapt_layout_backward(ctx, grad_output):
 @triton.autotune(
     configs=get_autotune_configs(),
     key=[],
+    reset_to_zero=["o"]
 )
 @triton.jit
 def adapt_layout_kernel(x,

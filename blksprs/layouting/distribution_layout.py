@@ -63,6 +63,7 @@ def build_distribution_layout(indices: BlksprsTensor, sparsity_layout_indices: T
 @triton.autotune(
     configs=get_autotune_configs(),
     key=[],
+    reset_to_zero=["o"]
 )
 @triton.jit
 def build_distribution_layout_kernel(i,
