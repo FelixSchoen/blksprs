@@ -72,7 +72,8 @@ def build_sparsity_layout_kernel(x,
     blk_x_idx = (pid_bat * x_b_s +
                  ((pid_row * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
                  ((pid_col * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-    blk_x_msk = ((blk_x_idx >= 0 and blk_x_idx < x_b * x_b_s) and
+    blk_x_msk = ((blk_x_idx >= 0 and
+                  blk_x_idx < x_b * x_b_s) and
                  (tl.arange(0, TRITON_BLOCK_SIZE)[:, None] < val_tbs and
                   tl.arange(0, TRITON_BLOCK_SIZE)[None, :] < val_tbs))
     blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)

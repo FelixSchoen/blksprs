@@ -4,14 +4,14 @@ from torch import Tensor
 from triton import language as tl
 
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import get_triton_block_size, stride
+from blksprs.utils.tools import get_triton_block_size, stride, get_autotune_configs
 from blksprs.utils.validation import validate_triton_block_size, validate_dimensions, validate_device, \
     validate_contiguous
 
 
 def build_distribution_layout(indices: BlksprsTensor, sparsity_layout_indices: Tensor,
                               dim: int, size_target: torch.Size,
-                              sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
+                              sparsity_block_size: int) -> Tensor:
     """Builds the sparsity layout of either the source of a gather or the target of a scatter operation.
 
     Args:
@@ -20,7 +20,6 @@ def build_distribution_layout(indices: BlksprsTensor, sparsity_layout_indices: T
         dim (int): The dimension along which the operation is conducted.
         size_target (torch.Size): The size of the block-sparse target tensor in regular form.
         sparsity_block_size (int): The size of the sparsity blocks.
-        triton_block_size (int, optional): The block size to use for the triton kernel (default ``None``).
 
     Returns:
         Tensor: The sparsity layout of the source or target tensor.
@@ -44,16 +43,11 @@ def build_distribution_layout(indices: BlksprsTensor, sparsity_layout_indices: T
     o_b, o_r, o_c = output.size()
     o_b_s, o_r_s, o_c_s = stride(output)
 
-    if triton_block_size is None:
-        triton_block_size = get_triton_block_size(sparsity_block_size)
-
-    validate_triton_block_size(triton_block_size, sparsity_block_size)
-
     triton_grid = lambda meta: [i_b,
                                 triton.cdiv(i_r, meta["TRITON_BLOCK_SIZE"]),
                                 triton.cdiv(i_c, meta["TRITON_BLOCK_SIZE"])]
 
-    (kernel_distribution_layout[triton_grid]
+    (build_distribution_layout_kernel[triton_grid]
      (indices,
       i_b, i_b_s, i_r_s, i_c_s,
       sparsity_lut_i,
@@ -61,26 +55,32 @@ def build_distribution_layout(indices: BlksprsTensor, sparsity_layout_indices: T
       adjusted_dim,
       output,
       o_b, o_b_s, o_r_s, o_c_s,
-      sparsity_block_size,
-      triton_block_size))
+      sparsity_block_size))
 
     return output
 
 
+@triton.autotune(
+    configs=get_autotune_configs(),
+    key=[],
+)
 @triton.jit
-def kernel_distribution_layout(i,
-                               i_b, i_b_s, i_r_s, i_c_s,
-                               s_lut_i,
-                               s_lut_i_r, s_lut_i_r_s, s_lut_i_c_s,
-                               dim,
-                               o,
-                               o_b, o_b_s, o_r_s, o_c_s,
-                               sparsity_block_size,
-                               TRITON_BLOCK_SIZE: tl.constexpr) -> None:
+def build_distribution_layout_kernel(i,
+                                     i_b, i_b_s, i_r_s, i_c_s,
+                                     s_lut_i,
+                                     s_lut_i_r, s_lut_i_r_s, s_lut_i_c_s,
+                                     dim,
+                                     o,
+                                     o_b, o_b_s, o_r_s, o_c_s,
+                                     sparsity_block_size,
+                                     TRITON_BLOCK_SIZE: tl.constexpr) -> None:
     # Get triton block indices
     pid_blk = tl.program_id(axis=0)
     pid_row = tl.program_id(axis=1)
     pid_col = tl.program_id(axis=2)
+
+    # Get valid triton block size
+    val_tbs = min(sparsity_block_size, TRITON_BLOCK_SIZE)
 
     # Get position of current sparsity block consisting of its batch, row, and column index
     spa_bat_i_idx = (pid_blk * s_lut_i_r_s + 0 * s_lut_i_c_s)
@@ -96,9 +96,12 @@ def kernel_distribution_layout(i,
     spa_col_i = tl.load(s_lut_i + spa_col_i_idx, mask=spa_col_i_msk)
 
     blk_i_idx = (pid_blk * i_b_s +
-                 ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * i_r_s)[:, None] +
-                 ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * i_c_s)[None, :])
-    blk_i_msk = (blk_i_idx >= 0 and blk_i_idx < i_b * i_b_s)
+                 ((pid_row * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * i_r_s)[:, None] +
+                 ((pid_col * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * i_c_s)[None, :])
+    blk_i_msk = ((blk_i_idx >= 0 and
+                  blk_i_idx < i_b * i_b_s) and
+                 (tl.arange(0, TRITON_BLOCK_SIZE)[:, None] < val_tbs and
+                  tl.arange(0, TRITON_BLOCK_SIZE)[None, :] < val_tbs))
     blk_i = tl.load(i + blk_i_idx, mask=blk_i_msk)
 
     dst_bat_idx = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), spa_bat_i, dtype=tl.int32)
@@ -116,5 +119,8 @@ def kernel_distribution_layout(i,
     blk_o_idx = ((dst_bat_idx * o_b_s) +
                  (dst_row_idx * o_r_s) +
                  (dst_col_idx * o_c_s))
-    blk_o_msk = (blk_o_idx >= 0 and blk_o_idx < o_b * o_b_s)
+    blk_o_msk = ((blk_o_idx >= 0 and
+                  blk_o_idx < o_b * o_b_s) and
+                 (tl.arange(0, TRITON_BLOCK_SIZE)[:, None] < val_tbs and
+                  tl.arange(0, TRITON_BLOCK_SIZE)[None, :] < val_tbs))
     tl.store(o + blk_o_idx, blk_v, mask=blk_o_msk)

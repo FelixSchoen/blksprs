@@ -1,14 +1,11 @@
 import torch
-import triton
 from torch import Tensor
 from torch._library import triton_op
-from triton import language as tl
 
 from blksprs.ops.flow import flow_pull_forward
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import get_triton_block_size, stride
 from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_device, \
-    validate_sparsity, validate_sparsity_block_size, validate_triton_block_size
+    validate_sparsity, validate_sparsity_block_size
 
 
 def transpose(x: BlksprsTensor, sparsity_layout: Tensor,
@@ -58,7 +55,7 @@ def transpose_backward(ctx, grad_output):
     sparsity_block_size = ctx.sparsity_block_size
 
     return transpose(grad_output, sparsity_layout, sparsity_block_size)[
-        0], None, None, None, None, None, None
+        0], None, None, None, None, None
 
 
 def transpose_build_lut(lut: dict, sparsity_layout: Tensor):

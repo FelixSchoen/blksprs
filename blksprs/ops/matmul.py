@@ -111,7 +111,7 @@ def matmul_backward(ctx, grad_output):
     grad_y = matmul(x_t, sparsity_layout_x_t, grad_output, sparsity_layout_o, sparsity_layout_y,
                     sparsity_block_size)
 
-    return grad_x, grad_y, None, None, None, None, None, None, None, None, None
+    return grad_x, grad_y, None, None, None, None, None, None, None, None
 
 
 @triton.autotune(

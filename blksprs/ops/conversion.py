@@ -50,9 +50,8 @@ def to_sparse(x: Tensor, sparsity_layout: Tensor,
                                            lut["sparsity_lut"], sparsity_block_size, lut["n_sparse_blocks"]))
 
 
-# noinspection PyUnusedLocal
 @triton_op("blksprs::to_sparse", mutates_args={})
-def to_sparse_forward(x: Tensor, sparsity_layout: Tensor,
+def to_sparse_forward(x: Tensor, _: Tensor,
                       sparsity_lut: Tensor, sparsity_block_size: int, n_sparse_blocks: int) -> Tensor:
     output = torch.empty(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
                          dtype=x.dtype, device=x.device)
@@ -81,7 +80,7 @@ def to_sparse_backward(ctx, grad_output):
     sparsity_layout = ctx.saved_tensors[0]
     sparsity_block_size = ctx.sparsity_block_size
 
-    return to_dense(grad_output, sparsity_layout, sparsity_block_size), None, None, None, None, None
+    return to_dense(grad_output, sparsity_layout, sparsity_block_size), None, None, None, None
 
 
 @triton.autotune(
@@ -245,7 +244,7 @@ def to_dense_backward(ctx, grad_output):
     sparsity_layout = ctx.saved_tensors[0]
     sparsity_block_size = ctx.sparsity_block_size
 
-    return to_sparse(grad_output, sparsity_layout, sparsity_block_size), None, None, None, None, None
+    return to_sparse(grad_output, sparsity_layout, sparsity_block_size), None, None, None, None
 
 
 @triton.autotune(
@@ -379,12 +378,11 @@ def adapt_layout(x: BlksprsTensor, sparsity_layout_from: Tensor, sparsity_block_
                                               n_sparse_blocks_to)), sparsity_layout_to
 
 
-# noinspection PyUnusedLocal
 @triton_op("blksprs::adapt_layout", mutates_args={})
 def adapt_layout_forward(x: Tensor,
                          sparsity_layout_from: Tensor, sparsity_reverse_lut_from: Tensor,
                          sparsity_block_size_from: int,
-                         sparsity_layout_to: Tensor, sparsity_lut_to: Tensor,
+                         _: Tensor, sparsity_lut_to: Tensor,
                          sparsity_block_size_to: int,
                          n_sparse_blocks_to: int) -> Tensor:
     output = torch.zeros(size=(n_sparse_blocks_to, sparsity_block_size_to, sparsity_block_size_to),
@@ -426,7 +424,7 @@ def adapt_layout_backward(ctx, grad_output):
 
     return adapt_layout(
         grad_output, sparsity_layout_to, sparsity_block_size_to, sparsity_block_size_from,
-        sparsity_layout_to=sparsity_layout_from)[0], None, None, None, None, None, None, None, None, None
+        sparsity_layout_to=sparsity_layout_from)[0], None, None, None, None, None, None, None
 
 
 @triton.autotune(
