@@ -140,9 +140,7 @@ def matmul_kernel(x,
     pid_col = tl.program_id(axis=2)
 
     # Get valid triton block size
-    val_tbs = TRITON_BLOCK_SIZE
-    if TRITON_BLOCK_SIZE > sparsity_block_size:
-        val_tbs = sparsity_block_size
+    val_tbs = min(sparsity_block_size, TRITON_BLOCK_SIZE)
 
     # Get position of current sparsity block consisting of its batch, row, and column index
     spa_bat_o_idx = (pid_blk * s_lut_o_r_s + 0 * s_lut_o_c_s)
@@ -190,8 +188,8 @@ def matmul_kernel(x,
                            tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
             blk_x_msk = ((blk_x_idx >= 0 and
                           blk_x_idx < x_b * x_b_s) and
-                         (tl.arange(0, TRITON_BLOCK_SIZE)[:, None] < sparsity_block_size and
-                          tl.arange(0, TRITON_BLOCK_SIZE)[None, :] < sparsity_block_size))
+                         (tl.arange(0, TRITON_BLOCK_SIZE)[:, None] < val_tbs and
+                          tl.arange(0, TRITON_BLOCK_SIZE)[None, :] < val_tbs))
             blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
 
             blk_y_idx = ((rev_idx_spa_y * y_b_s) +
@@ -200,8 +198,8 @@ def matmul_kernel(x,
                          ((pid_col * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * y_c_s)[None, :])
             blk_y_msk = ((blk_y_idx >= 0 and
                           blk_y_idx < y_b * y_b_s) and
-                         (tl.arange(0, TRITON_BLOCK_SIZE)[:, None] < sparsity_block_size and
-                          tl.arange(0, TRITON_BLOCK_SIZE)[None, :] < sparsity_block_size))
+                         (tl.arange(0, TRITON_BLOCK_SIZE)[:, None] < val_tbs and
+                          tl.arange(0, TRITON_BLOCK_SIZE)[None, :] < val_tbs))
             blk_y = tl.load(y + blk_y_idx, mask=blk_y_msk)
 
             # Perform matrix multiplication
@@ -213,8 +211,8 @@ def matmul_kernel(x,
                  ((pid_col * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
     blk_o_msk = ((blk_o_idx >= 0 and
                   blk_o_idx < o_b * o_b_s) and
-                 (tl.arange(0, TRITON_BLOCK_SIZE)[:, None] < sparsity_block_size and
-                  tl.arange(0, TRITON_BLOCK_SIZE)[None, :] < sparsity_block_size))
+                 (tl.arange(0, TRITON_BLOCK_SIZE)[:, None] < val_tbs and
+                  tl.arange(0, TRITON_BLOCK_SIZE)[None, :] < val_tbs))
     tl.store(o + blk_o_idx, buf, mask=blk_o_msk)
 
 
