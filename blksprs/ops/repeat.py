@@ -2,7 +2,7 @@ import torch
 import triton
 from torch import Tensor
 
-from blksprs.ops.flow import kernel_blocksparse_flow_push, flow_forward_pull, flow_forward_push
+from blksprs.ops.flow import kernel_blocksparse_flow_push, flow_pull_forward, flow_forward_push
 from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import get_triton_block_size, stride
 from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_device, \
@@ -180,7 +180,7 @@ class _BlocksparseRepeat(torch.autograd.Function):
                 triton_block_size: int) -> Tensor:
         ctx.save_for_backward(sparsity_layout_x, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut)
 
-        return flow_forward_pull(ctx, x, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut, sparsity_block_size,
+        return flow_pull_forward(ctx, x, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut, sparsity_block_size,
                                  n_sparse_blocks, triton_block_size)
 
     @staticmethod

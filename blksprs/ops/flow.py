@@ -1,20 +1,60 @@
 import torch
 import triton
 from torch import Tensor
+from torch._library import triton_op
+from torch._library.triton import wrap_triton
 from triton import language as tl
 
-from blksprs.utils.tools import stride, get_triton_block_size
+from blksprs.utils.tools import stride, get_triton_block_size, get_autotune_configs
 
 
+@triton_op("blksprs::flow_pull", mutates_args={})
+def flow_pull_forward(x: Tensor, sparsity_layout_o: Tensor,
+                      sparsity_lut: Tensor, sparsity_reverse_lut: Tensor,
+                      sparsity_block_size: int, n_sparse_blocks: int) -> Tensor:
+    output = torch.empty(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
+                         dtype=x.dtype, device=x.device)
+
+    x_b, x_r, x_c = x.size()
+    x_b_s, x_r_s, x_c_s = stride(x)
+    o_b, o_r, o_c = output.size()
+    o_b_s, o_r_s, o_c_s = stride(output)
+    s_l_o_b, s_l_o_r, s_l_o_c = sparsity_layout_o.size()
+    s_l_o_b_s, s_l_o_r_s, s_l_o_c_s = stride(sparsity_layout_o)
+    s_lut_r, s_lut_c = sparsity_lut.size()
+    s_lut_r_s, s_lut_c_s = stride(sparsity_lut)
+
+    triton_grid = lambda meta: [o_b,
+                                triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),
+                                triton.cdiv(o_c, meta["TRITON_BLOCK_SIZE"])]
+
+    (wrap_triton(flow_pull_kernel)[triton_grid]
+     (x,
+      x_b, x_b_s, x_r_s, x_c_s,
+      output,
+      o_b, o_b_s, o_r_s, o_c_s,
+      s_l_o_b, s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
+      sparsity_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
+      sparsity_reverse_lut,
+      sparsity_block_size))
+
+    return output
+
+
+@triton.autotune(
+    configs=get_autotune_configs(),
+    key=[],
+)
 @triton.jit
-def kernel_blocksparse_flow_pull(x,
-                                 x_b, x_b_s, x_r_s, x_c_s,
-                                 o,
-                                 o_b, o_b_s, o_r_s, o_c_s,
-                                 s_l_o_b, s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
-                                 s_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
-                                 r_lut,
-                                 TRITON_BLOCK_SIZE: tl.constexpr) -> None:
+def flow_pull_kernel(x,
+                     x_b, x_b_s, x_r_s, x_c_s,
+                     o,
+                     o_b, o_b_s, o_r_s, o_c_s,
+                     s_l_o_b, s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
+                     s_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
+                     r_lut,
+                     sparsity_block_size,
+                     TRITON_BLOCK_SIZE: tl.constexpr) -> None:
     # Get triton block indices
     pid_blk = tl.program_id(axis=0)
     pid_row = tl.program_id(axis=1)
@@ -44,14 +84,59 @@ def kernel_blocksparse_flow_pull(x,
         blk_x_idx = (rev_idx_spa * x_b_s +
                      ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
                      ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-        blk_x_msk = (blk_x_idx >= 0 and blk_x_idx < x_b * x_b_s)
+        blk_x_msk = ((blk_x_idx >= 0 and
+                      blk_x_idx < x_b * x_b_s) and
+                     (tl.arange(0, TRITON_BLOCK_SIZE)[:, None] < sparsity_block_size and
+                      tl.arange(0, TRITON_BLOCK_SIZE)[None, :] < sparsity_block_size))
         blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
 
         blk_o_idx = (pid_blk * o_b_s +
                      ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
                      ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
-        blk_o_msk = (blk_o_idx >= 0 and blk_o_idx < o_b * o_b_s)
+        blk_o_msk = ((blk_o_idx >= 0 and
+                      blk_o_idx < o_b * o_b_s) and
+                     (tl.arange(0, TRITON_BLOCK_SIZE)[:, None] < sparsity_block_size and
+                      tl.arange(0, TRITON_BLOCK_SIZE)[None, :] < sparsity_block_size))
         tl.store(o + blk_o_idx, blk_x, mask=blk_o_msk)
+
+
+def flow_forward_push(ctx, x: Tensor, sparsity_layout_x: Tensor, sparsity_lut: Tensor, sparsity_reverse_lut: Tensor,
+                      sparsity_block_size: int, n_sparse_blocks: int, triton_block_size: int) -> Tensor:
+    output = torch.zeros(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
+                         dtype=x.dtype, device=x.device)
+
+    x_b, x_r, x_c = x.size()
+    x_b_s, x_r_s, x_c_s = stride(x)
+    s_l_x_b, s_l_x_r, s_l_x_c = sparsity_layout_x.size()
+    s_l_x_b_s, s_l_x_r_s, s_l_x_c_s = stride(sparsity_layout_x)
+    s_lut_r, s_lut_c = sparsity_lut.size()
+    s_lut_r_s, s_lut_c_s = stride(sparsity_lut)
+    o_b, o_r, o_c = output.size()
+    o_b_s, o_r_s, o_c_s = stride(output)
+
+    if triton_block_size is None:
+        triton_block_size = get_triton_block_size(sparsity_block_size)
+
+    triton_grid = lambda meta: [x_b,
+                                triton.cdiv(x_r, meta["TRITON_BLOCK_SIZE"]),
+                                triton.cdiv(x_c, meta["TRITON_BLOCK_SIZE"])]
+
+    (kernel_blocksparse_flow_push[triton_grid]
+     (x,
+      x_b, x_b_s, x_r_s, x_c_s,
+      s_l_x_b, s_l_x_b_s, s_l_x_r_s, s_l_x_c_s,
+      sparsity_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
+      sparsity_reverse_lut,
+      output,
+      o_b, o_b_s, o_r_s, o_c_s,
+      triton_block_size))
+
+    # Save for backward pass
+    if ctx is not None:
+        ctx.sparsity_block_size = sparsity_block_size
+        ctx.triton_block_size = triton_block_size
+
+    return output
 
 
 @triton.jit
@@ -100,80 +185,3 @@ def kernel_blocksparse_flow_push(x,
                      ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
         blk_o_msk = (blk_o_idx >= 0 and blk_o_idx < o_b * o_b_s)
         tl.atomic_add(o + blk_o_idx, blk_x, mask=blk_o_msk)
-
-
-def flow_forward_pull(ctx, x: Tensor, sparsity_layout_o: Tensor, sparsity_lut: Tensor, sparsity_reverse_lut: Tensor,
-                      sparsity_block_size: int, n_sparse_blocks: int, triton_block_size: int) -> Tensor:
-    output = torch.empty(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
-                         dtype=x.dtype, device=x.device)
-
-    x_b, x_r, x_c = x.size()
-    x_b_s, x_r_s, x_c_s = stride(x)
-    o_b, o_r, o_c = output.size()
-    o_b_s, o_r_s, o_c_s = stride(output)
-    s_l_o_b, s_l_o_r, s_l_o_c = sparsity_layout_o.size()
-    s_l_o_b_s, s_l_o_r_s, s_l_o_c_s = stride(sparsity_layout_o)
-    s_lut_r, s_lut_c = sparsity_lut.size()
-    s_lut_r_s, s_lut_c_s = stride(sparsity_lut)
-
-    if triton_block_size is None:
-        triton_block_size = get_triton_block_size(sparsity_block_size)
-
-    triton_grid = lambda meta: [o_b,
-                                triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),
-                                triton.cdiv(o_c, meta["TRITON_BLOCK_SIZE"])]
-
-    (kernel_blocksparse_flow_pull[triton_grid]
-     (x,
-      x_b, x_b_s, x_r_s, x_c_s,
-      output,
-      o_b, o_b_s, o_r_s, o_c_s,
-      s_l_o_b, s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
-      sparsity_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
-      sparsity_reverse_lut,
-      triton_block_size))
-
-    # Save for backward pass
-    ctx.sparsity_block_size = sparsity_block_size
-    ctx.triton_block_size = triton_block_size
-
-    return output
-
-
-def flow_forward_push(ctx, x: Tensor, sparsity_layout_x: Tensor, sparsity_lut: Tensor, sparsity_reverse_lut: Tensor,
-                      sparsity_block_size: int, n_sparse_blocks: int, triton_block_size: int) -> Tensor:
-    output = torch.zeros(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
-                         dtype=x.dtype, device=x.device)
-
-    x_b, x_r, x_c = x.size()
-    x_b_s, x_r_s, x_c_s = stride(x)
-    s_l_x_b, s_l_x_r, s_l_x_c = sparsity_layout_x.size()
-    s_l_x_b_s, s_l_x_r_s, s_l_x_c_s = stride(sparsity_layout_x)
-    s_lut_r, s_lut_c = sparsity_lut.size()
-    s_lut_r_s, s_lut_c_s = stride(sparsity_lut)
-    o_b, o_r, o_c = output.size()
-    o_b_s, o_r_s, o_c_s = stride(output)
-
-    if triton_block_size is None:
-        triton_block_size = get_triton_block_size(sparsity_block_size)
-
-    triton_grid = lambda meta: [x_b,
-                                triton.cdiv(x_r, meta["TRITON_BLOCK_SIZE"]),
-                                triton.cdiv(x_c, meta["TRITON_BLOCK_SIZE"])]
-
-    (kernel_blocksparse_flow_push[triton_grid]
-     (x,
-      x_b, x_b_s, x_r_s, x_c_s,
-      s_l_x_b, s_l_x_b_s, s_l_x_r_s, s_l_x_c_s,
-      sparsity_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
-      sparsity_reverse_lut,
-      output,
-      o_b, o_b_s, o_r_s, o_c_s,
-      triton_block_size))
-
-    # Save for backward pass
-    if ctx is not None:
-        ctx.sparsity_block_size = sparsity_block_size
-        ctx.triton_block_size = triton_block_size
-
-    return output

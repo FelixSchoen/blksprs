@@ -1,7 +1,7 @@
 import torch
 from torch import Tensor
 
-from blksprs.ops.flow import flow_forward_pull
+from blksprs.ops.flow import flow_pull_forward
 from blksprs.utils.blksprs_tensor import BlksprsTensor
 
 from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_device, \
@@ -94,7 +94,7 @@ class _BlocksparseSplit(torch.autograd.Function):
         ctx.num_partitions = num_partitions
         ctx.dim = dim
 
-        return flow_forward_pull(ctx, x, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut, sparsity_block_size,
+        return flow_pull_forward(ctx, x, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut, sparsity_block_size,
                                  n_sparse_blocks, triton_block_size)
 
     @staticmethod
@@ -198,7 +198,7 @@ class _BlocksparseMerge(torch.autograd.Function):
         ctx.num_partitions = num_partitions
         ctx.dim = dim
 
-        return flow_forward_pull(ctx, x, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut, sparsity_block_size,
+        return flow_pull_forward(ctx, x, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut, sparsity_block_size,
                                  n_sparse_blocks, triton_block_size)
 
     @staticmethod

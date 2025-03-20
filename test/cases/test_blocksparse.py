@@ -195,7 +195,7 @@ def test_blksprs_transpose():
             stock_transpose_out = x_stock.transpose(1, 2)
             blksprs_transpose_out, blksprs_sparsity_layout_t = bs.ops.transpose(
                 bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
-                sparsity_layout_x, sparsity_block_size, triton_block_size)
+                sparsity_layout_x, sparsity_block_size)
             blksprs_transpose_dense_out = bs.ops.to_dense(blksprs_transpose_out, blksprs_sparsity_layout_t,
                                                           sparsity_block_size)
 
@@ -347,16 +347,16 @@ def test_blksprs_scatter():
 
 
 def test_blksprs_matmul():
-    for b, m, n, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+    for b, m, n, k, sparsity_block_size, _, sparsity_percentage in TEST_CONFIGURATIONS:
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
         y_d = torch.randn(size=(b, n, k), device=DEVICE).transpose(-1, -2).contiguous()
         sparsity_layout_y_d = torch.ones(size=(b, k // sparsity_block_size, n // sparsity_block_size), device=DEVICE)
 
         sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
-        x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size, triton_block_size)
+        x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size)
         sparsity_layout_y_bs = _get_blocksparse_layout(b, k, n, sparsity_block_size, sparsity_percentage)
-        y_bs = _blocksparse_roundtrip(y_d, sparsity_layout_y_bs, sparsity_block_size, triton_block_size)
+        y_bs = _blocksparse_roundtrip(y_d, sparsity_layout_y_bs, sparsity_block_size)
 
         sparsity_layout_o_d = torch.ones(size=(b, m // sparsity_block_size, n // sparsity_block_size), device=DEVICE)
         sparsity_layout_o_bs = bs.layouting.build_sparsity_layout_matmul_fast(sparsity_layout_x_bs,
@@ -1001,7 +1001,7 @@ def _get_blocksparse_layout_sparse_rows(b, m, n, sparsity_block_size, sparsity_p
     return sparsity_layout
 
 
-def _blocksparse_roundtrip(x, sparsity_layout, sparsity_block_size, triton_block_size, fill_value=0.0):
+def _blocksparse_roundtrip(x, sparsity_layout, sparsity_block_size, triton_block_size=None, fill_value=0.0):
     return bs.ops.to_dense(bs.ops.to_sparse(x, sparsity_layout, sparsity_block_size, triton_block_size),
                            sparsity_layout,
                            sparsity_block_size, fill_value=fill_value, triton_block_size=triton_block_size)

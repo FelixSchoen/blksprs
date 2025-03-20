@@ -251,6 +251,7 @@ def matmul_build_lut(lut: dict, sparsity_layout_x: Tensor, sparsity_layout_y: Te
     return lut
 
 
+# noinspection PyUnusedLocal
 def matmul_setup_context(ctx, inputs, output):
     (x, y, sparsity_layout_x, _, sparsity_layout_y, _,
      sparsity_layout_o, _, sparsity_block_size, _) = inputs
