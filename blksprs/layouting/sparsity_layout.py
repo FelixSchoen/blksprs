@@ -7,18 +7,17 @@ from torch._library.triton import wrap_triton
 from triton import language as tl
 
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import get_triton_block_size, stride, get_autotune_configs
-from blksprs.utils.validation import validate_triton_block_size, validate_dimensions, validate_device, \
+from blksprs.utils.tools import stride, get_autotune_configs
+from blksprs.utils.validation import validate_dimensions, validate_device, \
     validate_contiguous, validate_sparsity, validate_sparsity_block_size
 
 
-def build_sparsity_layout(x: Tensor, sparsity_block_size: int, triton_block_size: int = None) -> Tensor:
+def build_sparsity_layout(x: Tensor, sparsity_block_size: int) -> Tensor:
     """Builds the sparsity layout of a dense tensor in regular form covering its sparse blocks.
 
     Args:
         x (Tensor): A block-sparse (or dense) tensor in regular form.
         sparsity_block_size (int): The size of the sparsity blocks.
-        triton_block_size (int, optional): The block size to use for the triton kernel (default ``None``).
 
     Returns:
         Tensor: The sparsity layout of the input block-sparse (or dense) tensor.
@@ -36,50 +35,53 @@ def build_sparsity_layout(x: Tensor, sparsity_block_size: int, triton_block_size
     o_b, o_r, o_c = output.size()
     o_b_s, o_r_s, o_c_s = stride(output)
 
-    if triton_block_size is None:
-        triton_block_size = get_triton_block_size(sparsity_block_size)
-
-    validate_triton_block_size(triton_block_size, sparsity_block_size)
-
     triton_grid = lambda meta: [x_b,
                                 triton.cdiv(x_r, meta["TRITON_BLOCK_SIZE"]),
                                 triton.cdiv(x_c, meta["TRITON_BLOCK_SIZE"])]
 
-    (kernel_sparsity_layout[triton_grid]
+    (wrap_triton(build_sparsity_layout_kernel)[triton_grid]
      (x,
       x_b, x_b_s, x_r_s, x_c_s,
       output,
       o_b, o_b_s, o_r_s, o_c_s,
-      sparsity_block_size,
-      triton_block_size))
+      sparsity_block_size))
 
     return output
 
 
+@triton.autotune(
+    configs=get_autotune_configs(),
+    key=[],
+)
 @triton.jit
-def kernel_sparsity_layout(x,
-                           x_b, x_b_s, x_r_s, x_c_s,
-                           o,
-                           o_b, o_b_s, o_r_s, o_c_s,
-                           sparsity_block_size,
-                           TRITON_BLOCK_SIZE: tl.constexpr) -> None:
+def build_sparsity_layout_kernel(x,
+                                 x_b, x_b_s, x_r_s, x_c_s,
+                                 o,
+                                 o_b, o_b_s, o_r_s, o_c_s,
+                                 sparsity_block_size,
+                                 TRITON_BLOCK_SIZE: tl.constexpr) -> None:
     # Get triton block indices
     pid_bat = tl.program_id(axis=0)
     pid_row = tl.program_id(axis=1)
     pid_col = tl.program_id(axis=2)
 
+    # Get valid triton block size
+    val_tbs = min(sparsity_block_size, TRITON_BLOCK_SIZE)
+
     # Load x values
     blk_x_idx = (pid_bat * x_b_s +
-                 ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
-                 ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-    blk_x_msk = (blk_x_idx >= 0 and blk_x_idx < x_b * x_b_s)
+                 ((pid_row * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
+                 ((pid_col * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
+    blk_x_msk = ((blk_x_idx >= 0 and blk_x_idx < x_b * x_b_s) and
+                 (tl.arange(0, TRITON_BLOCK_SIZE)[:, None] < val_tbs and
+                  tl.arange(0, TRITON_BLOCK_SIZE)[None, :] < val_tbs))
     blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
 
     # Store sparsity layout value
     if tl.min(blk_x) != 0 or tl.max(blk_x) != 0:
         blk_o_idx = (pid_bat * o_b_s +
-                     (((pid_row * TRITON_BLOCK_SIZE) // sparsity_block_size) * o_r_s +
-                      ((pid_col * TRITON_BLOCK_SIZE) // sparsity_block_size) * o_c_s))
+                     (((pid_row * val_tbs) // sparsity_block_size) * o_r_s +
+                      ((pid_col * val_tbs) // sparsity_block_size) * o_c_s))
         blk_o_msk = (blk_o_idx >= 0 and blk_o_idx < o_b * o_b_s)
         tl.store(o + blk_o_idx, 1, mask=blk_o_msk)
 
