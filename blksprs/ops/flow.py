@@ -60,6 +60,11 @@ def flow_pull_kernel(x,
     pid_row = tl.program_id(axis=1)
     pid_col = tl.program_id(axis=2)
 
+    # Get valid triton block size
+    val_tbs = TRITON_BLOCK_SIZE
+    if TRITON_BLOCK_SIZE > sparsity_block_size:
+        val_tbs = sparsity_block_size
+
     # Get sparsity index of current output block consisting of its batch, row, and column index
     spa_bat_idx = (pid_blk * s_lut_r_s + 0 * s_lut_c_s)
     spa_bat_msk = (spa_bat_idx >= 0 and spa_bat_idx < s_lut_r * s_lut_r_s)
@@ -82,8 +87,8 @@ def flow_pull_kernel(x,
 
     if rev_idx_spa >= 0:
         blk_x_idx = (rev_idx_spa * x_b_s +
-                     ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
-                     ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
+                     ((pid_row * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
+                     ((pid_col * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
         blk_x_msk = ((blk_x_idx >= 0 and
                       blk_x_idx < x_b * x_b_s) and
                      (tl.arange(0, TRITON_BLOCK_SIZE)[:, None] < sparsity_block_size and
@@ -91,8 +96,8 @@ def flow_pull_kernel(x,
         blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
 
         blk_o_idx = (pid_blk * o_b_s +
-                     ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
-                     ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
+                     ((pid_row * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
+                     ((pid_col * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
         blk_o_msk = ((blk_o_idx >= 0 and
                       blk_o_idx < o_b * o_b_s) and
                      (tl.arange(0, TRITON_BLOCK_SIZE)[:, None] < sparsity_block_size and

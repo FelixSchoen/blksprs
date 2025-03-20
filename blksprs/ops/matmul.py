@@ -140,9 +140,9 @@ def matmul_kernel(x,
     pid_col = tl.program_id(axis=2)
 
     # Get valid triton block size
-    valid_triton_block_size = TRITON_BLOCK_SIZE
+    val_tbs = TRITON_BLOCK_SIZE
     if TRITON_BLOCK_SIZE > sparsity_block_size:
-        valid_triton_block_size = sparsity_block_size
+        val_tbs = sparsity_block_size
 
     # Get position of current sparsity block consisting of its batch, row, and column index
     spa_bat_o_idx = (pid_blk * s_lut_o_r_s + 0 * s_lut_o_c_s)
@@ -161,11 +161,11 @@ def matmul_kernel(x,
     buf = tl.zeros(shape=(TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), dtype=tl.float32)
 
     # Slide over triton block sized segments of input tensors
-    for i_seg_tri in range(0, tl.cdiv(s_l_x_c * sparsity_block_size, valid_triton_block_size)):
+    for i_seg_tri in range(0, tl.cdiv(s_l_x_c * sparsity_block_size, val_tbs)):
         # Convert to segment index of sparsity layout
-        i_seg_spa = (i_seg_tri * valid_triton_block_size) // sparsity_block_size
+        i_seg_spa = (i_seg_tri * val_tbs) // sparsity_block_size
         # Calculate the triton segment index within a block
-        i_seg_tri_mod = i_seg_tri % (sparsity_block_size // valid_triton_block_size)
+        i_seg_tri_mod = i_seg_tri % (sparsity_block_size // val_tbs)
 
         # Get reverse sparsity indices for input tensors x and y
         # These are either -1 if the block is empty or equal to the index of the block in the sparse tensor
@@ -185,8 +185,8 @@ def matmul_kernel(x,
         # If both blocks are present commence calculation
         if rev_idx_spa_x >= 0 and rev_idx_spa_y >= 0:
             blk_x_idx = ((rev_idx_spa_x * x_b_s) +
-                         ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
-                         ((i_seg_tri_mod * TRITON_BLOCK_SIZE +
+                         ((pid_row * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
+                         ((i_seg_tri_mod * val_tbs +
                            tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
             blk_x_msk = ((blk_x_idx >= 0 and
                           blk_x_idx < x_b * x_b_s) and
@@ -195,9 +195,9 @@ def matmul_kernel(x,
             blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
 
             blk_y_idx = ((rev_idx_spa_y * y_b_s) +
-                         ((i_seg_tri_mod * TRITON_BLOCK_SIZE +
+                         ((i_seg_tri_mod * val_tbs +
                            tl.arange(0, TRITON_BLOCK_SIZE)) * y_r_s)[:, None] +
-                         ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * y_c_s)[None, :])
+                         ((pid_col * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * y_c_s)[None, :])
             blk_y_msk = ((blk_y_idx >= 0 and
                           blk_y_idx < y_b * y_b_s) and
                          (tl.arange(0, TRITON_BLOCK_SIZE)[:, None] < sparsity_block_size and
@@ -209,8 +209,8 @@ def matmul_kernel(x,
 
     # Store output
     blk_o_idx = ((pid_blk * o_b_s) +
-                 ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
-                 ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
+                 ((pid_row * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
+                 ((pid_col * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
     blk_o_msk = ((blk_o_idx >= 0 and
                   blk_o_idx < o_b * o_b_s) and
                  (tl.arange(0, TRITON_BLOCK_SIZE)[:, None] < sparsity_block_size and

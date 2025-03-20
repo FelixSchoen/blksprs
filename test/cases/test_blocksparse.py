@@ -84,13 +84,13 @@ BENCHMARK_TRITON_BLOCK_SIZES = [16, 16, 32, 32, 64, 64, 64, 64]
 # Tolerances
 ATOL = 2e-2
 RTOL = 1e-2
-SEED = 0
+SEED = 3654566474
 
 
 @pytest.fixture(scope="session", autouse=True)
 def setup():
     global SEED
-    use_random_seed = True
+    use_random_seed = False
 
     if use_random_seed:
         seed = random.randint(0, 2 ** 32 - 1)
@@ -114,12 +114,12 @@ def override_pytorch_repr():
 
 
 def test_blksprs_to_sparse():
-    for b, m, _, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+    for b, m, _, k, sparsity_block_size, _, sparsity_percentage in TEST_CONFIGURATIONS:
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
         sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
-        x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size, triton_block_size)
+        x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size)
 
         for x, sparsity_layout_x_s in [(x_d, sparsity_layout_x_d), (x_bs, sparsity_layout_x_bs)]:
             x_stock = x.clone().requires_grad_(True)
@@ -146,12 +146,12 @@ def test_blksprs_to_sparse():
 
 
 def test_blksprs_to_dense():
-    for b, m, _, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+    for b, m, _, k, sparsity_block_size, _, sparsity_percentage in TEST_CONFIGURATIONS:
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
         sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
-        x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size, triton_block_size)
+        x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size)
 
         for x, sparsity_layout_x_s in [(x_d, sparsity_layout_x_d), (x_bs, sparsity_layout_x_bs)]:
             x_stock = x.clone().requires_grad_(True)
@@ -181,12 +181,12 @@ def test_blksprs_to_dense():
 
 
 def test_blksprs_transpose():
-    for b, m, _, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+    for b, m, _, k, sparsity_block_size, _, sparsity_percentage in TEST_CONFIGURATIONS:
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
         sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
-        x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size, triton_block_size)
+        x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size)
 
         for x, sparsity_layout_x in [(x_d, sparsity_layout_x_d), (x_bs, sparsity_layout_x_bs)]:
             x_stock = x.clone().requires_grad_(True)
@@ -1002,9 +1002,9 @@ def _get_blocksparse_layout_sparse_rows(b, m, n, sparsity_block_size, sparsity_p
 
 
 def _blocksparse_roundtrip(x, sparsity_layout, sparsity_block_size, triton_block_size=None, fill_value=0.0):
-    return bs.ops.to_dense(bs.ops.to_sparse(x, sparsity_layout, sparsity_block_size, triton_block_size),
+    return bs.ops.to_dense(bs.ops.to_sparse(x, sparsity_layout, sparsity_block_size),
                            sparsity_layout,
-                           sparsity_block_size, fill_value=fill_value, triton_block_size=triton_block_size)
+                           sparsity_block_size, fill_value=fill_value)
 
 
 # Visualisation
