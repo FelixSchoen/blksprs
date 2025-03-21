@@ -518,12 +518,12 @@ def test_blksprs_softmax():
 
 
 def test_blksprs_split():
-    for b, m, _, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+    for b, m, _, k, sparsity_block_size, _, sparsity_percentage in TEST_CONFIGURATIONS:
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
         sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
-        x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size, triton_block_size)
+        x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size)
 
         num_partitions_values = []
         x = k // sparsity_block_size
@@ -543,7 +543,7 @@ def test_blksprs_split():
                 blksprs_split_out, sparsity_layout_output = bs.ops.split(
                     bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
                     sparsity_layout_x, num_partitions, -1,
-                    sparsity_block_size, triton_block_size)
+                    sparsity_block_size)
                 blksprs_split_dense_out = bs.ops.to_dense(blksprs_split_out, sparsity_layout_output,
                                                           sparsity_block_size)
 
