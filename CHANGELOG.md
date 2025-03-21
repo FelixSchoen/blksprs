@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0] - Unreleased
+
+### Added
+
+- Add option to pre-build LUTs for most operations, improving performance for repeated operations with same sparsity
+  layouts
+
+### Changed
+
+- Rework all operations to use new `torch.library.triton_op()` approach, allowing for JIT compilation and better
+  compatability
+- Rework kernels to work with triton block sizes larger than sparsity block sizes via masking
+- Rework kernels to use automatic tuning of triton block sizes rather than fixed block sizes
+
+### Removed
+
+- Remove manual specification of triton block sizes
+
 ## [1.11] - 2025-03-10
 
 ### Added

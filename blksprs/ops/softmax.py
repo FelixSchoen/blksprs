@@ -7,9 +7,9 @@ from triton import language as tl
 
 from blksprs.ops.misc.row_wise import row_wise_sum, row_wise_max, row_wise_sub
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import get_triton_block_size, stride, get_autotune_configs
+from blksprs.utils.tools import stride, get_autotune_configs
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
-    validate_sparsity, validate_sparsity_block_size, validate_triton_block_size
+    validate_sparsity, validate_sparsity_block_size
 
 
 def softmax(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int, lut: dict = None) -> BlksprsTensor:

@@ -104,20 +104,6 @@ def validate_sparsity_block_size(sparsity_block_size: int, *tensors):
             raise ValueError("Tensor sizes must be divisible by sparsity block size")
 
 
-def validate_triton_block_size(triton_block_size: int, sparsity_block_size: int):
-    if _check_skip_validation():
-        return
-
-    if triton_block_size is None:
-        return
-
-    if not (triton_block_size & (triton_block_size - 1)) == 0:
-        raise ValueError("Triton block size must be a power of 2")
-
-    if triton_block_size > sparsity_block_size:
-        raise ValueError("Triton block size cannot be larger than sparsity block size")
-
-
 def _check_skip_validation():
     return not VALIDATION
 

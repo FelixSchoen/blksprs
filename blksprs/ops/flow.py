@@ -5,7 +5,7 @@ from torch._library import triton_op
 from torch._library.triton import wrap_triton
 from triton import language as tl
 
-from blksprs.utils.tools import stride, get_triton_block_size, get_autotune_configs
+from blksprs.utils.tools import stride, get_autotune_configs
 
 
 @triton_op("blksprs::flow_pull", mutates_args={})

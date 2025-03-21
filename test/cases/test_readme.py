@@ -12,10 +12,6 @@ def test_readme():
     # Must be a power of two, greater than or equal to 16 for matmul, and divide m, n, and k
     sparsity_block_size = 16
 
-    # Must be a power of two and smaller than or equal to sparsity_block_size
-    # If it is set to ``none`` a value will be chosen automatically
-    triton_block_size = None
-
     # Initialise random (dense) tensors
     x = torch.randn(size=(b, h, m, k), device="cuda")
     y = torch.randn(size=(b, h, n, k), device="cuda").transpose(-1, -2).contiguous()
@@ -25,27 +21,28 @@ def test_readme():
     y_dense, y_shape_original = bs.utils.do_shape_blocksparse(y)
 
     # Create sparsity layouts from existing tensors
-    sparsity_layout_x = bs.layouting.build_sparsity_layout(x_dense, sparsity_block_size,
-                                                           triton_block_size=triton_block_size)
-    sparsity_layout_y = bs.layouting.build_sparsity_layout(y_dense, sparsity_block_size,
-                                                           triton_block_size=triton_block_size)
+    sparsity_layout_x = bs.layouting.build_sparsity_layout(x_dense, sparsity_block_size)
+    sparsity_layout_y = bs.layouting.build_sparsity_layout(y_dense, sparsity_block_size)
 
     # Create random sparsity layout for output tensor
     sparsity_layout_o = _get_random_sparsity_layout(b * h, m, n, sparsity_block_size, sparsity_percentage)
 
     # Convert tensors to sparse tensors for matrix multiplication
-    x_sparse = bs.ops.to_sparse(x_dense, sparsity_layout_x, sparsity_block_size, triton_block_size=triton_block_size)
-    y_sparse = bs.ops.to_sparse(y_dense, sparsity_layout_y, sparsity_block_size, triton_block_size=triton_block_size)
+    x_sparse = bs.ops.to_sparse(x_dense, sparsity_layout_x, sparsity_block_size)
+    y_sparse = bs.ops.to_sparse(y_dense, sparsity_layout_y, sparsity_block_size)
+
+    # As of version 2.0, blksprs supports JIT compilation
+    matmul_compiled = torch.compile(bs.ops.matmul)
 
     # Perform matrix multiplication
-    o_sparse = bs.ops.matmul(x_sparse, sparsity_layout_x, y_sparse, sparsity_layout_y, sparsity_layout_o,
-                         sparsity_block_size,
-                         triton_block_size=triton_block_size)
+    o_sparse = matmul_compiled(x_sparse, sparsity_layout_x,
+                               y_sparse, sparsity_layout_y,
+                               sparsity_layout_o, sparsity_block_size)
 
     # Apply element-wise operation
     o_sparse = torch.add(o_sparse, 1)
 
-    o_dense = bs.ops.to_dense(o_sparse, sparsity_layout_o, sparsity_block_size, triton_block_size=triton_block_size)
+    o_dense = bs.ops.to_dense(o_sparse, sparsity_layout_o, sparsity_block_size)
 
     # Sanity check
     o_torch = torch.matmul(x_dense, y_dense)
@@ -53,25 +50,24 @@ def test_readme():
 
     # Perform round trip to set sparse blocks to 0
     o_torch_round_trip = bs.ops.to_dense(
-        bs.ops.to_sparse(o_torch, sparsity_layout_o, sparsity_block_size, triton_block_size=triton_block_size),
-        sparsity_layout_o, sparsity_block_size, fill_value=0, triton_block_size=triton_block_size)
+        bs.ops.to_sparse(o_torch, sparsity_layout_o, sparsity_block_size),
+        sparsity_layout_o, sparsity_block_size, fill_value=0)
 
     # Assert that the output is correct
     assert torch.allclose(o_dense, o_torch_round_trip, atol=2e-2)  # Note that small numerical differences are expected
 
     # Assert that the output has the correct sparsity layout
-    actual_sparsity_layout_o = bs.layouting.build_sparsity_layout(o_dense, sparsity_block_size,
-                                                                  triton_block_size=triton_block_size)
+    actual_sparsity_layout_o = bs.layouting.build_sparsity_layout(o_dense, sparsity_block_size)
     assert torch.allclose(actual_sparsity_layout_o.to(torch.int), sparsity_layout_o)
 
     # Convert output tensor back to original shape
     o = bs.utils.undo_shape_blocksparse(o_dense, x_shape_original)
 
     # Other available functions
-    bs.ops.transpose(o_sparse, sparsity_layout_o, sparsity_block_size, triton_block_size=triton_block_size)
-    bs.ops.softmax(o_sparse, sparsity_layout_o, sparsity_block_size, triton_block_size=triton_block_size)
-    bs.ops.misc.row_wise_sum(o_sparse, sparsity_layout_o, sparsity_block_size, triton_block_size=triton_block_size)
-    bs.ops.misc.row_wise_max(o_sparse, sparsity_layout_o, sparsity_block_size, triton_block_size=triton_block_size)
+    bs.ops.transpose(o_sparse, sparsity_layout_o, sparsity_block_size)
+    bs.ops.softmax(o_sparse, sparsity_layout_o, sparsity_block_size)
+    bs.ops.misc.row_wise_sum(o_sparse, sparsity_layout_o, sparsity_block_size)
+    bs.ops.misc.row_wise_max(o_sparse, sparsity_layout_o, sparsity_block_size)
 
 
 def _get_random_sparsity_layout(b, m, n, sparsity_block_size, sparsity_percentage):

@@ -8,11 +8,11 @@ from triton import language as tl
 from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import stride, get_autotune_configs
 from blksprs.utils.validation import validate_contiguous, validate_device, \
-    validate_sparsity_block_size, validate_triton_block_size
+    validate_sparsity_block_size
 
 
 def broadcast_add(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
-                  sparsity_block_size: int, triton_block_size: int = None) -> BlksprsTensor:
+                  sparsity_block_size: int) -> BlksprsTensor:
     """Performs a broadcast and subsequent addition of two dense tensors x and y. Returns a block-sparse tensor in
         compressed form.
 
@@ -35,7 +35,6 @@ def broadcast_add(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
     if x.size(-1) != y.size(-1):
         raise ValueError("Dimensions of tensors must match")
     validate_sparsity_block_size(sparsity_block_size)
-    validate_triton_block_size(triton_block_size, sparsity_block_size)
 
     sparsity_lut_o = torch.nonzero(sparsity_layout_output).contiguous()
 
@@ -47,11 +46,11 @@ def broadcast_add(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
 
 
 def broadcast_sub(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
-                  sparsity_block_size: int, triton_block_size: int = None) -> BlksprsTensor:
+                  sparsity_block_size: int) -> BlksprsTensor:
     """Wrapper for ``broadcast_add`` with negated y.
 
     """
-    return broadcast_add(x, torch.neg(y), sparsity_layout_output, sparsity_block_size, triton_block_size)
+    return broadcast_add(x, torch.neg(y), sparsity_layout_output, sparsity_block_size)
 
 
 @triton_op("blksprs::broadcast_add", mutates_args={})

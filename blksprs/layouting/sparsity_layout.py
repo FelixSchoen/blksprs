@@ -233,3 +233,8 @@ def build_sparsity_layout_matmul_fast(sparsity_layout_x: Tensor, sparsity_layout
     sparsity_layout_y_slice = torch.max(sparsity_layout_y, dim=-2).values.unsqueeze(1)
 
     return torch.logical_or(sparsity_layout_x_slice, sparsity_layout_y_slice)
+
+
+def build_sparsity_layout_full(x: Tensor, sparsity_block_size: int) -> Tensor:
+    return torch.ones(size=(x.size(0), x.size(1) // sparsity_block_size, x.size(2) // sparsity_block_size),
+                      dtype=torch.bool, device=x.device)

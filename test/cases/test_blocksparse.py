@@ -23,7 +23,7 @@ TEST_CONFIGURATIONS = [
     (2, 32, 32, 32, 32, 0.75),
     (2, 64, 64, 64, 64, 0.75),
     (2, 64, 64, 64, 64, 1),
-    # Same dimensions, sparsity_block_size, and triton_block_size
+    # Same dimensions, sparsity_block_size
     (2, 64, 64, 64, 16, 0.75),
     (2, 64, 64, 64, 32, 0.75),
     (2, 128, 128, 128, 64, 0),

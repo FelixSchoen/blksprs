@@ -2,6 +2,9 @@ import torch
 import triton
 from torch import Tensor, Size
 
+# Capture scalar outputs for JIT compilation
+torch._dynamo.config.capture_scalar_outputs = True
+
 
 def do_shape_blocksparse(x: Tensor):
     if x.dim() == 3:
@@ -15,10 +18,6 @@ def undo_shape_blocksparse(x: Tensor, shape: Size):
         return x
 
     return x.reshape((*shape[:-2], *x.shape[-2:]))
-
-
-def get_triton_block_size(sparsity_block_size: int, limit: int = 128):
-    return min(sparsity_block_size, limit)
 
 
 def stride(x: Tensor):
