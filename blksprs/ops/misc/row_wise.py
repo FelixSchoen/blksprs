@@ -108,6 +108,7 @@ def row_wise_sum_kernel(x,
                         r_lut_o,
                         sparsity_block_size,
                         TRITON_BLOCK_SIZE: tl.constexpr) -> None:
+    # Get triton block indices
     pid_blk = tl.program_id(axis=0)
     pid_row = tl.program_id(axis=1)
     pid_col = tl.program_id(axis=2)
@@ -156,7 +157,7 @@ def row_wise_sum_kernel(x,
 
 
 def row_wise_max(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
-                 flag_slice_only: bool = False, triton_block_size: int = None) -> (BlksprsTensor, Tensor):
+                 flag_slice_only: bool = False) -> (BlksprsTensor, Tensor):
     """Computes the row-wise max of a block-sparse tensor.
 
     Returns a block-sparse tensor in compressed form with only one block per row, where the first entry contains the
@@ -171,7 +172,6 @@ def row_wise_max(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size:
         sparsity_block_size (int): The size of the sparsity blocks.
         flag_slice_only (bool, optional): If set the output will be of shape ``[x.size(0), x.size(1), 1]``
             (default ``False``).
-        triton_block_size (int): The block size to use for the triton kernel (default ``None``).
 
     Returns:
         tuple[BlksprsTensor, Tensor]: A tuple containing a block-sparse tensor in compressed form containing the row-wise max
@@ -185,7 +185,6 @@ def row_wise_max(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size:
     validate_device(x)
     validate_sparsity(sparsity_block_size, (x, sparsity_layout))
     validate_sparsity_block_size(sparsity_block_size, x)
-    validate_triton_block_size(triton_block_size, sparsity_block_size)
 
     sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
 
@@ -200,6 +199,16 @@ def row_wise_max(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size:
     validate_contiguous(sparsity_layout, sparsity_lut,
                         sparsity_layout_output, sparsity_reverse_lut_output)
 
+    return BlksprsTensor(
+        row_wise_max_forward(x, sparsity_lut, sparsity_layout_output, sparsity_reverse_lut_output, sparsity_block_size,
+                             n_sparse_blocks_output, flag_slice_only)), sparsity_layout_output
+
+
+@triton_op("blksprs::row_wise_max", mutates_args={})
+def row_wise_max_forward(x: Tensor, sparsity_lut: Tensor,
+                         sparsity_layout_output: Tensor, sparsity_reverse_lut_output: Tensor,
+                         sparsity_block_size: int, n_sparse_blocks_output: int,
+                         flag_slice_only: bool = False) -> Tensor:
     output = torch.full(size=(n_sparse_blocks_output,
                               sparsity_block_size,
                               1 if flag_slice_only else sparsity_block_size),
@@ -215,14 +224,11 @@ def row_wise_max(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size:
     s_l_o_b, s_l_o_r, s_l_o_c = sparsity_layout_output.size()
     s_l_o_b_s, s_l_o_r_s, s_l_o_c_s = stride(sparsity_layout_output)
 
-    if triton_block_size is None:
-        triton_block_size = get_triton_block_size(sparsity_block_size)
-
     triton_grid = lambda meta: [x_b,
                                 triton.cdiv(x_r, meta["TRITON_BLOCK_SIZE"]),
                                 triton.cdiv(x_c, meta["TRITON_BLOCK_SIZE"])]
 
-    (kernel_blocksparse_row_wise_max[triton_grid]
+    (wrap_triton(row_wise_max_kernel)[triton_grid]
      (x,
       x_b, x_b_s, x_r_s, x_c_s,
       sparsity_lut, s_lut_x_r, s_lut_x_r_s, s_lut_x_c_s,
@@ -230,23 +236,33 @@ def row_wise_max(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size:
       o_b, o_b_s, o_r_s,
       s_l_o_b, s_l_o_b_s, s_l_o_r_s,
       sparsity_reverse_lut_output,
-      triton_block_size))
+      sparsity_block_size))
 
-    return BlksprsTensor(output), sparsity_layout_output
+    return output
 
 
+@triton.autotune(
+    configs=get_autotune_configs(),
+    key=[],
+    restore_value=["o"]
+)
 @triton.jit
-def kernel_blocksparse_row_wise_max(x,
-                                    x_b, x_b_s, x_r_s, x_c_s,
-                                    s_lut_x, s_lut_x_r, s_lut_x_r_s, s_lut_x_c_s,
-                                    o,
-                                    o_b, o_b_s, o_r_s,
-                                    s_l_o_b, s_l_o_b_s, s_l_o_r_s,
-                                    r_lut_o,
-                                    TRITON_BLOCK_SIZE: tl.constexpr) -> None:
+def row_wise_max_kernel(x,
+                        x_b, x_b_s, x_r_s, x_c_s,
+                        s_lut_x, s_lut_x_r, s_lut_x_r_s, s_lut_x_c_s,
+                        o,
+                        o_b, o_b_s, o_r_s,
+                        s_l_o_b, s_l_o_b_s, s_l_o_r_s,
+                        r_lut_o,
+                        sparsity_block_size,
+                        TRITON_BLOCK_SIZE: tl.constexpr) -> None:
+    # Get triton block indices
     pid_blk = tl.program_id(axis=0)
     pid_row = tl.program_id(axis=1)
     pid_col = tl.program_id(axis=2)
+
+    # Get valid triton block size
+    val_tbs = min(sparsity_block_size, TRITON_BLOCK_SIZE)
 
     # Get position of current sparsity block consisting of its batch and row index
     spa_bat_idx = (pid_blk * s_lut_x_r_s + 0 * s_lut_x_c_s)
@@ -268,17 +284,23 @@ def kernel_blocksparse_row_wise_max(x,
         return
 
     blk_idx = ((pid_blk * x_b_s) +
-               ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
-               ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-    blk_msk = (blk_idx >= 0 and blk_idx < x_b * x_b_s)
+               ((pid_row * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
+               ((pid_col * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
+    blk_msk = ((blk_idx >= 0 and
+                blk_idx < x_b * x_b_s) and
+               (tl.arange(0, TRITON_BLOCK_SIZE)[:, None] < val_tbs and
+                tl.arange(0, TRITON_BLOCK_SIZE)[None, :] < val_tbs))
     blk = tl.load(x + blk_idx, mask=blk_msk)
 
     buf = tl.reshape(tl.max(blk, axis=-1), (TRITON_BLOCK_SIZE, 1))
 
     o_idx = (rev_idx_spa * o_b_s +
-             ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
+             ((pid_row * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
              (tl.arange(0, 1))[None, :])
-    o_msk = (o_idx >= 0 and o_idx < o_b * o_b_s)
+    o_msk = ((o_idx >= 0 and
+              o_idx < o_b * o_b_s) and
+             (tl.arange(0, TRITON_BLOCK_SIZE)[:, None] < val_tbs and
+              tl.arange(0, 1)[None, :] < val_tbs))
     tl.atomic_max(o + o_idx, buf, o_msk)
 
 
