@@ -103,8 +103,9 @@ def flow_pull_kernel(x,
         tl.store(o + blk_o_idx, blk_x, mask=blk_o_msk)
 
 
-def flow_forward_push(ctx, x: Tensor, sparsity_layout_x: Tensor, sparsity_lut: Tensor, sparsity_reverse_lut: Tensor,
-                      sparsity_block_size: int, n_sparse_blocks: int, triton_block_size: int) -> Tensor:
+@triton_op("blksprs::flow_push", mutates_args={})
+def flow_push_forward(x: Tensor, sparsity_layout_x: Tensor, sparsity_lut: Tensor, sparsity_reverse_lut: Tensor,
+                      sparsity_block_size: int, n_sparse_blocks: int) -> Tensor:
     output = torch.zeros(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
                          dtype=x.dtype, device=x.device)
 
@@ -117,14 +118,11 @@ def flow_forward_push(ctx, x: Tensor, sparsity_layout_x: Tensor, sparsity_lut: T
     o_b, o_r, o_c = output.size()
     o_b_s, o_r_s, o_c_s = stride(output)
 
-    if triton_block_size is None:
-        triton_block_size = get_triton_block_size(sparsity_block_size)
-
     triton_grid = lambda meta: [x_b,
                                 triton.cdiv(x_r, meta["TRITON_BLOCK_SIZE"]),
                                 triton.cdiv(x_c, meta["TRITON_BLOCK_SIZE"])]
 
-    (kernel_blocksparse_flow_push[triton_grid]
+    (wrap_triton(flow_push_kernel)[triton_grid]
      (x,
       x_b, x_b_s, x_r_s, x_c_s,
       s_l_x_b, s_l_x_b_s, s_l_x_r_s, s_l_x_c_s,
@@ -132,29 +130,33 @@ def flow_forward_push(ctx, x: Tensor, sparsity_layout_x: Tensor, sparsity_lut: T
       sparsity_reverse_lut,
       output,
       o_b, o_b_s, o_r_s, o_c_s,
-      triton_block_size))
-
-    # Save for backward pass
-    if ctx is not None:
-        ctx.sparsity_block_size = sparsity_block_size
-        ctx.triton_block_size = triton_block_size
+      sparsity_block_size))
 
     return output
 
 
+@triton.autotune(
+    configs=get_autotune_configs(),
+    key=[],
+    reset_to_zero=["o"]
+)
 @triton.jit
-def kernel_blocksparse_flow_push(x,
-                                 x_b, x_b_s, x_r_s, x_c_s,
-                                 s_l_x_b, s_l_x_b_s, s_l_x_r_s, s_l_x_c_s,
-                                 s_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
-                                 r_lut,
-                                 o,
-                                 o_b, o_b_s, o_r_s, o_c_s,
-                                 TRITON_BLOCK_SIZE: tl.constexpr) -> None:
+def flow_push_kernel(x,
+                     x_b, x_b_s, x_r_s, x_c_s,
+                     s_l_x_b, s_l_x_b_s, s_l_x_r_s, s_l_x_c_s,
+                     s_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
+                     r_lut,
+                     o,
+                     o_b, o_b_s, o_r_s, o_c_s,
+                     sparsity_block_size,
+                     TRITON_BLOCK_SIZE: tl.constexpr) -> None:
     # Get triton block indices
     pid_blk = tl.program_id(axis=0)
     pid_row = tl.program_id(axis=1)
     pid_col = tl.program_id(axis=2)
+
+    # Get valid triton block size
+    val_tbs = min(sparsity_block_size, TRITON_BLOCK_SIZE)
 
     # Get sparsity index of current input block consisting of its batch, row, and column index
     spa_bat_idx = (pid_blk * s_lut_r_s + 0 * s_lut_c_s)
@@ -178,13 +180,19 @@ def kernel_blocksparse_flow_push(x,
 
     if rev_idx_spa >= 0:
         blk_x_idx = (pid_blk * x_b_s +
-                     ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
-                     ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-        blk_x_msk = (blk_x_idx >= 0 and blk_x_idx < x_b * x_b_s)
+                     ((pid_row * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
+                     ((pid_col * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
+        blk_x_msk = ((blk_x_idx >= 0 and
+                      blk_x_idx < x_b * x_b_s) and
+                     (tl.arange(0, TRITON_BLOCK_SIZE)[:, None] < val_tbs and
+                      tl.arange(0, TRITON_BLOCK_SIZE)[None, :] < val_tbs))
         blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
 
         blk_o_idx = (rev_idx_spa * o_b_s +
-                     ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
-                     ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
-        blk_o_msk = (blk_o_idx >= 0 and blk_o_idx < o_b * o_b_s)
+                     ((pid_row * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
+                     ((pid_col * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
+        blk_o_msk = ((blk_o_idx >= 0 and
+                      blk_o_idx < o_b * o_b_s) and
+                     (tl.arange(0, TRITON_BLOCK_SIZE)[:, None] < val_tbs and
+                      tl.arange(0, TRITON_BLOCK_SIZE)[None, :] < val_tbs))
         tl.atomic_add(o + blk_o_idx, blk_x, mask=blk_o_msk)
