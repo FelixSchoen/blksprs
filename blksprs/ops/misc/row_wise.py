@@ -5,9 +5,9 @@ from torch._library.triton import wrap_triton, triton_op
 from triton import language as tl
 
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import get_triton_block_size, stride, get_autotune_configs
+from blksprs.utils.tools import stride, get_autotune_configs
 from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_device, validate_sparsity, \
-    validate_sparsity_block_size, validate_triton_block_size
+    validate_sparsity_block_size
 
 
 def row_wise_sum(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
@@ -305,7 +305,7 @@ def row_wise_max_kernel(x,
 
 
 def row_wise_add(x: BlksprsTensor, sparsity_layout_x: Tensor, y: Tensor,
-                 sparsity_block_size: int, triton_block_size: int = None) -> BlksprsTensor:
+                 sparsity_block_size: int) -> BlksprsTensor:
     """For each row in ``y`` adds the value to each value in the corresponding row of the block-sparse tensor ``x``.
 
     Args:
@@ -313,7 +313,6 @@ def row_wise_add(x: BlksprsTensor, sparsity_layout_x: Tensor, y: Tensor,
         sparsity_layout_x (Tensor): The sparsity layout of the block-sparse tensor.
         y (BlksprsTensor): A block-sparse tensor in compressed form with only one value per row and a single column of sparse blocks.
         sparsity_block_size (int): The size of the sparsity blocks.
-        triton_block_size (int): The block size to use for the triton kernel (default ``None``).
 
     Returns:
         BlksprsTensor: The values of ``x`` with the first value of ``y`` in each row added to them as a block-sparse tensor in
@@ -325,9 +324,8 @@ def row_wise_add(x: BlksprsTensor, sparsity_layout_x: Tensor, y: Tensor,
     validate_device(x)
     validate_sparsity(sparsity_block_size, (x, sparsity_layout_x))
     validate_sparsity_block_size(sparsity_block_size, x)
-    validate_triton_block_size(triton_block_size, sparsity_block_size)
 
-    sparsity_lut = torch.nonzero(sparsity_layout_x).contiguous()
+    sparsity_lut_x = torch.nonzero(sparsity_layout_x).contiguous()
 
     sparsity_layout_rwm, _ = torch.max(sparsity_layout_x, dim=-1, keepdim=True)
     sparsity_layout_rwm_flat = sparsity_layout_rwm.reshape(-1)
@@ -335,23 +333,36 @@ def row_wise_add(x: BlksprsTensor, sparsity_layout_x: Tensor, y: Tensor,
                                 (sparsity_layout_rwm_flat == 1) -
                                 (1 * (sparsity_layout_rwm_flat == 0)))
 
-    validate_contiguous(sparsity_layout_x, sparsity_lut, sparsity_reverse_lut_rwm)
+    validate_contiguous(sparsity_layout_x, sparsity_lut_x, sparsity_reverse_lut_rwm)
 
+    return BlksprsTensor(row_wise_add_forward(x, sparsity_lut_x, sparsity_layout_rwm,
+                                              sparsity_reverse_lut_rwm, y, sparsity_block_size))
+
+
+def row_wise_sub(x: BlksprsTensor, sparsity_layout_x: Tensor, y: Tensor,
+                 sparsity_block_size: int) -> BlksprsTensor:
+    """Wrapper for ``row_wise_add`` with negated y.
+
+    """
+    return row_wise_add(x, sparsity_layout_x, torch.neg(y), sparsity_block_size)
+
+
+@triton_op("blksprs::row_wise_add", mutates_args={})
+def row_wise_add_forward(x: Tensor, sparsity_lut_x: Tensor,
+                         sparsity_layout_x_rwm: Tensor, sparsity_reverse_x_lut_rwm: Tensor,
+                         y: Tensor, sparsity_block_size: int) -> Tensor:
     output = torch.empty_like(x)
 
     x_b, x_r, x_c = x.size()
     x_b_s, x_r_s, x_c_s = stride(x)
-    s_lut_r, s_lut_c = sparsity_lut.size()
-    s_lut_r_s, s_lut_c_s = stride(sparsity_lut)
+    s_lut_r, s_lut_c = sparsity_lut_x.size()
+    s_lut_r_s, s_lut_c_s = stride(sparsity_lut_x)
     y_b, y_r, y_c = y.size()
     y_b_s, y_r_s, y_c_s = stride(y)
-    s_l_y_b, s_l_y_r, s_l_y_c = sparsity_layout_rwm.size()
-    s_l_y_b_s, s_l_y_r_s, s_l_y_c_s = stride(sparsity_layout_rwm)
+    s_l_y_b, s_l_y_r, s_l_y_c = sparsity_layout_x_rwm.size()
+    s_l_y_b_s, s_l_y_r_s, s_l_y_c_s = stride(sparsity_layout_x_rwm)
     o_b, o_r, o_c = output.size()
     o_b_s, o_r_s, o_c_s = stride(output)
-
-    if triton_block_size is None:
-        triton_block_size = get_triton_block_size(sparsity_block_size)
 
     triton_grid = lambda meta: [o_b,
                                 triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),
@@ -360,49 +371,48 @@ def row_wise_add(x: BlksprsTensor, sparsity_layout_x: Tensor, y: Tensor,
     (kernel_blocksparse_row_wise_add[triton_grid]
      (x,
       x_b, x_b_s, x_r_s, x_c_s,
-      sparsity_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
+      sparsity_lut_x, s_lut_r, s_lut_r_s, s_lut_c_s,
       y, y_b, y_b_s, y_r_s, y_c_s,
       s_l_y_b, s_l_y_b_s, s_l_y_r_s,
-      sparsity_reverse_lut_rwm,
+      sparsity_reverse_x_lut_rwm,
       output,
       o_b, o_b_s, o_r_s, o_c_s,
-      triton_block_size
-      ))
+      sparsity_block_size))
 
-    return BlksprsTensor(output)
-
-
-def row_wise_sub(x: BlksprsTensor, sparsity_layout_x: Tensor, y: Tensor,
-                 sparsity_block_size: int, triton_block_size: int = None) -> BlksprsTensor:
-    """Wrapper for ``row_wise_add`` with negated y.
-
-    """
-    return row_wise_add(x, sparsity_layout_x, torch.neg(y), sparsity_block_size, triton_block_size)
+    return output
 
 
+@triton.autotune(
+    configs=get_autotune_configs(),
+    key=[]
+)
 @triton.jit
 def kernel_blocksparse_row_wise_add(x,
                                     x_b, x_b_s, x_r_s, x_c_s,
-                                    s_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
+                                    s_lut_x, s_lut_x_r, s_lut_x_r_s, s_lut_x_c_s,
                                     y, y_b, y_b_s, y_r_s, y_c_s,
                                     s_l_y_b, s_l_y_b_s, s_l_y_r_s,
                                     r_lut_y,
                                     o,
                                     o_b, o_b_s, o_r_s, o_c_s,
+                                    sparsity_block_size,
                                     TRITON_BLOCK_SIZE: tl.constexpr) -> None:
     # Get triton block indices
     pid_blk = tl.program_id(axis=0)
     pid_row = tl.program_id(axis=1)
     pid_col = tl.program_id(axis=2)
 
-    # Get position of current sparsity block consisting of its batch and row index
-    spa_bat_idx = (pid_blk * s_lut_r_s + 0 * s_lut_c_s)
-    spa_bat_msk = (spa_bat_idx >= 0 and spa_bat_idx < s_lut_r * s_lut_r_s)
-    spa_bat = tl.load(s_lut + spa_bat_idx, mask=spa_bat_msk)
+    # Get valid triton block size
+    val_tbs = min(sparsity_block_size, TRITON_BLOCK_SIZE)
 
-    spa_row_idx = (pid_blk * s_lut_r_s + 1 * s_lut_c_s)
-    spa_row_msk = (spa_row_idx >= 0 and spa_row_idx < s_lut_r * s_lut_r_s)
-    spa_row = tl.load(s_lut + spa_row_idx, mask=spa_row_msk)
+    # Get position of current sparsity block consisting of its batch and row index
+    spa_bat_idx = (pid_blk * s_lut_x_r_s + 0 * s_lut_x_c_s)
+    spa_bat_msk = (spa_bat_idx >= 0 and spa_bat_idx < s_lut_x_r * s_lut_x_r_s)
+    spa_bat = tl.load(s_lut_x + spa_bat_idx, mask=spa_bat_msk)
+
+    spa_row_idx = (pid_blk * s_lut_x_r_s + 1 * s_lut_x_c_s)
+    spa_row_msk = (spa_row_idx >= 0 and spa_row_idx < s_lut_x_r * s_lut_x_r_s)
+    spa_row = tl.load(s_lut_x + spa_row_idx, mask=spa_row_msk)
 
     # Get reverse sparsity indices for s
     rev_idx_spa_s_idx = (spa_bat * s_l_y_b_s +
@@ -416,16 +426,22 @@ def kernel_blocksparse_row_wise_add(x,
 
     # Load x block
     blk_x_idx = ((pid_blk * x_b_s) +
-                 ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
-                 ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-    blk_x_msk = (blk_x_idx >= 0 and blk_x_idx < x_b * x_b_s)
+                 ((pid_row * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
+                 ((pid_col * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
+    blk_x_msk = ((blk_x_idx >= 0 and
+                  blk_x_idx < x_b * x_b_s) and
+                 (tl.arange(0, TRITON_BLOCK_SIZE)[:, None] < val_tbs and
+                  tl.arange(0, TRITON_BLOCK_SIZE)[None, :] < val_tbs))
     blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
 
     # Load sum block
     blk_s_idx = (rev_idx_spa_s * y_b_s +
-                 ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * y_r_s)[:, None] +
+                 ((pid_row * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * y_r_s)[:, None] +
                  (tl.arange(0, 1) * y_c_s)[None, :])
-    blk_s_msk = (blk_s_idx >= 0 and blk_s_idx < y_b * y_b_s)
+    blk_s_msk = ((blk_s_idx >= 0 and
+                  blk_s_idx < y_b * y_b_s) and
+                 (tl.arange(0, TRITON_BLOCK_SIZE)[:, None] < val_tbs and
+                  tl.arange(0, 1)[None, :] < val_tbs))
     blk_s = tl.load(y + blk_s_idx, mask=blk_s_msk)
 
     # Compute exp
@@ -433,7 +449,10 @@ def kernel_blocksparse_row_wise_add(x,
 
     # Store block
     blk_o_idx = ((pid_blk * o_b_s) +
-                 ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
-                 ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
-    blk_o_msk = (blk_o_idx >= 0 and blk_o_idx < o_b * o_b_s)
+                 ((pid_row * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
+                 ((pid_col * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
+    blk_o_msk = ((blk_o_idx >= 0 and
+                  blk_o_idx < o_b * o_b_s) and
+                 (tl.arange(0, TRITON_BLOCK_SIZE)[:, None] < val_tbs and
+                  tl.arange(0, TRITON_BLOCK_SIZE)[None, :] < val_tbs))
     tl.store(o + blk_o_idx, buf, mask=blk_o_msk)

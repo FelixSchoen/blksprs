@@ -664,12 +664,12 @@ def test_blksprs_row_wise_max():
 
 
 def test_blksprs_row_wise_add():
-    for b, m, _, k, sparsity_block_size, triton_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+    for b, m, _, k, sparsity_block_size, _, sparsity_percentage in TEST_CONFIGURATIONS:
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
         sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
-        x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size, triton_block_size,
+        x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size,
                                       fill_value=float("-inf"))
 
         for x, sparsity_layout_x in [(x_bs, sparsity_layout_x_bs), (x_d, sparsity_layout_x_d),
@@ -678,10 +678,10 @@ def test_blksprs_row_wise_add():
             x_blksprs = x.clone().requires_grad_(True)
 
             stock_max_out = (torch.max(_blocksparse_roundtrip(x_stock, sparsity_layout_x,
-                                                              sparsity_block_size, triton_block_size=triton_block_size),
+                                                              sparsity_block_size),
                                        dim=-1).values).unsqueeze(-1)
             stock_rwa_out = _blocksparse_roundtrip(x_stock + stock_max_out, sparsity_layout_x,
-                                                   sparsity_block_size, triton_block_size=triton_block_size)
+                                                   sparsity_block_size)
 
             blksprs_row_wise_max_out, sparsity_layout_output = bs.ops.misc.row_wise_max(
                 bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size), sparsity_layout_x,
@@ -689,7 +689,7 @@ def test_blksprs_row_wise_add():
             blksprs_row_wise_add_out = bs.ops.misc.row_wise_add(
                 bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
                 sparsity_layout_x, blksprs_row_wise_max_out,
-                sparsity_block_size, triton_block_size)
+                sparsity_block_size)
             blksprs_row_wise_add_dense_out = bs.ops.to_dense(blksprs_row_wise_add_out, sparsity_layout_x,
                                                              sparsity_block_size)
 
