@@ -4,8 +4,8 @@ from torch import Tensor
 from triton import language as tl
 
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import get_triton_block_size, stride, get_autotune_configs
-from blksprs.utils.validation import validate_triton_block_size, validate_dimensions, validate_device, \
+from blksprs.utils.tools import stride, get_autotune_configs
+from blksprs.utils.validation import validate_dimensions, validate_device, \
     validate_contiguous
 
 
