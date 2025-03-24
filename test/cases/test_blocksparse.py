@@ -63,6 +63,7 @@ TEST_CONFIGURATIONS = [
     (2, 64, 64, 64, 32, 1),
     (1, 64, 64, 64, 32, 0.25),
 ]
+TEST_DTYPES = [torch.float32, torch.float16, ]
 
 # Tolerances
 ATOL = 2e-2
@@ -334,50 +335,51 @@ def test_blksprs_scatter():
 
 def test_blksprs_matmul():
     for b, m, n, k, sparsity_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
-        x_d = torch.randn(size=(b, m, k), device=DEVICE)
-        sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
-        y_d = torch.randn(size=(b, n, k), device=DEVICE).transpose(-1, -2).contiguous()
-        sparsity_layout_y_d = torch.ones(size=(b, k // sparsity_block_size, n // sparsity_block_size), device=DEVICE)
+        for d_t in TEST_DTYPES:
+            x_d = torch.randn(size=(b, m, k), dtype=d_t, device=DEVICE)
+            sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
+            y_d = torch.randn(size=(b, n, k), dtype=d_t, device=DEVICE).transpose(-1, -2).contiguous()
+            sparsity_layout_y_d = torch.ones(size=(b, k // sparsity_block_size, n // sparsity_block_size), device=DEVICE)
 
-        sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
-        x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size)
-        sparsity_layout_y_bs = _get_blocksparse_layout(b, k, n, sparsity_block_size, sparsity_percentage)
-        y_bs = _blocksparse_roundtrip(y_d, sparsity_layout_y_bs, sparsity_block_size)
+            sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
+            x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size)
+            sparsity_layout_y_bs = _get_blocksparse_layout(b, k, n, sparsity_block_size, sparsity_percentage)
+            y_bs = _blocksparse_roundtrip(y_d, sparsity_layout_y_bs, sparsity_block_size)
 
-        sparsity_layout_o_d = torch.ones(size=(b, m // sparsity_block_size, n // sparsity_block_size), device=DEVICE)
-        sparsity_layout_o_bs = bs.layouting.build_sparsity_layout_matmul_fast(sparsity_layout_x_bs,
-                                                                              sparsity_layout_y_bs)
+            sparsity_layout_o_d = torch.ones(size=(b, m // sparsity_block_size, n // sparsity_block_size), device=DEVICE)
+            sparsity_layout_o_bs = bs.layouting.build_sparsity_layout_matmul_fast(sparsity_layout_x_bs,
+                                                                                  sparsity_layout_y_bs)
 
-        for x, sparsity_layout_x, y, sparsity_layout_y, sparsity_layout_o in [
-            (x_d, sparsity_layout_x_d, y_d, sparsity_layout_y_d, sparsity_layout_o_d),
-            (x_bs, sparsity_layout_x_bs, y_bs, sparsity_layout_y_bs, sparsity_layout_o_bs),
-            (x_bs, sparsity_layout_x_bs, y_bs, sparsity_layout_y_bs, sparsity_layout_o_d)]:
-            x_stock = x.clone().requires_grad_(True)
-            y_stock = y.clone().requires_grad_(True)
-            x_blksprs = x.clone().requires_grad_(True)
-            y_blksprs = y.clone().requires_grad_(True)
+            for x, sparsity_layout_x, y, sparsity_layout_y, sparsity_layout_o in [
+                (x_d, sparsity_layout_x_d, y_d, sparsity_layout_y_d, sparsity_layout_o_d),
+                (x_bs, sparsity_layout_x_bs, y_bs, sparsity_layout_y_bs, sparsity_layout_o_bs),
+                (x_bs, sparsity_layout_x_bs, y_bs, sparsity_layout_y_bs, sparsity_layout_o_d)]:
+                x_stock = x.clone().requires_grad_(True)
+                y_stock = y.clone().requires_grad_(True)
+                x_blksprs = x.clone().requires_grad_(True)
+                y_blksprs = y.clone().requires_grad_(True)
 
-            stock_matmul_out = torch.matmul(x_stock, y_stock)
-            blksprs_matmul_out = bs.ops.matmul(bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
-                                               sparsity_layout_x,
-                                               bs.ops.to_sparse(y_blksprs, sparsity_layout_y, sparsity_block_size),
-                                               sparsity_layout_y,
-                                               sparsity_layout_o, sparsity_block_size)
-            blksprs_matmul_dense_out = bs.ops.to_dense(blksprs_matmul_out, sparsity_layout_o, sparsity_block_size)
+                stock_matmul_out = torch.matmul(x_stock, y_stock)
+                blksprs_matmul_out = bs.ops.matmul(bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
+                                                   sparsity_layout_x,
+                                                   bs.ops.to_sparse(y_blksprs, sparsity_layout_y, sparsity_block_size),
+                                                   sparsity_layout_y,
+                                                   sparsity_layout_o, sparsity_block_size)
+                blksprs_matmul_dense_out = bs.ops.to_dense(blksprs_matmul_out, sparsity_layout_o, sparsity_block_size)
 
-            assert torch.allclose(blksprs_matmul_dense_out, stock_matmul_out, atol=ATOL, rtol=RTOL)
+                assert torch.allclose(blksprs_matmul_dense_out, stock_matmul_out, atol=ATOL, rtol=RTOL)
 
-            target = torch.randn_like(stock_matmul_out)
-            stock_loss = torch.nn.L1Loss()
-            blksprs_loss = torch.nn.L1Loss()
-            stock_loss = stock_loss(stock_matmul_out, target)
-            blksprs_loss = blksprs_loss(blksprs_matmul_dense_out, target)
+                target = torch.randn_like(stock_matmul_out)
+                stock_loss = torch.nn.L1Loss()
+                blksprs_loss = torch.nn.L1Loss()
+                stock_loss = stock_loss(stock_matmul_out, target)
+                blksprs_loss = blksprs_loss(blksprs_matmul_dense_out, target)
 
-            stock_loss.backward()
-            blksprs_loss.backward()
+                stock_loss.backward()
+                blksprs_loss.backward()
 
-            assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
-            assert torch.allclose(y_blksprs.grad, y_stock.grad, atol=ATOL, rtol=RTOL)
+                assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
+                assert torch.allclose(y_blksprs.grad, y_stock.grad, atol=ATOL, rtol=RTOL)
 
 
 def test_repeat():

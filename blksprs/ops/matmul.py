@@ -205,6 +205,9 @@ def matmul_kernel(x,
             # Perform matrix multiplication
             buf += tl.dot(blk_x, blk_y)
 
+    # Cast buffer
+    buf = buf.to(o.dtype.element_ty)
+
     # Store output
     blk_o_idx = ((pid_blk * o_b_s) +
                  ((pid_row * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
