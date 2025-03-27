@@ -12,7 +12,7 @@ from blksprs.utils.tools import stride, get_autotune_configs
 def flow_pull_forward(x: Tensor, sparsity_layout_o: Tensor,
                       sparsity_lut: Tensor, sparsity_reverse_lut: Tensor,
                       sparsity_block_size: int, n_sparse_blocks: int) -> Tensor:
-    output = torch.empty(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
+    output = torch.zeros(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
                          dtype=x.dtype, device=x.device)
 
     x_b, x_r, x_c = x.size()
@@ -44,6 +44,7 @@ def flow_pull_forward(x: Tensor, sparsity_layout_o: Tensor,
 @triton.autotune(
     configs=get_autotune_configs(),
     key=[],
+    reset_to_zero=["o"]
 )
 @triton.jit
 def flow_pull_kernel(x,

@@ -354,7 +354,7 @@ def row_wise_sub(x: BlksprsTensor, sparsity_layout_x: Tensor, y: Tensor,
 def row_wise_add_forward(x: Tensor, sparsity_lut_x: Tensor,
                          sparsity_layout_x_rwm: Tensor, sparsity_reverse_x_lut_rwm: Tensor,
                          y: Tensor, sparsity_block_size: int) -> Tensor:
-    output = torch.empty_like(x)
+    output = torch.zeros_like(x)
 
     x_b, x_r, x_c = x.size()
     x_b_s, x_r_s, x_c_s = stride(x)
@@ -387,7 +387,8 @@ def row_wise_add_forward(x: Tensor, sparsity_lut_x: Tensor,
 
 @triton.autotune(
     configs=get_autotune_configs(),
-    key=[]
+    key=[],
+    reset_to_zero=["o"]
 )
 @triton.jit
 def kernel_blocksparse_row_wise_add(x,

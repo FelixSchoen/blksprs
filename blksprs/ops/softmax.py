@@ -51,7 +51,7 @@ def softmax_forward(x: Tensor, sparsity_layout: Tensor,
                     sparsity_lut: Tensor,
                     sparsity_reverse_lut_rws: Tensor,
                     sparsity_block_size: int) -> Tensor:
-    output = torch.empty_like(x)
+    output = torch.zeros_like(x)
 
     x_b, x_r, x_c = x.size()
     x_b_s, x_r_s, x_c_s = stride(x)
@@ -108,7 +108,7 @@ def softmax_backward(ctx, grad_output):
     s_l_s_b, s_l_s_r, s_l_s_c = sparsity_layout_s.size()
     s_l_s_b_s, s_l_s_r_s, s_l_s_c_s = stride(sparsity_layout_s)
 
-    grad_x = torch.empty_like(o, dtype=torch.float)
+    grad_x = torch.zeros_like(o, dtype=torch.float)
 
     triton_grid = lambda meta: [o_b,
                                 triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),
@@ -133,7 +133,8 @@ def softmax_backward(ctx, grad_output):
 
 @triton.autotune(
     configs=get_autotune_configs(),
-    key=[]
+    key=[],
+    reset_to_zero=["o"]
 )
 @triton.jit
 def softmax_kernel(x,
@@ -198,7 +199,8 @@ def softmax_kernel(x,
 
 @triton.autotune(
     configs=get_autotune_configs(),
-    key=[]
+    key=[],
+    reset_to_zero=["o"]
 )
 @triton.jit
 def softmax_kernel_grad(g,

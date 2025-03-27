@@ -60,7 +60,7 @@ def matmul_forward(x: Tensor, y: Tensor,
                    sparsity_layout_y: Tensor, sparsity_reverse_lut_y: Tensor,
                    _: Tensor, sparsity_lut_o: Tensor,
                    sparsity_block_size: int, n_sparse_blocks: int) -> Tensor:
-    output = torch.empty(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
+    output = torch.zeros(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
                          dtype=x.dtype, device=x.device)
 
     x_b, x_r, x_c = x.size()
@@ -118,6 +118,7 @@ def matmul_backward(ctx, grad_output):
 @triton.autotune(
     configs=get_autotune_configs(),
     key=[],
+    reset_to_zero=["o"]
 )
 @triton.jit
 def matmul_kernel(x,
