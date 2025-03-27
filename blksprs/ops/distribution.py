@@ -54,7 +54,7 @@ def gather(src: BlksprsTensor, sparsity_layout_src: Tensor,
 def gather_forward(x: Tensor, sparsity_layout_x: Tensor, sparsity_reverse_lut_x: Tensor,
                    dim: int, i: Tensor, _: Tensor, sparsity_lut_i: Tensor,
                    sparsity_block_size: int) -> Tensor:
-    output = torch.empty_like(i, dtype=x.dtype)
+    output = torch.zeros_like(i, dtype=x.dtype)
 
     x_b, x_r, x_c = x.size()
     x_b_s, x_r_s, x_c_s = stride(x)
@@ -101,6 +101,7 @@ def gather_backward(ctx, grad_output):
 @triton.autotune(
     configs=get_autotune_configs(),
     key=[],
+    reset_to_zero=["o"]
 )
 @triton.jit
 def gather_kernel(x,

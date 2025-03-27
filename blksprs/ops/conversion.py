@@ -54,7 +54,7 @@ def to_sparse(x: Tensor, sparsity_layout: Tensor,
 @triton_op("blksprs::to_sparse", mutates_args={})
 def to_sparse_forward(x: Tensor, _: Tensor,
                       sparsity_lut: Tensor, sparsity_block_size: int, n_sparse_blocks: int) -> Tensor:
-    output = torch.empty(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
+    output = torch.zeros(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
                          dtype=x.dtype, device=x.device)
 
     x_b, x_r, x_c = x.size()
@@ -87,6 +87,7 @@ def to_sparse_backward(ctx, grad_output):
 @triton.autotune(
     configs=get_autotune_configs(),
     key=[],
+    reset_to_zero=["o"]
 )
 @triton.jit
 def to_sparse_kernel(x,
@@ -252,6 +253,7 @@ def to_dense_backward(ctx, grad_output):
 @triton.autotune(
     configs=get_autotune_configs(),
     key=[],
+    restore_value=["o"]
 )
 @triton.jit
 def to_dense_kernel(x,
