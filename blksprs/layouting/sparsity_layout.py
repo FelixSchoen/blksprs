@@ -12,6 +12,7 @@ from blksprs.utils.validation import validate_dimensions, validate_device, \
     validate_contiguous, validate_sparsity, validate_sparsity_block_size
 
 
+@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
 def build_sparsity_layout(x: Tensor, sparsity_block_size: int) -> Tensor:
     """Builds the sparsity layout of a dense tensor in regular form covering its sparse blocks.
 
@@ -199,6 +200,7 @@ def build_sparsity_layout_adaption_kernel(x,
         tl.store(o + blk_o_idx, 1, mask=blk_o_msk)
 
 
+@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
 def build_sparsity_layout_matmul(sparsity_layout_x: Tensor, sparsity_layout_y: Tensor) -> Tensor:
     """Builds the precise sparsity layout of the result of a matrix multiplication between the two input tensors.
 
@@ -213,6 +215,7 @@ def build_sparsity_layout_matmul(sparsity_layout_x: Tensor, sparsity_layout_y: T
     return torch.matmul(sparsity_layout_x.to(torch.float), sparsity_layout_y.to(torch.float)).to(torch.bool)
 
 
+@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
 def build_sparsity_layout_matmul_fast(sparsity_layout_x: Tensor, sparsity_layout_y: Tensor):
     """Builds the approximate sparsity layout of the result of a matrix multiplication between the two input tensors.
 

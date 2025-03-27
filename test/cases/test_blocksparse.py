@@ -326,7 +326,7 @@ def test_blksprs_scatter(config: list, use_amp: bool):
                 x_blksprs = x.clone().requires_grad_(True)
                 i_blksprs = i.clone()
 
-                stock_out_buffer = torch.zeros(size=(b * 2, m * 2, k * 2), device=DEVICE)
+                stock_out_buffer = torch.zeros(size=(b * 2, m * 2, k * 2), dtype=x_stock.dtype, device=DEVICE)
                 stock_scatter_out = _blocksparse_roundtrip(
                     stock_out_buffer.scatter_reduce(dim=dim, index=i_stock.to(torch.int64), src=x_stock,
                                                     reduce="sum"),
@@ -532,7 +532,7 @@ def test_blksprs_softmax(config: list, use_amp: bool):
 
             sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
             x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size,
-                                          fill_value=torch.finfo(x_d.dtype).min)
+                                          fill_value=torch.finfo(torch.get_autocast_gpu_dtype()).min)
 
             for x, sparsity_layout_x in [(x_d, sparsity_layout_x_d), (x_bs, sparsity_layout_x_bs)]:
                 x_stock = x.clone().requires_grad_(True)
@@ -819,7 +819,8 @@ def test_blksprs_adapt_layout(config: list, use_amp: bool):
                 blksprs_adapt_layout_dense_out = bs.ops.to_dense(blksprs_adapt_layout_out, sparsity_layout_x_to,
                                                                  sparsity_block_size_to)
 
-                assert torch.allclose(blksprs_adapt_layout_dense_out.to(stock_dtype), stock_adapt_layout_out, atol=ATOL, rtol=RTOL)
+                assert torch.allclose(blksprs_adapt_layout_dense_out.to(stock_dtype), stock_adapt_layout_out, atol=ATOL,
+                                      rtol=RTOL)
 
                 target = torch.randn_like(stock_adapt_layout_out)
                 stock_loss = torch.nn.L1Loss()
@@ -903,7 +904,7 @@ def test_build_distribution_layout(config: list, use_amp: bool):
             for src, sparsity_layout_src, tgt, sparsity_layout_tgt, i, sparsity_layout_i in [
                 (src_d, sparsity_layout_src_d, tgt_d, sparsity_layout_tgt_d, i_d, sparsity_layout_src_d),
                 (src_bs, sparsity_layout_src_bs, tgt_d, sparsity_layout_tgt_d, i_bs, sparsity_layout_src_bs)]:
-                stock_out_buffer = torch.zeros(size=(b * 2, m * 2, k * 2), device=DEVICE)
+                stock_out_buffer = torch.zeros(size=(b * 2, m * 2, k * 2), dtype=src.dtype, device=DEVICE)
                 stock_scatter_out = _blocksparse_roundtrip(
                     stock_out_buffer.scatter_reduce(dim=dim, index=i.to(torch.int64), src=src, reduce="sum"),
                     sparsity_layout_tgt, sparsity_block_size)
@@ -981,7 +982,8 @@ def test_apply_torch_normalisation(config: list, use_amp: bool):
             blksprs_normalisation_dense_out = bs.ops.to_dense(blksprs_normalisation_out, sparsity_layout_x,
                                                               sparsity_block_size)
 
-            assert torch.allclose(blksprs_normalisation_dense_out.to(stock_dtype), stock_normalisation_out, atol=ATOL, rtol=RTOL)
+            assert torch.allclose(blksprs_normalisation_dense_out.to(stock_dtype), stock_normalisation_out, atol=ATOL,
+                                  rtol=RTOL)
 
 
 @pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
@@ -1005,7 +1007,7 @@ def test_apply_torch_dropout(config: list, use_amp: bool):
             x_blksprs = x.clone().requires_grad_(True)
 
             stock_dropout_out = _blocksparse_roundtrip(dropout(x_stock), sparsity_layout_x,
-                                                             sparsity_block_size)
+                                                       sparsity_block_size)
             stock_dtype = stock_dropout_out.dtype
 
             global SEED
@@ -1016,7 +1018,8 @@ def test_apply_torch_dropout(config: list, use_amp: bool):
             blksprs_normalisation_dense_out = bs.ops.to_dense(blksprs_normalisation_out, sparsity_layout_x,
                                                               sparsity_block_size)
 
-            assert torch.allclose(blksprs_normalisation_dense_out.to(stock_dtype), stock_dropout_out, atol=ATOL, rtol=RTOL)
+            assert torch.allclose(blksprs_normalisation_dense_out.to(stock_dtype), stock_dropout_out, atol=ATOL,
+                                  rtol=RTOL)
 
 
 # Misc

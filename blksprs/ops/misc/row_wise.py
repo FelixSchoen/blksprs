@@ -10,6 +10,7 @@ from blksprs.utils.validation import validate_dimensions, validate_contiguous, v
     validate_sparsity_block_size
 
 
+@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float32)
 def row_wise_sum(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
                  flag_slice_only: bool = False) -> (BlksprsTensor, Tensor):
     """Computes the row-wise sum of a block-sparse tensor.
@@ -156,6 +157,7 @@ def row_wise_sum_kernel(x,
     tl.atomic_add(o + o_idx, buf, o_msk)
 
 
+@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
 def row_wise_max(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
                  flag_slice_only: bool = False) -> (BlksprsTensor, Tensor):
     """Computes the row-wise max of a block-sparse tensor.
@@ -304,6 +306,7 @@ def row_wise_max_kernel(x,
     tl.atomic_max(o + o_idx, buf, o_msk)
 
 
+@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
 def row_wise_add(x: BlksprsTensor, sparsity_layout_x: Tensor, y: Tensor,
                  sparsity_block_size: int) -> BlksprsTensor:
     """For each row in ``y`` adds the value to each value in the corresponding row of the block-sparse tensor ``x``.

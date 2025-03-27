@@ -328,6 +328,7 @@ def to_dense_setup_context(ctx, inputs, output):
 to_dense_forward.register_autograd(to_dense_backward, setup_context=to_dense_setup_context)
 
 
+@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
 def adapt_layout(x: BlksprsTensor, sparsity_layout_from: Tensor, sparsity_block_size_from: int,
                  sparsity_block_size_to: int, sparsity_layout_to: Tensor = None) -> (BlksprsTensor, Tensor):
     """Adapts the sparsity layout of a block-sparse tensor, resulting in a new block-sparse tensor in compressed form
