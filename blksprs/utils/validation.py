@@ -27,8 +27,8 @@ def validate_dtype_float(*tensors: Tensor) -> None:
         return
 
     for tensor in tensors:
-        if tensor.dtype != torch.float32:
-            raise ValueError("Tensor must have float32 dtype")
+        if tensor.dtype != torch.float16 and tensor.dtype != torch.float32:
+            raise ValueError("Tensor must have either float16 or float32 dtype")
 
 
 def validate_dtype_int(*tensors: Tensor) -> None:
@@ -38,7 +38,7 @@ def validate_dtype_int(*tensors: Tensor) -> None:
     for tensor in tensors:
         if (tensor.dtype !=
                 torch.int32 and tensor.dtype != torch.int64):
-            raise ValueError("Tensor must have int32 or int64 dtype")
+            raise ValueError("Tensor must have either int32 or int64 dtype")
 
 
 def validate_device(*tensors: Tensor) -> None:
@@ -51,7 +51,7 @@ def validate_device(*tensors: Tensor) -> None:
         if i == 0:
             device = tensor.device
 
-            if not device.type == 'cuda':
+            if not device.type == "cuda":
                 raise ValueError("Tensors must be on GPU")
 
         if tensor.device != device:
