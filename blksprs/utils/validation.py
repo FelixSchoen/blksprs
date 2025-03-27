@@ -26,9 +26,26 @@ def validate_dtype_float(*tensors: Tensor) -> None:
     if _check_skip_validation():
         return
 
-    for tensor in tensors:
+    dtype = None
+
+    for i, tensor in enumerate(tensors):
+        if i == 0:
+            dtype = tensor.dtype
+
         if tensor.dtype != torch.float16 and tensor.dtype != torch.float32:
             raise ValueError("Tensor must have either float16 or float32 dtype")
+
+        if tensor.dtype != dtype:
+            raise ValueError("Tensors must have same dtype")
+
+
+def validate_dtype_float_32(*tensors: Tensor) -> None:
+    if _check_skip_validation():
+        return
+
+    for tensor in tensors:
+        if tensor.dtype != torch.float32:
+            raise ValueError("Tensor must have float32 dtype")
 
 
 def validate_dtype_int(*tensors: Tensor) -> None:

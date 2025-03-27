@@ -9,9 +9,10 @@ from blksprs.ops.misc.row_wise import row_wise_sum, row_wise_max, row_wise_sub
 from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import stride, get_autotune_configs
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
-    validate_sparsity, validate_sparsity_block_size
+    validate_sparsity, validate_sparsity_block_size, validate_dtype_float_32
 
 
+@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float32)
 def softmax(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int, lut: dict = None) -> BlksprsTensor:
     """Computes the softmax of a block-sparse tensor in compressed form.
 
@@ -32,6 +33,7 @@ def softmax(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
 
     validate_dimensions(x)
     validate_contiguous(x)
+    validate_dtype_float_32(x)
     validate_device(x)
     validate_sparsity(sparsity_block_size, (x, sparsity_layout))
     validate_sparsity_block_size(sparsity_block_size, x)

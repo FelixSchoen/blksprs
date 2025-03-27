@@ -8,6 +8,7 @@ from blksprs.utils.validation import validate_dimensions, validate_contiguous, v
     validate_sparsity, validate_sparsity_block_size
 
 
+@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
 def repeat(x: BlksprsTensor, sparsity_layout_x: Tensor, repeats: tuple[int, int, int],
            sparsity_block_size: int, sparsity_layout_output: Tensor = None, lut: dict = None) -> (
         BlksprsTensor, Tensor):
@@ -50,6 +51,7 @@ def repeat(x: BlksprsTensor, sparsity_layout_x: Tensor, repeats: tuple[int, int,
         lut["sparsity_reverse_lut"], sparsity_block_size, lut["n_sparse_blocks"])), lut["sparsity_layout_o"]
 
 
+@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
 def repeat_interleave(x: BlksprsTensor, sparsity_layout_x: Tensor, repeats: int,
                       sparsity_block_size: int, sparsity_layout_output: Tensor = None, lut: dict = None) -> (
         BlksprsTensor, Tensor):

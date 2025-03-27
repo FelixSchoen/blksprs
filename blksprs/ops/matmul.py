@@ -11,6 +11,7 @@ from blksprs.utils.validation import validate_contiguous, validate_dimensions, v
     validate_sparsity, validate_sparsity_block_size, validate_dtype_float
 
 
+@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
 def matmul(x: BlksprsTensor, sparsity_layout_x: Tensor,
            y: BlksprsTensor, sparsity_layout_y: Tensor,
            sparsity_layout_output: Tensor,

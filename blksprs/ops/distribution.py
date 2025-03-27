@@ -11,6 +11,7 @@ from blksprs.utils.validation import validate_contiguous, validate_dimensions, v
     validate_sparsity, validate_dtype_int, validate_sparsity_block_size
 
 
+@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
 def gather(src: BlksprsTensor, sparsity_layout_src: Tensor,
            dim: int,
            idx: BlksprsTensor, sparsity_layout_idx: Tensor,
@@ -247,6 +248,7 @@ def scatter(src: BlksprsTensor, sparsity_layout_src: Tensor,
                           reduce_op="none", lut=lut)
 
 
+@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
 def scatter_reduce(src: BlksprsTensor, sparsity_layout_src: Tensor,
                    dim: int,
                    idx: BlksprsTensor,

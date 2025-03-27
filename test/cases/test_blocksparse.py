@@ -63,7 +63,6 @@ TEST_CONFIGURATIONS = [
     (2, 64, 64, 64, 32, 1),
     (1, 64, 64, 64, 32, 0.25),
 ]
-TEST_DTYPES = [torch.float32, torch.float16, ]
 
 # Tolerances
 ATOL = 2e-2
@@ -100,9 +99,12 @@ def override_pytorch_repr():
 
 # Ops
 
+@pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
+@pytest.mark.parametrize("use_amp", [True, False])
+def test_blksprs_to_sparse(config: list, use_amp: bool):
+    with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+        b, m, n, k, sparsity_block_size, sparsity_percentage = config
 
-def test_blksprs_to_sparse():
-    for b, m, _, k, sparsity_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
@@ -113,11 +115,12 @@ def test_blksprs_to_sparse():
             x_stock = x.clone().requires_grad_(True)
             x_blksprs = x.clone().requires_grad_(True)
 
-            stock_to_sparse_out = slow_to_sparse(x_stock, sparsity_layout_x_s, sparsity_block_size)
+            stock_to_sparse_out = _slow_to_sparse(x_stock, sparsity_layout_x_s, sparsity_block_size)
+            stock_dtype = stock_to_sparse_out.dtype
 
             blksprs_to_sparse_out = bs.ops.to_sparse(x_blksprs, sparsity_layout_x_s, sparsity_block_size)
 
-            assert torch.allclose(blksprs_to_sparse_out, stock_to_sparse_out, atol=ATOL, rtol=RTOL)
+            assert torch.allclose(blksprs_to_sparse_out.to(stock_dtype), stock_to_sparse_out, atol=ATOL, rtol=RTOL)
 
             target = torch.randn_like(stock_to_sparse_out)
             stock_loss = torch.nn.L1Loss()
@@ -133,8 +136,12 @@ def test_blksprs_to_sparse():
                 assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
 
 
-def test_blksprs_to_dense():
-    for b, m, _, k, sparsity_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+@pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
+@pytest.mark.parametrize("use_amp", [True, False])
+def test_blksprs_to_dense(config: list, use_amp: bool):
+    with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+        b, m, n, k, sparsity_block_size, sparsity_percentage = config
+
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
@@ -145,14 +152,15 @@ def test_blksprs_to_dense():
             x_stock = x.clone().requires_grad_(True)
             x_blksprs = x.clone().requires_grad_(True)
 
-            stock_to_sparse_out = slow_to_sparse(x_stock, sparsity_layout_x_s, sparsity_block_size)
-            stock_to_dense_out = slow_to_dense(stock_to_sparse_out, sparsity_layout_x_s,
-                                               sparsity_block_size)
+            stock_to_sparse_out = _slow_to_sparse(x_stock, sparsity_layout_x_s, sparsity_block_size)
+            stock_to_dense_out = _slow_to_dense(stock_to_sparse_out, sparsity_layout_x_s,
+                                                sparsity_block_size)
+            stock_dtype = stock_to_dense_out.dtype
 
             blksprs_to_sparse_out = bs.ops.to_sparse(x_blksprs, sparsity_layout_x_s, sparsity_block_size)
             blksprs_to_dense_out = bs.ops.to_dense(blksprs_to_sparse_out, sparsity_layout_x_s, sparsity_block_size)
 
-            assert torch.allclose(blksprs_to_dense_out, stock_to_dense_out, atol=ATOL, rtol=RTOL)
+            assert torch.allclose(blksprs_to_dense_out.to(stock_dtype), stock_to_dense_out, atol=ATOL, rtol=RTOL)
 
             target = torch.randn_like(stock_to_dense_out)
             stock_loss = torch.nn.L1Loss()
@@ -168,8 +176,12 @@ def test_blksprs_to_dense():
                 assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
 
 
-def test_blksprs_transpose():
-    for b, m, _, k, sparsity_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+@pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
+@pytest.mark.parametrize("use_amp", [True, False])
+def test_blksprs_transpose(config: list, use_amp: bool):
+    with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+        b, m, n, k, sparsity_block_size, sparsity_percentage = config
+
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
@@ -181,13 +193,16 @@ def test_blksprs_transpose():
             x_blksprs = x.clone().requires_grad_(True)
 
             stock_transpose_out = x_stock.transpose(1, 2)
+            stock_dtype = stock_transpose_out.dtype
+
             blksprs_transpose_out, blksprs_sparsity_layout_t = bs.ops.transpose(
                 bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
                 sparsity_layout_x, sparsity_block_size)
             blksprs_transpose_dense_out = bs.ops.to_dense(blksprs_transpose_out, blksprs_sparsity_layout_t,
                                                           sparsity_block_size)
 
-            assert torch.allclose(blksprs_transpose_dense_out, stock_transpose_out, atol=ATOL, rtol=RTOL)
+            assert torch.allclose(blksprs_transpose_dense_out.to(stock_dtype), stock_transpose_out, atol=ATOL,
+                                  rtol=RTOL)
 
             target = torch.randn_like(stock_transpose_out)
             stock_loss = torch.nn.L1Loss()
@@ -201,8 +216,12 @@ def test_blksprs_transpose():
             assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
 
 
-def test_blksprs_gather():
-    for b, m, _, k, sparsity_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+@pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
+@pytest.mark.parametrize("use_amp", [True, False])
+def test_blksprs_gather(config: list, use_amp: bool):
+    with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+        b, m, n, k, sparsity_block_size, sparsity_percentage = config
+
         dims = [-2, -1, 0, 1, 2]
         for dim in dims:
             x_d = torch.randn(size=(b * 2, m * 2, k * 2), device=DEVICE)
@@ -236,8 +255,11 @@ def test_blksprs_gather():
                 x_blksprs = x.clone().requires_grad_(True)
                 i_blksprs = i.clone()
 
-                stock_gather_out = _blocksparse_roundtrip(torch.gather(x_stock, dim=dim, index=i_stock.to(torch.int64)),
-                                                          sparsity_layout_i, sparsity_block_size)
+                stock_gather_out = _blocksparse_roundtrip(
+                    torch.gather(x_stock, dim=dim, index=i_stock.to(torch.int64)),
+                    sparsity_layout_i, sparsity_block_size)
+                stock_dtype = stock_gather_out.dtype
+
                 blksprs_gather_out = bs.ops.gather(
                     bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
                     sparsity_layout_x,
@@ -248,10 +270,7 @@ def test_blksprs_gather():
                 blksprs_gather_dense_out = bs.ops.to_dense(blksprs_gather_out, sparsity_layout_i,
                                                            sparsity_block_size)
 
-                assert torch.allclose(blksprs_gather_dense_out.to(torch.float), stock_gather_out.to(torch.float),
-                                      atol=ATOL, rtol=RTOL)
-
-                pass
+                assert torch.allclose(blksprs_gather_dense_out.to(stock_dtype), stock_gather_out, atol=ATOL, rtol=RTOL)
 
                 target = torch.randn_like(stock_gather_out)
                 stock_loss = torch.nn.L1Loss()
@@ -262,12 +281,16 @@ def test_blksprs_gather():
                 stock_loss.backward()
                 blksprs_loss.backward()
 
-                assert torch.allclose(x_blksprs.grad.to(torch.float), x_stock.grad.to(torch.float), atol=ATOL,
-                                      rtol=RTOL)
+                assert torch.allclose(x_blksprs.grad.to(torch.float), x_stock.grad.to(torch.float),
+                                      atol=ATOL, rtol=RTOL)
 
 
-def test_blksprs_scatter():
-    for b, m, _, k, sparsity_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+@pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
+@pytest.mark.parametrize("use_amp", [True, False])
+def test_blksprs_scatter(config: list, use_amp: bool):
+    with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+        b, m, n, k, sparsity_block_size, sparsity_percentage = config
+
         dims = [-2, -1, 0, 1, 2]
         for dim in dims:
             x_d = torch.randn(size=(b, m, k), device=DEVICE)
@@ -297,8 +320,7 @@ def test_blksprs_scatter():
 
             for x, sparsity_layout_x, i, sparsity_layout_i, sparsity_layout_o in [
                 (x_d, sparsity_layout_x_d, i_d, sparsity_layout_x_d, sparsity_layout_o_d),
-                (x_bs, sparsity_layout_x_bs, i_bs, sparsity_layout_x_bs, sparsity_layout_o_bs),
-            ]:
+                (x_bs, sparsity_layout_x_bs, i_bs, sparsity_layout_x_bs, sparsity_layout_o_bs)]:
                 x_stock = x.clone().requires_grad_(True)
                 i_stock = i.clone()
                 x_blksprs = x.clone().requires_grad_(True)
@@ -306,8 +328,10 @@ def test_blksprs_scatter():
 
                 stock_out_buffer = torch.zeros(size=(b * 2, m * 2, k * 2), device=DEVICE)
                 stock_scatter_out = _blocksparse_roundtrip(
-                    stock_out_buffer.scatter_reduce(dim=dim, index=i_stock.to(torch.int64), src=x_stock, reduce="sum"),
+                    stock_out_buffer.scatter_reduce(dim=dim, index=i_stock.to(torch.int64), src=x_stock,
+                                                    reduce="sum"),
                     sparsity_layout_o, sparsity_block_size)
+                stock_dtype = stock_scatter_out.dtype
 
                 blksprs_scatter_out = bs.ops.scatter_reduce(
                     bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
@@ -317,9 +341,11 @@ def test_blksprs_scatter():
                     sparsity_layout_o,
                     sparsity_block_size,
                     reduce_op="sum")
-                blksprs_scatter_dense_out = bs.ops.to_dense(blksprs_scatter_out, sparsity_layout_o, sparsity_block_size)
+                blksprs_scatter_dense_out = bs.ops.to_dense(blksprs_scatter_out, sparsity_layout_o,
+                                                            sparsity_block_size)
 
-                assert torch.allclose(blksprs_scatter_dense_out, stock_scatter_out, atol=ATOL, rtol=RTOL)
+                assert torch.allclose(blksprs_scatter_dense_out.to(stock_dtype), stock_scatter_out, atol=ATOL,
+                                      rtol=RTOL)
 
                 target = torch.randn_like(stock_scatter_out)
                 stock_loss = torch.nn.L1Loss()
@@ -333,57 +359,67 @@ def test_blksprs_scatter():
                 assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
 
 
-def test_blksprs_matmul():
-    for b, m, n, k, sparsity_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
-        for d_t in TEST_DTYPES:
-            x_d = torch.randn(size=(b, m, k), dtype=d_t, device=DEVICE)
-            sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
-            y_d = torch.randn(size=(b, n, k), dtype=d_t, device=DEVICE).transpose(-1, -2).contiguous()
-            sparsity_layout_y_d = torch.ones(size=(b, k // sparsity_block_size, n // sparsity_block_size), device=DEVICE)
+@pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
+@pytest.mark.parametrize("use_amp", [True, False])
+def test_blksprs_matmul(config: list, use_amp: bool):
+    with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+        b, m, n, k, sparsity_block_size, sparsity_percentage = config
 
-            sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
-            x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size)
-            sparsity_layout_y_bs = _get_blocksparse_layout(b, k, n, sparsity_block_size, sparsity_percentage)
-            y_bs = _blocksparse_roundtrip(y_d, sparsity_layout_y_bs, sparsity_block_size)
+        x_d = torch.randn(size=(b, m, k), device=DEVICE)
+        sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
+        y_d = torch.randn(size=(b, n, k), device=DEVICE).transpose(-1, -2).contiguous()
+        sparsity_layout_y_d = torch.ones(size=(b, k // sparsity_block_size, n // sparsity_block_size), device=DEVICE)
 
-            sparsity_layout_o_d = torch.ones(size=(b, m // sparsity_block_size, n // sparsity_block_size), device=DEVICE)
-            sparsity_layout_o_bs = bs.layouting.build_sparsity_layout_matmul_fast(sparsity_layout_x_bs,
-                                                                                  sparsity_layout_y_bs)
+        sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
+        x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size)
+        sparsity_layout_y_bs = _get_blocksparse_layout(b, k, n, sparsity_block_size, sparsity_percentage)
+        y_bs = _blocksparse_roundtrip(y_d, sparsity_layout_y_bs, sparsity_block_size)
 
-            for x, sparsity_layout_x, y, sparsity_layout_y, sparsity_layout_o in [
-                (x_d, sparsity_layout_x_d, y_d, sparsity_layout_y_d, sparsity_layout_o_d),
-                (x_bs, sparsity_layout_x_bs, y_bs, sparsity_layout_y_bs, sparsity_layout_o_bs),
-                (x_bs, sparsity_layout_x_bs, y_bs, sparsity_layout_y_bs, sparsity_layout_o_d)]:
-                x_stock = x.clone().requires_grad_(True)
-                y_stock = y.clone().requires_grad_(True)
-                x_blksprs = x.clone().requires_grad_(True)
-                y_blksprs = y.clone().requires_grad_(True)
+        sparsity_layout_o_d = torch.ones(size=(b, m // sparsity_block_size, n // sparsity_block_size),
+                                         device=DEVICE)
+        sparsity_layout_o_bs = bs.layouting.build_sparsity_layout_matmul_fast(sparsity_layout_x_bs,
+                                                                              sparsity_layout_y_bs)
 
-                stock_matmul_out = torch.matmul(x_stock, y_stock)
-                blksprs_matmul_out = bs.ops.matmul(bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
-                                                   sparsity_layout_x,
-                                                   bs.ops.to_sparse(y_blksprs, sparsity_layout_y, sparsity_block_size),
-                                                   sparsity_layout_y,
-                                                   sparsity_layout_o, sparsity_block_size)
-                blksprs_matmul_dense_out = bs.ops.to_dense(blksprs_matmul_out, sparsity_layout_o, sparsity_block_size)
+        for x, sparsity_layout_x, y, sparsity_layout_y, sparsity_layout_o in [
+            (x_d, sparsity_layout_x_d, y_d, sparsity_layout_y_d, sparsity_layout_o_d),
+            (x_bs, sparsity_layout_x_bs, y_bs, sparsity_layout_y_bs, sparsity_layout_o_bs),
+            (x_bs, sparsity_layout_x_bs, y_bs, sparsity_layout_y_bs, sparsity_layout_o_d)]:
+            x_stock = x.clone().requires_grad_(True)
+            y_stock = y.clone().requires_grad_(True)
+            x_blksprs = x.clone().requires_grad_(True)
+            y_blksprs = y.clone().requires_grad_(True)
 
-                assert torch.allclose(blksprs_matmul_dense_out, stock_matmul_out, atol=ATOL, rtol=RTOL)
+            stock_matmul_out = torch.matmul(x_stock, y_stock)
+            stock_dtype = stock_matmul_out.dtype
 
-                target = torch.randn_like(stock_matmul_out)
-                stock_loss = torch.nn.L1Loss()
-                blksprs_loss = torch.nn.L1Loss()
-                stock_loss = stock_loss(stock_matmul_out, target)
-                blksprs_loss = blksprs_loss(blksprs_matmul_dense_out, target)
+            blksprs_matmul_out = bs.ops.matmul(bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
+                                               sparsity_layout_x,
+                                               bs.ops.to_sparse(y_blksprs, sparsity_layout_y, sparsity_block_size),
+                                               sparsity_layout_y,
+                                               sparsity_layout_o, sparsity_block_size)
+            blksprs_matmul_dense_out = bs.ops.to_dense(blksprs_matmul_out, sparsity_layout_o, sparsity_block_size)
 
-                stock_loss.backward()
-                blksprs_loss.backward()
+            assert torch.allclose(blksprs_matmul_dense_out.to(stock_dtype), stock_matmul_out, atol=ATOL, rtol=RTOL)
 
-                assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
-                assert torch.allclose(y_blksprs.grad, y_stock.grad, atol=ATOL, rtol=RTOL)
+        target = torch.randn_like(stock_matmul_out)
+        stock_loss = torch.nn.L1Loss()
+        blksprs_loss = torch.nn.L1Loss()
+        stock_loss = stock_loss(stock_matmul_out, target)
+        blksprs_loss = blksprs_loss(blksprs_matmul_dense_out, target)
+
+        stock_loss.backward()
+        blksprs_loss.backward()
+
+        assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
+        assert torch.allclose(y_blksprs.grad, y_stock.grad, atol=ATOL, rtol=RTOL)
 
 
-def test_repeat():
-    for b, m, _, k, sparsity_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+@pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
+@pytest.mark.parametrize("use_amp", [True, False])
+def test_repeat(config: list, use_amp: bool):
+    with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+        b, m, n, k, sparsity_block_size, sparsity_percentage = config
+
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
@@ -406,6 +442,8 @@ def test_repeat():
 
                 stock_repeat_out = _blocksparse_roundtrip(x_stock.repeat(repeats), sparsity_layout_o_bs,
                                                           sparsity_block_size)
+                stock_dtype = stock_repeat_out.dtype
+
                 blksprs_repeat_out, sparsity_layout_output = bs.ops.repeat(
                     bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
                     sparsity_layout_x, repeats,
@@ -413,7 +451,7 @@ def test_repeat():
                 blksprs_repeat_dense_out = bs.ops.to_dense(blksprs_repeat_out, sparsity_layout_output,
                                                            sparsity_block_size)
 
-                assert torch.allclose(blksprs_repeat_dense_out, stock_repeat_out, atol=ATOL, rtol=RTOL)
+                assert torch.allclose(blksprs_repeat_dense_out.to(stock_dtype), stock_repeat_out, atol=ATOL, rtol=RTOL)
 
                 target = torch.randn_like(stock_repeat_out)
                 stock_loss = torch.nn.L1Loss()
@@ -427,8 +465,12 @@ def test_repeat():
                 assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
 
 
-def test_repeat_interleave():
-    for b, m, n, _, sparsity_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+@pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
+@pytest.mark.parametrize("use_amp", [True, False])
+def test_repeat_interleave(config: list, use_amp: bool):
+    with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+        b, m, n, k, sparsity_block_size, sparsity_percentage = config
+
         x_d = torch.randn(size=(b, m, n), device=DEVICE)
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, n // sparsity_block_size), device=DEVICE)
 
@@ -451,6 +493,7 @@ def test_repeat_interleave():
                     torch.repeat_interleave(x_stock, num_repeats, dim=0),
                     sparsity_layout_o_bs,
                     sparsity_block_size)
+                stock_dtype = stock_repeat_interleave_out.dtype
 
                 blksprs_repeat_interleave_out, sparsity_layout_output = bs.ops.repeat_interleave(
                     bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
@@ -460,7 +503,8 @@ def test_repeat_interleave():
                                                                       sparsity_layout_output,
                                                                       sparsity_block_size)
 
-                assert torch.allclose(blksprs_repeat_interleave_dense_out, stock_repeat_interleave_out, atol=ATOL,
+                assert torch.allclose(blksprs_repeat_interleave_dense_out.to(stock_dtype), stock_repeat_interleave_out,
+                                      atol=ATOL,
                                       rtol=RTOL)
 
                 target = torch.randn_like(stock_repeat_interleave_out)
@@ -475,39 +519,55 @@ def test_repeat_interleave():
                 assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
 
 
-def test_blksprs_softmax():
-    for b, m, _, k, sparsity_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
-        x_d = torch.randn(size=(b, m, k), device=DEVICE)
-        sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
+@pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
+@pytest.mark.parametrize("use_amp", [True, False])
+def test_blksprs_softmax(config: list, use_amp: bool):
+    with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+        b, m, n, k, sparsity_block_size, sparsity_percentage = config
 
-        sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
-        x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size, fill_value=float('-1e12'))
+        with torch.amp.autocast(device_type="cuda"):
+            x_d = torch.randn(size=(b, m, k), device=DEVICE)
+            sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size),
+                                             device=DEVICE)
 
-        for x, sparsity_layout_x in [(x_d, sparsity_layout_x_d), (x_bs, sparsity_layout_x_bs)]:
-            x_stock = x.clone().requires_grad_(True)
-            x_blksprs = x.clone().requires_grad_(True)
+            sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
+            x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size,
+                                          fill_value=torch.finfo(x_d.dtype).min)
 
-            stock_softmax_out = torch.softmax(x_stock, dim=-1)
-            blksprs_softmax_out = bs.ops.softmax(bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
-                                                 sparsity_layout_x, sparsity_block_size)
-            blksprs_softmax_dense_out = bs.ops.to_dense(blksprs_softmax_out, sparsity_layout_x, sparsity_block_size)
+            for x, sparsity_layout_x in [(x_d, sparsity_layout_x_d), (x_bs, sparsity_layout_x_bs)]:
+                x_stock = x.clone().requires_grad_(True)
+                x_blksprs = x.clone().requires_grad_(True)
 
-            assert torch.allclose(blksprs_softmax_dense_out, stock_softmax_out, atol=ATOL, rtol=RTOL)
+                stock_softmax_out = torch.softmax(x_stock, dim=-1)
+                stock_dtype = stock_softmax_out.dtype
 
-            target = torch.randn_like(stock_softmax_out)
-            stock_loss = torch.nn.L1Loss()
-            blksprs_loss = torch.nn.L1Loss()
-            stock_loss = stock_loss(stock_softmax_out, target)
-            blksprs_loss = blksprs_loss(blksprs_softmax_dense_out, target)
+                blksprs_softmax_out = bs.ops.softmax(
+                    bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
+                    sparsity_layout_x, sparsity_block_size)
+                blksprs_softmax_dense_out = bs.ops.to_dense(blksprs_softmax_out, sparsity_layout_x,
+                                                            sparsity_block_size)
 
-            stock_loss.backward()
-            blksprs_loss.backward()
+                assert torch.allclose(blksprs_softmax_dense_out.to(stock_dtype), stock_softmax_out, atol=ATOL,
+                                      rtol=RTOL)
 
-            assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
+                target = torch.randn_like(stock_softmax_out)
+                stock_loss = torch.nn.L1Loss()
+                blksprs_loss = torch.nn.L1Loss()
+                stock_loss = stock_loss(stock_softmax_out, target)
+                blksprs_loss = blksprs_loss(blksprs_softmax_dense_out, target)
+
+                stock_loss.backward()
+                blksprs_loss.backward()
+
+                assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
 
 
-def test_blksprs_split():
-    for b, m, _, k, sparsity_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+@pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
+@pytest.mark.parametrize("use_amp", [True, False])
+def test_blksprs_split(config: list, use_amp: bool):
+    with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+        b, m, n, k, sparsity_block_size, sparsity_percentage = config
+
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
@@ -529,6 +589,8 @@ def test_blksprs_split():
                                                    x_stock.size(2) // num_partitions).permute(0, 2, 1, 3)
                                    .reshape(x_stock.size(0) * num_partitions, x_stock.size(1),
                                             x_stock.size(2) // num_partitions))
+                stock_dtype = stock_split_out.dtype
+
                 blksprs_split_out, sparsity_layout_output = bs.ops.split(
                     bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
                     sparsity_layout_x, num_partitions, -1,
@@ -536,7 +598,7 @@ def test_blksprs_split():
                 blksprs_split_dense_out = bs.ops.to_dense(blksprs_split_out, sparsity_layout_output,
                                                           sparsity_block_size)
 
-                assert torch.allclose(blksprs_split_dense_out, stock_split_out, atol=ATOL, rtol=RTOL)
+                assert torch.allclose(blksprs_split_dense_out.to(stock_dtype), stock_split_out, atol=ATOL, rtol=RTOL)
 
                 target = torch.randn_like(stock_split_out)
                 stock_loss = torch.nn.L1Loss()
@@ -550,8 +612,12 @@ def test_blksprs_split():
                 assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
 
 
-def test_blksprs_merge():
-    for b, m, _, k, sparsity_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+@pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
+@pytest.mark.parametrize("use_amp", [True, False])
+def test_blksprs_merge(config: list, use_amp: bool):
+    with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+        b, m, n, k, sparsity_block_size, sparsity_percentage = config
+
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
@@ -573,21 +639,25 @@ def test_blksprs_merge():
                                                    x_stock.size(2) // num_partitions).permute(0, 2, 1, 3)
                                    .reshape(x_stock.size(0) * num_partitions, x_stock.size(1),
                                             x_stock.size(2) // num_partitions))
-                stock_merge_out = (stock_split_out.reshape(stock_split_out.size(0) // num_partitions, num_partitions,
-                                                           stock_split_out.size(1), stock_split_out.size(2))
-                                   .permute(0, 2, 1, 3).reshape(stock_split_out.size(0) // num_partitions,
-                                                                stock_split_out.size(1),
-                                                                stock_split_out.size(2) * num_partitions))
+                stock_merge_out = (
+                    stock_split_out.reshape(stock_split_out.size(0) // num_partitions, num_partitions,
+                                            stock_split_out.size(1), stock_split_out.size(2))
+                    .permute(0, 2, 1, 3).reshape(stock_split_out.size(0) // num_partitions,
+                                                 stock_split_out.size(1),
+                                                 stock_split_out.size(2) * num_partitions))
+                stock_dtype = stock_merge_out.dtype
+
                 blksprs_split_out, sparsity_layout_split = bs.ops.split(
                     bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
                     sparsity_layout_x, num_partitions, -1,
                     sparsity_block_size)
                 blksprs_merge_out, sparsity_layout_merge = bs.ops.merge(blksprs_split_out, sparsity_layout_split,
                                                                         num_partitions, -1, sparsity_block_size)
-                blksprs_merge_dense_out = bs.ops.to_dense(blksprs_merge_out, sparsity_layout_merge, sparsity_block_size)
+                blksprs_merge_dense_out = bs.ops.to_dense(blksprs_merge_out, sparsity_layout_merge,
+                                                          sparsity_block_size)
 
                 assert torch.allclose(stock_merge_out, x_stock, atol=ATOL, rtol=RTOL)
-                assert torch.allclose(blksprs_merge_dense_out, stock_merge_out, atol=ATOL, rtol=RTOL)
+                assert torch.allclose(blksprs_merge_dense_out.to(stock_dtype), stock_merge_out, atol=ATOL, rtol=RTOL)
 
                 target = torch.randn_like(stock_merge_out)
                 stock_loss = torch.nn.L1Loss()
@@ -601,8 +671,12 @@ def test_blksprs_merge():
                 assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
 
 
-def test_blksprs_row_wise_sum():
-    for b, m, _, k, sparsity_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+@pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
+@pytest.mark.parametrize("use_amp", [True, False])
+def test_blksprs_row_wise_sum(config: list, use_amp: bool):
+    with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+        b, m, n, k, sparsity_block_size, sparsity_percentage = config
+
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
@@ -614,6 +688,8 @@ def test_blksprs_row_wise_sum():
             x_blksprs = x.clone().requires_grad_(True)
 
             stock_sum_out = torch.sum(x_stock, dim=-1)
+            stock_dtype = stock_sum_out.dtype
+
             blksprs_row_wise_sum_out, sparsity_layout_output = bs.ops.misc.row_wise_sum(
                 bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size), sparsity_layout_x,
                 sparsity_block_size)
@@ -622,11 +698,15 @@ def test_blksprs_row_wise_sum():
 
             blksprs_row_wise_sum_out_slice = blksprs_row_wise_sum_dense_out[..., 0]
 
-            assert torch.allclose(blksprs_row_wise_sum_out_slice, stock_sum_out, atol=ATOL, rtol=RTOL)
+            assert torch.allclose(blksprs_row_wise_sum_out_slice.to(stock_dtype), stock_sum_out, atol=ATOL, rtol=RTOL)
 
 
-def test_blksprs_row_wise_max():
-    for b, m, _, k, sparsity_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+@pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
+@pytest.mark.parametrize("use_amp", [True, False])
+def test_blksprs_row_wise_max(config: list, use_amp: bool):
+    with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+        b, m, n, k, sparsity_block_size, sparsity_percentage = config
+
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
@@ -640,6 +720,8 @@ def test_blksprs_row_wise_max():
             x_blksprs = x.clone().requires_grad_(True)
 
             stock_max_out = torch.max(x_stock, dim=-1).values
+            stock_dtype = stock_max_out.dtype
+
             blksprs_row_wise_max_out, sparsity_layout_output = bs.ops.misc.row_wise_max(
                 bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size), sparsity_layout_x,
                 sparsity_block_size)
@@ -648,11 +730,15 @@ def test_blksprs_row_wise_max():
 
             blksprs_row_wise_max_out_slice = blksprs_row_wise_max_dense_out[..., 0]
 
-            assert torch.allclose(blksprs_row_wise_max_out_slice, stock_max_out, atol=ATOL, rtol=RTOL)
+            assert torch.allclose(blksprs_row_wise_max_out_slice.to(stock_dtype), stock_max_out, atol=ATOL, rtol=RTOL)
 
 
-def test_blksprs_row_wise_add():
-    for b, m, _, k, sparsity_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+@pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
+@pytest.mark.parametrize("use_amp", [True, False])
+def test_blksprs_row_wise_add(config: list, use_amp: bool):
+    with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+        b, m, n, k, sparsity_block_size, sparsity_percentage = config
+
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
@@ -670,6 +756,7 @@ def test_blksprs_row_wise_add():
                                        dim=-1).values).unsqueeze(-1)
             stock_rwa_out = _blocksparse_roundtrip(x_stock + stock_max_out, sparsity_layout_x,
                                                    sparsity_block_size)
+            stock_dtype = stock_rwa_out.dtype
 
             blksprs_row_wise_max_out, sparsity_layout_output = bs.ops.misc.row_wise_max(
                 bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size), sparsity_layout_x,
@@ -681,11 +768,15 @@ def test_blksprs_row_wise_add():
             blksprs_row_wise_add_dense_out = bs.ops.to_dense(blksprs_row_wise_add_out, sparsity_layout_x,
                                                              sparsity_block_size)
 
-            assert torch.allclose(blksprs_row_wise_add_dense_out, stock_rwa_out, atol=ATOL, rtol=RTOL)
+            assert torch.allclose(blksprs_row_wise_add_dense_out.to(stock_dtype), stock_rwa_out, atol=ATOL, rtol=RTOL)
 
 
-def test_blksprs_adapt_layout():
-    for b, m, _, k, sparsity_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+@pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
+@pytest.mark.parametrize("use_amp", [True, False])
+def test_blksprs_adapt_layout(config: list, use_amp: bool):
+    with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+        b, m, n, k, sparsity_block_size, sparsity_percentage = config
+
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
 
         for sparsity_block_size_from, sparsity_block_size_to in [(sparsity_block_size, sparsity_block_size),
@@ -710,8 +801,7 @@ def test_blksprs_adapt_layout():
                 (x_bs_from, sparsity_layout_x_bs_from, sparsity_layout_x_bs_to_same, False),
                 (x_bs_from, sparsity_layout_x_bs_from, sparsity_layout_x_bs_to, True),
                 (x_d, sparsity_layout_x_d_from, sparsity_layout_x_bs_to, True),
-                (x_bs_from, sparsity_layout_x_bs_from, sparsity_layout_x_bs_to_less, True),
-            ]:
+                (x_bs_from, sparsity_layout_x_bs_from, sparsity_layout_x_bs_to_less, True)]:
                 x_from_stock = x_from.clone().requires_grad_(True)
                 x_from_blksprs = x_from.clone().requires_grad_(True)
 
@@ -719,6 +809,7 @@ def test_blksprs_adapt_layout():
                     _blocksparse_roundtrip(x_from_stock, sparsity_layout_x_from,
                                            sparsity_block_size_from),
                     sparsity_layout_x_to, sparsity_block_size_to)
+                stock_dtype = stock_adapt_layout_out.dtype
 
                 blksprs_adapt_layout_out, _ = bs.ops.adapt_layout(
                     bs.ops.to_sparse(x_from_blksprs, sparsity_layout_x_from, sparsity_block_size_from),
@@ -728,7 +819,7 @@ def test_blksprs_adapt_layout():
                 blksprs_adapt_layout_dense_out = bs.ops.to_dense(blksprs_adapt_layout_out, sparsity_layout_x_to,
                                                                  sparsity_block_size_to)
 
-                assert torch.allclose(blksprs_adapt_layout_dense_out, stock_adapt_layout_out, atol=ATOL, rtol=RTOL)
+                assert torch.allclose(blksprs_adapt_layout_dense_out.to(stock_dtype), stock_adapt_layout_out, atol=ATOL, rtol=RTOL)
 
                 target = torch.randn_like(stock_adapt_layout_out)
                 stock_loss = torch.nn.L1Loss()
@@ -744,9 +835,12 @@ def test_blksprs_adapt_layout():
 
 # Layouting
 
+@pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
+@pytest.mark.parametrize("use_amp", [True, False])
+def test_build_sparsity_layout(config: list, use_amp: bool):
+    with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+        b, m, n, k, sparsity_block_size, sparsity_percentage = config
 
-def test_build_sparsity_layout():
-    for b, m, _, k, sparsity_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
         x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size)
@@ -759,22 +853,29 @@ def test_build_sparsity_layout():
 
             blksprs_sparsity_layout = bs.layouting.build_sparsity_layout(x_dense, sparsity_block_size)
 
-            assert torch.allclose(blksprs_sparsity_layout.to(torch.bool), sparsity_layout_x.to(torch.bool), atol=ATOL,
+            assert torch.allclose(blksprs_sparsity_layout.to(torch.bool), sparsity_layout_x.to(torch.bool),
+                                  atol=ATOL,
                                   rtol=RTOL)
 
 
-def test_build_sparsity_layout_matmul():
-    for b, m, n, k, sparsity_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
-        sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
-        sparsity_layout_y_bs = _get_blocksparse_layout(b, k, n, sparsity_block_size, sparsity_percentage)
+@pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
+def test_build_sparsity_layout_matmul(config: list):
+    b, m, n, k, sparsity_block_size, sparsity_percentage = config
 
-        sparsity_layout_matmul = bs.layouting.build_sparsity_layout_matmul(sparsity_layout_x_bs, sparsity_layout_y_bs)
-        sparsity_layout_matmul_fast = bs.layouting.build_sparsity_layout_matmul_fast(sparsity_layout_x_bs,
-                                                                                     sparsity_layout_y_bs)
+    sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
+    sparsity_layout_y_bs = _get_blocksparse_layout(b, k, n, sparsity_block_size, sparsity_percentage)
+
+    sparsity_layout_matmul = bs.layouting.build_sparsity_layout_matmul(sparsity_layout_x_bs, sparsity_layout_y_bs)
+    sparsity_layout_matmul_fast = bs.layouting.build_sparsity_layout_matmul_fast(sparsity_layout_x_bs,
+                                                                                 sparsity_layout_y_bs)
 
 
-def test_build_distribution_layout():
-    for b, m, _, k, sparsity_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+@pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
+@pytest.mark.parametrize("use_amp", [True, False])
+def test_build_distribution_layout(config: list, use_amp: bool):
+    with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+        b, m, n, k, sparsity_block_size, sparsity_percentage = config
+
         dims = [0, 1, 2]
         for dim in dims:
             src_d = torch.randn(size=(b, m, k), device=DEVICE)
@@ -806,7 +907,8 @@ def test_build_distribution_layout():
                 stock_scatter_out = _blocksparse_roundtrip(
                     stock_out_buffer.scatter_reduce(dim=dim, index=i.to(torch.int64), src=src, reduce="sum"),
                     sparsity_layout_tgt, sparsity_block_size)
-                stock_distribution_layout = bs.layouting.build_sparsity_layout(stock_scatter_out, sparsity_block_size)
+                stock_distribution_layout = bs.layouting.build_sparsity_layout(stock_scatter_out,
+                                                                               sparsity_block_size)
 
                 blksprs_distribution_layout = bs.layouting.build_distribution_layout(
                     bs.ops.to_sparse(i, sparsity_layout_i, sparsity_block_size),
@@ -818,8 +920,12 @@ def test_build_distribution_layout():
 
 # Processing
 
-def test_apply_torch_linear():
-    for b, m, n, k, sparsity_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+@pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
+@pytest.mark.parametrize("use_amp", [True, False])
+def test_apply_torch_linear(config: list, use_amp: bool):
+    with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+        b, m, n, k, sparsity_block_size, sparsity_percentage = config
+
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
@@ -834,16 +940,23 @@ def test_apply_torch_linear():
                 x_blksprs = x.clone().requires_grad_(True)
 
                 stock_linear_out = linear(x_stock)
+                stock_dtype = stock_linear_out.dtype
+
                 blksprs_linear_out, sparsity_layout_xl = bs.utils.apply_torch_linear(
                     bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
                     sparsity_layout_x, sparsity_block_size, linear)
-                blksprs_linear_dense_out = bs.ops.to_dense(blksprs_linear_out, sparsity_layout_xl, sparsity_block_size)
+                blksprs_linear_dense_out = bs.ops.to_dense(blksprs_linear_out, sparsity_layout_xl,
+                                                           sparsity_block_size)
 
-                assert torch.allclose(blksprs_linear_dense_out, stock_linear_out, atol=ATOL, rtol=RTOL)
+                assert torch.allclose(blksprs_linear_dense_out.to(stock_dtype), stock_linear_out, atol=ATOL, rtol=RTOL)
 
 
-def test_apply_torch_normalisation():
-    for b, m, _, k, sparsity_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+@pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
+@pytest.mark.parametrize("use_amp", [True, False])
+def test_apply_torch_normalisation(config: list, use_amp: bool):
+    with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+        b, m, n, k, sparsity_block_size, sparsity_percentage = config
+
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
@@ -860,17 +973,23 @@ def test_apply_torch_normalisation():
 
             stock_normalisation_out = _blocksparse_roundtrip(normalisation(x_stock), sparsity_layout_x,
                                                              sparsity_block_size)
+            stock_dtype = stock_normalisation_out.dtype
+
             blksprs_normalisation_out = bs.utils.apply_torch_normalisation(
                 bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
                 sparsity_layout_x, sparsity_block_size, normalisation)
             blksprs_normalisation_dense_out = bs.ops.to_dense(blksprs_normalisation_out, sparsity_layout_x,
                                                               sparsity_block_size)
 
-            assert torch.allclose(blksprs_normalisation_dense_out, stock_normalisation_out, atol=ATOL, rtol=RTOL)
+            assert torch.allclose(blksprs_normalisation_dense_out.to(stock_dtype), stock_normalisation_out, atol=ATOL, rtol=RTOL)
 
 
-def test_apply_torch_dropout():
-    for b, m, _, k, sparsity_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+@pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
+@pytest.mark.parametrize("use_amp", [True, False])
+def test_apply_torch_dropout(config: list, use_amp: bool):
+    with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+        b, m, n, k, sparsity_block_size, sparsity_percentage = config
+
         x_d = torch.randn(size=(b, m, k), device=DEVICE)
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
@@ -885,8 +1004,10 @@ def test_apply_torch_dropout():
             x_stock = x.clone().requires_grad_(True)
             x_blksprs = x.clone().requires_grad_(True)
 
-            stock_normalisation_out = _blocksparse_roundtrip(dropout(x_stock), sparsity_layout_x,
+            stock_dropout_out = _blocksparse_roundtrip(dropout(x_stock), sparsity_layout_x,
                                                              sparsity_block_size)
+            stock_dtype = stock_dropout_out.dtype
+
             global SEED
             torch.manual_seed(SEED)
             blksprs_normalisation_out = bs.utils.apply_torch_normalisation(
@@ -895,13 +1016,17 @@ def test_apply_torch_dropout():
             blksprs_normalisation_dense_out = bs.ops.to_dense(blksprs_normalisation_out, sparsity_layout_x,
                                                               sparsity_block_size)
 
-            assert torch.allclose(blksprs_normalisation_dense_out, stock_normalisation_out, atol=ATOL, rtol=RTOL)
+            assert torch.allclose(blksprs_normalisation_dense_out.to(stock_dtype), stock_dropout_out, atol=ATOL, rtol=RTOL)
 
 
 # Misc
 
-def test_broadcast_addition():
-    for b, m, _, k, sparsity_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
+@pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
+@pytest.mark.parametrize("use_amp", [True, False])
+def test_broadcast_addition(config: list, use_amp: bool):
+    with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+        b, m, n, k, sparsity_block_size, sparsity_percentage = config
+
         x_d = torch.randint(high=m, size=(b, m), device=DEVICE)
         y_d = torch.randint(high=m, size=(b, m), device=DEVICE)
 
@@ -910,34 +1035,42 @@ def test_broadcast_addition():
 
         for x, y, sparsity_layout_o in [(x_d, y_d, sparsity_layout_o), (x_d, y_d, sparsity_layout_o_bs)]:
             stock_broadcast_addition = _blocksparse_roundtrip(torch.add(x.unsqueeze(-1), y.unsqueeze(-2)),
-                                                              sparsity_layout_o, sparsity_block_size).to(torch.float)
+                                                              sparsity_layout_o, sparsity_block_size).to(
+                torch.float)
+            stock_dtype = stock_broadcast_addition.dtype
+
             blksprs_broadcast_addition_out = bs.ops.misc.broadcast_add(x, y, sparsity_layout_o,
                                                                        sparsity_block_size)
-            blksprs_broadcast_addition_dense_out = bs.ops.to_dense(blksprs_broadcast_addition_out, sparsity_layout_o,
+            blksprs_broadcast_addition_dense_out = bs.ops.to_dense(blksprs_broadcast_addition_out,
+                                                                   sparsity_layout_o,
                                                                    sparsity_block_size)
 
             stock_broadcast_subtraction = _blocksparse_roundtrip(torch.sub(x.unsqueeze(-1), y.unsqueeze(-2)),
-                                                                 sparsity_layout_o, sparsity_block_size).to(torch.float)
+                                                                 sparsity_layout_o, sparsity_block_size).to(
+                torch.float)
             blksprs_broadcast_subtraction = bs.ops.misc.broadcast_sub(x, y, sparsity_layout_o,
                                                                       sparsity_block_size)
-            blksprs_broadcast_subtraction_dense_out = bs.ops.to_dense(blksprs_broadcast_subtraction, sparsity_layout_o,
+            blksprs_broadcast_subtraction_dense_out = bs.ops.to_dense(blksprs_broadcast_subtraction,
+                                                                      sparsity_layout_o,
                                                                       sparsity_block_size)
 
-            assert torch.allclose(blksprs_broadcast_addition_dense_out.to(torch.float),
-                                  stock_broadcast_addition.to(torch.float),
+            assert torch.allclose(blksprs_broadcast_addition_dense_out.to(stock_dtype),
+                                  stock_broadcast_addition,
                                   atol=ATOL, rtol=RTOL)
-            assert torch.allclose(blksprs_broadcast_subtraction_dense_out.to(torch.float),
-                                  stock_broadcast_subtraction.to(torch.float),
+            assert torch.allclose(blksprs_broadcast_subtraction_dense_out.to(stock_dtype),
+                                  stock_broadcast_subtraction,
                                   atol=ATOL, rtol=RTOL)
 
 
-def test_subclass():
-    for b, m, _, k, sparsity_block_size, sparsity_percentage in TEST_CONFIGURATIONS:
-        x_d = torch.randn(size=(b, m, k), device=DEVICE)
-        sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
-        x_bs = BlksprsTensor(_blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size))
+@pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
+def test_subclass(config: list):
+    b, m, n, k, sparsity_block_size, sparsity_percentage = config
 
-        assert type(x_bs).__name__ == BlksprsTensor.__name__
+    x_d = torch.randn(size=(b, m, k), device=DEVICE)
+    sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
+    x_bs = BlksprsTensor(_blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size))
+
+    assert type(x_bs).__name__ == BlksprsTensor.__name__
 
 
 # Utility
@@ -1028,7 +1161,7 @@ def _visualise_matrix(matrix: torch.Tensor, output_path: str = None, grid_size=1
 
 # Comparison
 
-def slow_to_sparse(x, sparsity_layout, sparsity_block_size: int):
+def _slow_to_sparse(x, sparsity_layout, sparsity_block_size: int):
     num_sparse_blocks = torch.sum(sparsity_layout.to(torch.int)).item()
     output = torch.zeros(size=(num_sparse_blocks, sparsity_block_size, sparsity_block_size), device=x.device)
     indices_sparse_blocks = sparsity_layout.nonzero(as_tuple=True)
@@ -1042,7 +1175,7 @@ def slow_to_sparse(x, sparsity_layout, sparsity_block_size: int):
     return output
 
 
-def slow_to_dense(x, sparsity_layout, sparsity_block_size: int):
+def _slow_to_dense(x, sparsity_layout, sparsity_block_size: int):
     output = torch.zeros(size=(sparsity_layout.size(0), sparsity_layout.size(1) * sparsity_block_size,
                                sparsity_layout.size(2) * sparsity_block_size), device=x.device)
     indices_sparse_blocks = sparsity_layout.nonzero(as_tuple=True)
@@ -1056,7 +1189,7 @@ def slow_to_dense(x, sparsity_layout, sparsity_block_size: int):
     return output
 
 
-def slow_gather_mdi(src, idx_bat, idx_row, idx_col):
+def _slow_gather_mdi(src, idx_bat, idx_row, idx_col):
     output = torch.zeros(size=(idx_bat.size(0), idx_bat.size(1), idx_bat.size(2)), device=src.device)
 
     for b in range(idx_bat.size(0)):
@@ -1067,7 +1200,7 @@ def slow_gather_mdi(src, idx_bat, idx_row, idx_col):
     return output
 
 
-def slow_scatter_reduce_mdi(src, tgt_size, idx_bat, idx_row, idx_col):
+def _slow_scatter_reduce_mdi(src, tgt_size, idx_bat, idx_row, idx_col):
     output = torch.zeros(size=tgt_size, device=src.device)
 
     for b in range(idx_bat.size(0)):

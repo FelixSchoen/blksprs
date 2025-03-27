@@ -18,6 +18,7 @@ def to_blksprs(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int) -> 
     return to_sparse(x, sparsity_layout, sparsity_block_size)
 
 
+@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
 def to_sparse(x: Tensor, sparsity_layout: Tensor,
               sparsity_block_size: int, lut: dict = None) -> BlksprsTensor:
     """Converts a block-sparse tensor in regular form to a block-sparse tensor in compressed form based on the given
@@ -175,6 +176,7 @@ def from_blksprs(x: BlksprsTensor, sparsity_layout: Tensor,
     return to_dense(x, sparsity_layout, sparsity_block_size, fill_value=fill_value, lut=lut)
 
 
+@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
 def to_dense(x: BlksprsTensor, sparsity_layout: Tensor,
              sparsity_block_size: int, fill_value: float = 0, lut: dict = None) -> Tensor:
     """Converts a block-sparse tensor in compressed form to a block-sparse tensor in regular form based on the given
