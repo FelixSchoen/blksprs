@@ -17,6 +17,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   compatability
 - Rework kernels to work with triton block sizes larger than sparsity block sizes via masking
 - Rework kernels to use automatic tuning of triton block sizes rather than fixed block sizes
+- Rework operations to support dtype autocasting
 
 ### Removed
 

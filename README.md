@@ -8,7 +8,7 @@
   ### News
   
   🎉 ***Version 2.0 released***. blksprs now supports kernel auto-tuning, JIT compilation, specification of pre-calculated
-  LUTs, and makes use of `torch.library.triton_op()`!
+  LUTs, autocasting, and makes use of `torch.library.triton_op()`!
 
 ---
 
