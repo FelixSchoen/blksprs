@@ -5,10 +5,10 @@
 
 ## Overview
 
-  ### News
-  
-  🎉 ***Version 2.0 released***. blksprs now supports kernel auto-tuning, JIT compilation, specification of pre-calculated
-  LUTs, autocasting, and makes use of `torch.library.triton_op()`!
+### News
+
+🎉 ***Version 2.0 released***. blksprs now supports kernel auto-tuning, JIT compilation, specification of pre-calculated
+LUTs, autocasting, and makes use of `torch.library.triton_op()`!
 
 ---
 
@@ -86,6 +86,15 @@ We also encourage [pull requests](https://github.com/FelixSchoen/blksprs/pulls).
 
 It might be that this changes with future projects, but as of March 2025, we are content with the current state of the
 library.
+
+## Known Limitations and Issues
+
+- PyTorch's `wrap_triton()` currently does not support config pruning. It thus cannot be used for some of the kernels,
+  which could impact graph compilation.
+- There seem to be some issues with autocasting, forcing some operations to manually cast.
+- There will be some slight numerical differences between vanilla and blksprs operations.
+These instabilities are due to Triton and thus cannot be fixed by this library alone.
+However, for all intents and purposes, these very minor differences should not matter and can safely be ignored.
 
 ## Usage
 
