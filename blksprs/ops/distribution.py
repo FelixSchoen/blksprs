@@ -6,7 +6,8 @@ from torch._library.triton import wrap_triton
 from triton import language as tl
 
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import stride, get_autotune_configs
+from blksprs.utils.tools import stride
+from blksprs.utils.autotuning import get_autotune_configs
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity, validate_dtype_int, validate_sparsity_block_size
 

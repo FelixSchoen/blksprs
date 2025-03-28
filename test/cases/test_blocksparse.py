@@ -1,3 +1,7 @@
+import os
+
+os.environ["BLKSPRS_TEST"] = "TEST"
+
 import random
 from pathlib import Path
 
