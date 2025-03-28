@@ -422,7 +422,7 @@ def adapt_layout_backward(ctx, grad_output):
 
 @triton.autotune(
     configs=get_autotune_configs(),
-    key=["sparsity_block_size"],
+    key=["sparsity_block_size_from", "sparsity_block_size_to"],
     prune_configs_by={"early_config_prune": prune_autotune_configs_conversion},
     reset_to_zero=["o"]
 )

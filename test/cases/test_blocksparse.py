@@ -1,7 +1,5 @@
 import os
 
-from blksprs.utils.tools import get_autocast_min_val
-
 os.environ["BLKSPRS_TEST"] = "TEST"
 
 import random
@@ -15,6 +13,7 @@ from torch import Tensor
 
 import blksprs as bs
 from blksprs import BlksprsTensor
+from blksprs.utils.tools import get_autocast_min_val
 
 # TODO Triton wrap currently does not support pruning
 
