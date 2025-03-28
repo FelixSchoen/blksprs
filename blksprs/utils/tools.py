@@ -28,3 +28,10 @@ def stride(x: Tensor):
         raise NotImplementedError
 
 
+def get_autocast_min_val():
+    if torch.is_autocast_enabled():
+        dtype = torch.get_autocast_dtype("cuda")
+    else:
+        dtype = torch.float
+
+    return torch.finfo(dtype).min

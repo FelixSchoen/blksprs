@@ -1,5 +1,7 @@
 import os
 
+from blksprs.utils.tools import get_autocast_min_val
+
 os.environ["BLKSPRS_TEST"] = "TEST"
 
 import random
@@ -542,7 +544,7 @@ def test_blksprs_softmax(config: list, use_amp: bool):
 
             sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
             x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size,
-                                          fill_value=torch.finfo(torch.get_autocast_gpu_dtype()).min)
+                                          fill_value=get_autocast_min_val())
 
             for x, sparsity_layout_x in [(x_d, sparsity_layout_x_d), (x_bs, sparsity_layout_x_bs)]:
                 x_stock = x.clone().requires_grad_(True)
@@ -722,7 +724,7 @@ def test_blksprs_row_wise_max(config: list, use_amp: bool):
 
         sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
         x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size,
-                                      fill_value=float("-inf"))
+                                      fill_value=get_autocast_min_val())
 
         for x, sparsity_layout_x in [(x_bs, sparsity_layout_x_bs), (x_d, sparsity_layout_x_d),
                                      (x_bs, sparsity_layout_x_bs)]:
@@ -736,7 +738,7 @@ def test_blksprs_row_wise_max(config: list, use_amp: bool):
                 bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size), sparsity_layout_x,
                 sparsity_block_size)
             blksprs_row_wise_max_dense_out = bs.ops.to_dense(blksprs_row_wise_max_out, sparsity_layout_output,
-                                                             sparsity_block_size, fill_value=float("-inf"))
+                                                             sparsity_block_size, fill_value=get_autocast_min_val())
 
             blksprs_row_wise_max_out_slice = blksprs_row_wise_max_dense_out[..., 0]
 
@@ -754,7 +756,7 @@ def test_blksprs_row_wise_add(config: list, use_amp: bool):
 
         sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
         x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size,
-                                      fill_value=float("-inf"))
+                                      fill_value=get_autocast_min_val())
 
         for x, sparsity_layout_x in [(x_bs, sparsity_layout_x_bs), (x_d, sparsity_layout_x_d),
                                      (x_bs, sparsity_layout_x_bs)]:
