@@ -113,6 +113,9 @@ def validate_sparsity_block_size(sparsity_block_size: int, *tensors):
     if _check_skip_validation():
         return
 
+    if not sparsity_block_size >= 16:
+        raise ValueError("Sparsity block size must be at least 16")
+
     if not (sparsity_block_size & (sparsity_block_size - 1)) == 0:
         raise ValueError("Sparsity block size must be a power of 2")
 

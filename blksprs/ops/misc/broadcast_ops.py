@@ -7,7 +7,7 @@ from triton import language as tl
 
 from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import stride
-from blksprs.utils.autotuning import get_autotune_configs
+from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.validation import validate_contiguous, validate_device, \
     validate_sparsity_block_size
 
@@ -88,7 +88,8 @@ def broadcast_add_forward(x: Tensor, y: Tensor,
 
 @triton.autotune(
     configs=get_autotune_configs(),
-    key=[],
+    key=["sparsity_block_size"],
+    prune_configs_by={"early_config_prune": prune_autotune_configs},
     reset_to_zero=["o"]
 )
 @triton.jit
@@ -106,9 +107,6 @@ def broadcast_add_kernel(x,
     pid_row = tl.program_id(axis=1)
     pid_col = tl.program_id(axis=2)
 
-    # Get valid triton block size
-    val_tbs = min(sparsity_block_size, TRITON_BLOCK_SIZE)
-
     # Get position of current sparsity block consisting of its batch, row, and column index
     spa_bat_o_idx = (pid_blk * s_lut_o_r_s + 0 * s_lut_o_c_s)
     spa_bat_o_msk = (spa_bat_o_idx >= 0 and spa_bat_o_idx < s_lut_o_r * s_lut_o_r_s)
@@ -124,20 +122,18 @@ def broadcast_add_kernel(x,
 
     # Load x block
     blk_x_idx = (spa_bat_o * x_b_s +
-                 ((pid_row * val_tbs + spa_row_o * sparsity_block_size +
+                 ((pid_row * TRITON_BLOCK_SIZE + spa_row_o * sparsity_block_size +
                    tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-    blk_x_msk = ((blk_x_idx >= 0 and
-                  blk_x_idx < x_b * x_b_s) and
-                 (tl.arange(0, TRITON_BLOCK_SIZE)[None, :] < val_tbs))
+    blk_x_msk = (blk_x_idx >= 0 and
+                 blk_x_idx < x_b * x_b_s)
     blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
 
     # Load y block
     blk_y_idx = (spa_bat_o * y_b_s +
-                 ((pid_col * val_tbs + spa_col_o * sparsity_block_size +
+                 ((pid_col * TRITON_BLOCK_SIZE + spa_col_o * sparsity_block_size +
                    tl.arange(0, TRITON_BLOCK_SIZE)) * y_c_s)[None, :])
-    blk_y_msk = ((blk_y_idx >= 0 and
-                  blk_y_idx < y_b * y_b_s) and
-                 (tl.arange(0, TRITON_BLOCK_SIZE)[None, :] < val_tbs))
+    blk_y_msk = (blk_y_idx >= 0 and
+                 blk_y_idx < y_b * y_b_s)
     blk_y = tl.load(y + blk_y_idx, mask=blk_y_msk)
 
     # Compute sum
@@ -146,10 +142,8 @@ def broadcast_add_kernel(x,
 
     # Store result
     blk_o_idx = ((pid_blk * o_b_s) +
-                 ((pid_row * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
-                 ((pid_col * val_tbs + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
-    blk_o_msk = ((blk_o_idx >= 0 and
-                  blk_o_idx < o_b * o_b_s) and
-                 (tl.arange(0, TRITON_BLOCK_SIZE)[:, None] < val_tbs and
-                  tl.arange(0, TRITON_BLOCK_SIZE)[None, :] < val_tbs))
+                 ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
+                 ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
+    blk_o_msk = (blk_o_idx >= 0 and
+                 blk_o_idx < o_b * o_b_s)
     tl.store(o + blk_o_idx, buf, mask=blk_o_msk)

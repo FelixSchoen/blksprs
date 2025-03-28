@@ -14,6 +14,8 @@ from torch import Tensor
 import blksprs as bs
 from blksprs import BlksprsTensor
 
+# TODO Triton wrap currently does not support pruning
+
 # Device setup
 DEVICE = torch.device("cuda:0")
 
@@ -73,7 +75,7 @@ ATOL = 2e-2
 RTOL = 1e-2
 
 # Seed
-SEED = 3654566474
+SEED = 0
 RANDOM_SEED = True
 
 
@@ -94,6 +96,10 @@ def setup():
     torch.manual_seed(seed)
     torch.set_printoptions(edgeitems=64, linewidth=10000)
     override_pytorch_repr()
+
+    yield
+
+    print("Seed:", seed)
 
 
 def override_pytorch_repr():
@@ -405,17 +411,17 @@ def test_blksprs_matmul(config: list, use_amp: bool):
 
             assert torch.allclose(blksprs_matmul_dense_out.to(stock_dtype), stock_matmul_out, atol=ATOL, rtol=RTOL)
 
-        target = torch.randn_like(stock_matmul_out)
-        stock_loss = torch.nn.L1Loss()
-        blksprs_loss = torch.nn.L1Loss()
-        stock_loss = stock_loss(stock_matmul_out, target)
-        blksprs_loss = blksprs_loss(blksprs_matmul_dense_out, target)
+            target = torch.randn_like(stock_matmul_out)
+            stock_loss = torch.nn.L1Loss()
+            blksprs_loss = torch.nn.L1Loss()
+            stock_loss = stock_loss(stock_matmul_out, target)
+            blksprs_loss = blksprs_loss(blksprs_matmul_dense_out, target)
 
-        stock_loss.backward()
-        blksprs_loss.backward()
+            stock_loss.backward()
+            blksprs_loss.backward()
 
-        assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
-        assert torch.allclose(y_blksprs.grad, y_stock.grad, atol=ATOL, rtol=RTOL)
+            assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
+            assert torch.allclose(y_blksprs.grad, y_stock.grad, atol=ATOL, rtol=RTOL)
 
 
 @pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
@@ -711,7 +717,7 @@ def test_blksprs_row_wise_max(config: list, use_amp: bool):
     with torch.amp.autocast(device_type="cuda", enabled=use_amp):
         b, m, n, k, sparsity_block_size, sparsity_percentage = config
 
-        x_d = torch.randn(size=(b, m, k), device=DEVICE)
+        x_d = torch.neg(torch.abs(torch.randn(size=(b, m, k), device=DEVICE)))
         sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size), device=DEVICE)
 
         sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
@@ -789,6 +795,9 @@ def test_blksprs_adapt_layout(config: list, use_amp: bool):
                                                                  (sparsity_block_size, sparsity_block_size),
                                                                  (sparsity_block_size // 4, sparsity_block_size),
                                                                  (sparsity_block_size // 2, sparsity_block_size)]:
+            if any([sparsity_block_size_from < 16, sparsity_block_size_to < 16]):
+                continue
+
             sparsity_layout_x_d_from = torch.ones(b, m // sparsity_block_size_from, k // sparsity_block_size_from,
                                                   dtype=torch.bool, device=DEVICE)
             sparsity_layout_x_bs_from = _get_blocksparse_layout(b, m, k, sparsity_block_size_from, sparsity_percentage)
