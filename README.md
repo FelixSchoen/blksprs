@@ -89,12 +89,16 @@ library.
 
 ## Known Limitations and Issues
 
+- Triton has a bug with `tl.atomix_max()` used for the row-wise max operation.
+  In order to work around this bug a manual conversion of some values is needed, (slightly) negatively impacting
+  performance.
+  Watch the [issue](https://github.com/triton-lang/triton/issues/6376) on Triton's issue tracker for more information.
 - PyTorch's `wrap_triton()` currently does not support config pruning. It thus cannot be used for some of the kernels,
   which could impact graph compilation.
 - There seem to be some issues with autocasting, forcing some operations to manually cast.
 - There will be some slight numerical differences between vanilla and blksprs operations.
-These instabilities are due to Triton and thus cannot be fixed by this library alone.
-However, for all intents and purposes, these very minor differences should not matter and can safely be ignored.
+  These instabilities are due to Triton and thus cannot be fixed by this library alone.
+  However, for all intents and purposes, these very minor differences should not matter and can safely be ignored.
 
 ## Usage
 

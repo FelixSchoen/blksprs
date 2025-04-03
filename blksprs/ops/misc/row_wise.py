@@ -4,9 +4,9 @@ from torch import Tensor
 from torch._library.triton import wrap_triton, triton_op
 from triton import language as tl
 
-from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import stride, get_autocast_min_val
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
+from blksprs.utils.blksprs_tensor import BlksprsTensor
+from blksprs.utils.tools import stride
 from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_device, validate_sparsity, \
     validate_sparsity_block_size
 
@@ -95,6 +95,7 @@ def row_wise_sum_forward(x: Tensor, sparsity_lut: Tensor,
     return output
 
 
+# noinspection PyUnusedLocal
 @triton.autotune(
     configs=get_autotune_configs(),
     key=["sparsity_block_size"],
@@ -175,6 +176,8 @@ def row_wise_max(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size:
             of the input and the sparsity layout of the output tensor.
 
     """
+    # TODO Fix for triton bug, see https://github.com/triton-lang/triton/issues/6376
+    x = torch.where(x == -0.0, torch.tensor(0.0), x)
     x = x.contiguous()
 
     validate_dimensions(x)
@@ -209,7 +212,7 @@ def row_wise_max_forward(x: Tensor, sparsity_lut: Tensor,
     output = torch.full(size=(n_sparse_blocks_output,
                               sparsity_block_size,
                               1 if flag_slice_only else sparsity_block_size),
-                        fill_value=get_autocast_min_val(),
+                        fill_value=torch.finfo(x.dtype).min,
                         device=x.device)
 
     x_b, x_r, x_c = x.size()
@@ -238,6 +241,7 @@ def row_wise_max_forward(x: Tensor, sparsity_lut: Tensor,
     return output
 
 
+# noinspection PyUnusedLocal
 @triton.autotune(
     configs=get_autotune_configs(),
     key=["sparsity_block_size"],

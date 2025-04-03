@@ -240,7 +240,7 @@ def scatter(src: BlksprsTensor, sparsity_layout_src: Tensor,
                           reduce_op="none", lut=lut)
 
 
-@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
+@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float32)
 def scatter_reduce(src: BlksprsTensor, sparsity_layout_src: Tensor,
                    dim: int,
                    idx: BlksprsTensor,
