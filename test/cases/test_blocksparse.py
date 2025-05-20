@@ -1088,6 +1088,9 @@ def test_subclass(config: list):
 
     assert type(x_bs).__name__ == BlksprsTensor.__name__
 
+def test_version():
+    version = bs.version()
+    print(version)
 
 # Utility
 

@@ -187,20 +187,16 @@ def matmul_kernel(x,
                          ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
                          ((i_seg_tri_mod * TRITON_BLOCK_SIZE +
                            tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-            blk_x_msk = ((blk_x_idx >= 0 and
-                          blk_x_idx < x_b * x_b_s) and
-                         (tl.arange(0, TRITON_BLOCK_SIZE)[:, None] < TRITON_BLOCK_SIZE and
-                          tl.arange(0, TRITON_BLOCK_SIZE)[None, :] < TRITON_BLOCK_SIZE))
+            blk_x_msk = (blk_x_idx >= 0 and
+                         blk_x_idx < x_b * x_b_s)
             blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
 
             blk_y_idx = ((rev_idx_spa_y * y_b_s) +
                          ((i_seg_tri_mod * TRITON_BLOCK_SIZE +
                            tl.arange(0, TRITON_BLOCK_SIZE)) * y_r_s)[:, None] +
                          ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * y_c_s)[None, :])
-            blk_y_msk = ((blk_y_idx >= 0 and
-                          blk_y_idx < y_b * y_b_s) and
-                         (tl.arange(0, TRITON_BLOCK_SIZE)[:, None] < TRITON_BLOCK_SIZE and
-                          tl.arange(0, TRITON_BLOCK_SIZE)[None, :] < TRITON_BLOCK_SIZE))
+            blk_y_msk = (blk_y_idx >= 0 and
+                         blk_y_idx < y_b * y_b_s)
             blk_y = tl.load(y + blk_y_idx, mask=blk_y_msk)
 
             # Perform matrix multiplication
@@ -213,10 +209,8 @@ def matmul_kernel(x,
     blk_o_idx = ((pid_blk * o_b_s) +
                  ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
                  ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
-    blk_o_msk = ((blk_o_idx >= 0 and
-                  blk_o_idx < o_b * o_b_s) and
-                 (tl.arange(0, TRITON_BLOCK_SIZE)[:, None] < TRITON_BLOCK_SIZE and
-                  tl.arange(0, TRITON_BLOCK_SIZE)[None, :] < TRITON_BLOCK_SIZE))
+    blk_o_msk = (blk_o_idx >= 0 and
+                 blk_o_idx < o_b * o_b_s)
     tl.store(o + blk_o_idx, buf, mask=blk_o_msk)
 
 

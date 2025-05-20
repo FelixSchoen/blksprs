@@ -1,4 +1,4 @@
-from utils.tools import version
+from blksprs.utils.tools import version
 from blksprs.utils.blksprs_tensor import BlksprsTensor
 
 

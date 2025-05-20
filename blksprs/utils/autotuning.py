@@ -2,15 +2,7 @@ import os
 
 blksprs_autotune_mode = os.getenv("BLKSPRS_AUTOTUNE", "DEFAULT")
 
-if blksprs_autotune_mode == "TEST":
-    autotune_parameters = [
-        (16, 3, 8),
-
-        (32, 3, 8),
-
-        (64, 3, 8),
-    ]
-elif blksprs_autotune_mode == "DEFAULT":
+if blksprs_autotune_mode == "DEFAULT":
     autotune_parameters = [
         (16, 3, 8),
         (16, 4, 4),
@@ -27,6 +19,14 @@ elif blksprs_autotune_mode == "DEFAULT":
         (128, 3, 8),
         (128, 4, 4),
         (128, 5, 2),
+    ]
+elif blksprs_autotune_mode == "TEST":
+    autotune_parameters = [
+        (16, 3, 8),
+
+        (32, 3, 8),
+
+        (64, 3, 8),
     ]
 else:
     raise NotImplementedError(f"Unknown autotune mode: {blksprs_autotune_mode}")
