@@ -132,25 +132,22 @@ def row_wise_sum_kernel(x,
     rev_idx_spa_msk = (rev_idx_spa_idx >= 0 and rev_idx_spa_idx < s_l_o_b * s_l_o_b_s)
     rev_idx_spa = tl.load(r_lut_o + rev_idx_spa_idx, mask=rev_idx_spa_msk).to(tl.int32)
 
-    if rev_idx_spa == -1:
-        tl.device_assert(False)
-        return
+    if rev_idx_spa >= 0:
+        blk_idx = ((pid_blk * x_b_s) +
+                   ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
+                   ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
+        blk_msk = (blk_idx >= 0 and
+                   blk_idx < x_b * x_b_s)
+        blk = tl.load(x + blk_idx, mask=blk_msk)
 
-    blk_idx = ((pid_blk * x_b_s) +
-               ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
-               ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-    blk_msk = (blk_idx >= 0 and
-               blk_idx < x_b * x_b_s)
-    blk = tl.load(x + blk_idx, mask=blk_msk)
+        buf = tl.reshape(tl.sum(blk, axis=-1), (TRITON_BLOCK_SIZE, 1))
 
-    buf = tl.reshape(tl.sum(blk, axis=-1), (TRITON_BLOCK_SIZE, 1))
-
-    o_idx = (rev_idx_spa * o_b_s +
-             ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
-             (tl.arange(0, 1))[None, :])
-    o_msk = (o_idx >= 0 and
-             o_idx < o_b * o_b_s)
-    tl.atomic_add(o + o_idx, buf, o_msk)
+        o_idx = (rev_idx_spa * o_b_s +
+                 ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
+                 (tl.arange(0, 1))[None, :])
+        o_msk = (o_idx >= 0 and
+                 o_idx < o_b * o_b_s)
+        tl.atomic_add(o + o_idx, buf, o_msk)
 
 
 @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
@@ -278,25 +275,22 @@ def row_wise_max_kernel(x,
     rev_idx_spa_msk = (rev_idx_spa_idx >= 0 and rev_idx_spa_idx < s_l_o_b * s_l_o_b_s)
     rev_idx_spa = tl.load(r_lut_o + rev_idx_spa_idx, mask=rev_idx_spa_msk).to(tl.int32)
 
-    if rev_idx_spa == -1:
-        tl.device_assert(False)
-        return
+    if rev_idx_spa >= 0:
+        blk_idx = ((pid_blk * x_b_s) +
+                   ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
+                   ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
+        blk_msk = (blk_idx >= 0 and
+                   blk_idx < x_b * x_b_s)
+        blk = tl.load(x + blk_idx, mask=blk_msk)
 
-    blk_idx = ((pid_blk * x_b_s) +
-               ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
-               ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-    blk_msk = (blk_idx >= 0 and
-               blk_idx < x_b * x_b_s)
-    blk = tl.load(x + blk_idx, mask=blk_msk)
+        buf = tl.reshape(tl.max(blk, axis=-1), (TRITON_BLOCK_SIZE, 1))
 
-    buf = tl.reshape(tl.max(blk, axis=-1), (TRITON_BLOCK_SIZE, 1))
-
-    o_idx = (rev_idx_spa * o_b_s +
-             ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
-             (tl.arange(0, 1))[None, :])
-    o_msk = (o_idx >= 0 and
-             o_idx < o_b * o_b_s)
-    tl.atomic_max(o + o_idx, buf, o_msk)
+        o_idx = (rev_idx_spa * o_b_s +
+                 ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
+                 (tl.arange(0, 1))[None, :])
+        o_msk = (o_idx >= 0 and
+                 o_idx < o_b * o_b_s)
+        tl.atomic_max(o + o_idx, buf, o_msk)
 
 
 @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)

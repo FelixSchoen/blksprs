@@ -14,7 +14,7 @@ from torch import Tensor
 import blksprs as bs
 from blksprs import BlksprsTensor
 
-# TODO Triton wrap currently does not support pruning
+# TODO Triton wrap currently does not support pruning for backwards pass (only for @triton.op methods)
 
 # Device setup
 DEVICE = torch.device("cuda:0")
