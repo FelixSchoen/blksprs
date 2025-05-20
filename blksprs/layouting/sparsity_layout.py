@@ -3,7 +3,7 @@ import math
 import torch
 import triton
 from torch import Tensor
-from torch._library.triton import wrap_triton
+from torch._library.triton import wrap_triton, triton_op
 from triton import language as tl
 
 from blksprs.utils.blksprs_tensor import BlksprsTensor
@@ -29,27 +29,32 @@ def build_sparsity_layout(x: Tensor, sparsity_block_size: int) -> Tensor:
     validate_contiguous(x)
     validate_device(x)
 
-    output = torch.zeros(x.size(0), x.size(1) // sparsity_block_size, x.size(2) // sparsity_block_size,
-                         dtype=torch.bool, device=x.device)
+    return build_sparsity_layout_operation(x, sparsity_block_size)
 
-    x_b, x_r, x_c = x.size()
-    x_b_s, x_r_s, x_c_s = stride(x)
-    o_b, o_r, o_c = output.size()
-    o_b_s, o_r_s, o_c_s = stride(output)
 
-    triton_grid = lambda meta: [x_b,
-                                triton.cdiv(x_r, meta["TRITON_BLOCK_SIZE"]),
-                                triton.cdiv(x_c, meta["TRITON_BLOCK_SIZE"])]
+@triton_op("blksprs::build_sparsity_layout", mutates_args={})
+def build_sparsity_layout_operation(x: Tensor, sparsity_block_size: int) -> Tensor:
+    with torch.no_grad():
+        output = torch.zeros(x.size(0), x.size(1) // sparsity_block_size, x.size(2) // sparsity_block_size,
+                             dtype=torch.bool, device=x.device)
 
-    # TODO wrap
-    (build_sparsity_layout_kernel[triton_grid]
-     (x,
-      x_b, x_b_s, x_r_s, x_c_s,
-      output,
-      o_b, o_b_s, o_r_s, o_c_s,
-      sparsity_block_size))
+        x_b, x_r, x_c = x.size()
+        x_b_s, x_r_s, x_c_s = stride(x)
+        o_b, o_r, o_c = output.size()
+        o_b_s, o_r_s, o_c_s = stride(output)
 
-    return output
+        triton_grid = lambda meta: [x_b,
+                                    triton.cdiv(x_r, meta["TRITON_BLOCK_SIZE"]),
+                                    triton.cdiv(x_c, meta["TRITON_BLOCK_SIZE"])]
+
+        (wrap_triton(build_sparsity_layout_kernel)[triton_grid]
+         (x,
+          x_b, x_b_s, x_r_s, x_c_s,
+          output,
+          o_b, o_b_s, o_r_s, o_c_s,
+          sparsity_block_size))
+
+        return output
 
 
 @triton.autotune(
@@ -87,6 +92,7 @@ def build_sparsity_layout_kernel(x,
         tl.store(o + blk_o_idx, 1, mask=blk_o_msk)
 
 
+@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
 def build_sparsity_layout_adaption(x: BlksprsTensor, sparsity_layout_from: Tensor,
                                    sparsity_block_size_from: int, sparsity_block_size_to: int) -> Tensor:
     """Builds the sparsity layout of a block-sparse tensor in compressed form if a different sparsity block size were
@@ -114,33 +120,40 @@ def build_sparsity_layout_adaption(x: BlksprsTensor, sparsity_layout_from: Tenso
 
     validate_contiguous(sparsity_layout_from, sparsity_lut)
 
-    o_b = sparsity_layout_from.size(0)
-    o_r = math.ceil(sparsity_layout_from.size(1) * sparsity_block_size_from // sparsity_block_size_to)
-    o_c = math.ceil(sparsity_layout_from.size(2) * sparsity_block_size_from // sparsity_block_size_to)
+    return build_sparsity_layout_adaption_operation(x, sparsity_layout_from, sparsity_lut,
+                                                    sparsity_block_size_from, sparsity_block_size_to)
 
-    output = torch.zeros(o_b, o_r, o_c, dtype=torch.bool, device=x.device)
 
-    x_b, x_r, x_c = x.size()
-    x_b_s, x_r_s, x_c_s = stride(x)
-    s_lut_r, s_lut_c = sparsity_lut.size()
-    s_lut_r_s, s_lut_c_s = stride(sparsity_lut)
-    o_b_s, o_r_s, o_c_s = stride(output)
+@triton_op("blksprs::build_sparsity_layout_adaption", mutates_args={})
+def build_sparsity_layout_adaption_operation(x: Tensor, sparsity_layout_from: Tensor, sparsity_lut: Tensor,
+                                             sparsity_block_size_from: int, sparsity_block_size_to: int) -> Tensor:
+    with torch.no_grad():
+        o_b = sparsity_layout_from.size(0)
+        o_r = math.ceil(sparsity_layout_from.size(1) * sparsity_block_size_from // sparsity_block_size_to)
+        o_c = math.ceil(sparsity_layout_from.size(2) * sparsity_block_size_from // sparsity_block_size_to)
 
-    triton_grid = lambda meta: [x_b,
-                                triton.cdiv(x_r, meta["TRITON_BLOCK_SIZE"]),
-                                triton.cdiv(x_c, meta["TRITON_BLOCK_SIZE"])]
+        output = torch.zeros(o_b, o_r, o_c, dtype=torch.bool, device=x.device)
 
-    # TODO wrap
-    (build_sparsity_layout_adaption_kernel[triton_grid]
-     (x,
-      x_b, x_b_s, x_r_s, x_c_s,
-      sparsity_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
-      output,
-      o_b, o_b_s, o_r_s, o_c_s,
-      sparsity_block_size_from,
-      sparsity_block_size_to))
+        x_b, x_r, x_c = x.size()
+        x_b_s, x_r_s, x_c_s = stride(x)
+        s_lut_r, s_lut_c = sparsity_lut.size()
+        s_lut_r_s, s_lut_c_s = stride(sparsity_lut)
+        o_b_s, o_r_s, o_c_s = stride(output)
 
-    return output
+        triton_grid = lambda meta: [x_b,
+                                    triton.cdiv(x_r, meta["TRITON_BLOCK_SIZE"]),
+                                    triton.cdiv(x_c, meta["TRITON_BLOCK_SIZE"])]
+
+        (wrap_triton(build_sparsity_layout_adaption_kernel)[triton_grid]
+         (x,
+          x_b, x_b_s, x_r_s, x_c_s,
+          sparsity_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
+          output,
+          o_b, o_b_s, o_r_s, o_c_s,
+          sparsity_block_size_from,
+          sparsity_block_size_to))
+
+        return output
 
 
 @triton.autotune(
