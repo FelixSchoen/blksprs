@@ -42,16 +42,17 @@ def transpose(x: BlksprsTensor, sparsity_layout: Tensor,
                                            sparsity_block_size, lut["n_sparse_blocks"])), lut["sparsity_layout_t"]
 
 
-@triton_op("blksprs::transpose", mutates_args={})
+@triton_op("blksprs::transpose_forward", mutates_args={})
 def transpose_forward(x: Tensor, sparsity_layout_o: Tensor,
                       sparsity_lut: Tensor, sparsity_reverse_lut: Tensor,
                       sparsity_block_size: int, n_sparse_blocks: int) -> Tensor:
-    x_t = x.detach().transpose(-1, -2).contiguous()
-    return flow_pull_forward(x_t, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut,
-                             sparsity_block_size, n_sparse_blocks)
+    with torch.no_grad():
+        x_t = x.transpose(-1, -2).contiguous()
+        return flow_pull_forward(x_t, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut,
+                                 sparsity_block_size, n_sparse_blocks)
 
 
-def transpose_backward(ctx, grad_output):
+def transpose_wrapper_backward(ctx, grad_output):
     sparsity_layout = ctx.saved_tensors[0]
     sparsity_block_size = ctx.sparsity_block_size
 
@@ -96,4 +97,4 @@ def transpose_setup_context(ctx, inputs, output):
     ctx.sparsity_block_size = sparsity_block_size
 
 
-transpose_forward.register_autograd(transpose_backward, setup_context=transpose_setup_context)
+transpose_forward.register_autograd(transpose_wrapper_backward, setup_context=transpose_setup_context)

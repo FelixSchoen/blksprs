@@ -55,36 +55,37 @@ def broadcast_sub(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
     return broadcast_add(x, torch.neg(y), sparsity_layout_output, sparsity_block_size)
 
 
-@triton_op("blksprs::broadcast_add", mutates_args={})
+@triton_op("blksprs::broadcast_add_forward", mutates_args={})
 def broadcast_add_forward(x: Tensor, y: Tensor,
                           sparsity_lut_o: Tensor,
                           sparsity_block_size: int, n_sparse_blocks: int) -> Tensor:
-    output = torch.zeros(n_sparse_blocks, sparsity_block_size, sparsity_block_size, dtype=x.dtype, device=x.device)
+    with torch.no_grad():
+        output = torch.zeros(n_sparse_blocks, sparsity_block_size, sparsity_block_size, dtype=x.dtype, device=x.device)
 
-    x_b, x_c = x.size()
-    x_b_s, x_c_s = stride(x)
-    y_b, y_c = y.size()
-    y_b_s, y_c_s = stride(y)
-    o_b, o_r, o_c = output.size()
-    o_b_s, o_r_s, o_c_s = stride(output)
-    s_lut_o_r, s_lut_o_c = sparsity_lut_o.size()
-    s_lut_o_r_s, s_lut_o_c_s = stride(sparsity_lut_o)
+        x_b, x_c = x.size()
+        x_b_s, x_c_s = stride(x)
+        y_b, y_c = y.size()
+        y_b_s, y_c_s = stride(y)
+        o_b, o_r, o_c = output.size()
+        o_b_s, o_r_s, o_c_s = stride(output)
+        s_lut_o_r, s_lut_o_c = sparsity_lut_o.size()
+        s_lut_o_r_s, s_lut_o_c_s = stride(sparsity_lut_o)
 
-    triton_grid = lambda meta: [o_b,
-                                triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),
-                                triton.cdiv(o_c, meta["TRITON_BLOCK_SIZE"])]
+        triton_grid = lambda meta: [o_b,
+                                    triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),
+                                    triton.cdiv(o_c, meta["TRITON_BLOCK_SIZE"])]
 
-    (wrap_triton(broadcast_add_kernel)[triton_grid]
-     (x,
-      x_b, x_b_s, x_c_s,
-      y,
-      y_b, y_b_s, y_c_s,
-      output,
-      o_b, o_b_s, o_r_s, o_c_s,
-      sparsity_lut_o, s_lut_o_r, s_lut_o_r_s, s_lut_o_c_s,
-      sparsity_block_size))
+        (wrap_triton(broadcast_add_kernel)[triton_grid]
+         (x,
+          x_b, x_b_s, x_c_s,
+          y,
+          y_b, y_b_s, y_c_s,
+          output,
+          o_b, o_b_s, o_r_s, o_c_s,
+          sparsity_lut_o, s_lut_o_r, s_lut_o_r_s, s_lut_o_c_s,
+          sparsity_block_size))
 
-    return BlksprsTensor(output)
+        return output
 
 
 @triton.autotune(

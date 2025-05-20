@@ -46,14 +46,15 @@ def split(x: BlksprsTensor, sparsity_layout: Tensor, partitions: int,
         partitions, adjusted_dim, sparsity_block_size, lut["n_sparse_blocks"])), lut["sparsity_layout_output"]
 
 
-@triton_op("blksprs::split", mutates_args={})
+@triton_op("blksprs::split_forward", mutates_args={})
 def split_forward(x: Tensor, sparsity_layout_o: Tensor, sparsity_lut: Tensor, sparsity_reverse_lut: Tensor,
                   _: int, __: int, sparsity_block_size: int, n_sparse_blocks: int) -> Tensor:
-    return flow_pull_forward(x, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut, sparsity_block_size,
-                             n_sparse_blocks)
+    with torch.no_grad():
+        return flow_pull_forward(x, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut, sparsity_block_size,
+                                 n_sparse_blocks)
 
 
-def split_backward(ctx, grad_output):
+def split_wrapper_backward(ctx, grad_output):
     sparsity_layout = ctx.saved_tensors[0]
     num_partitions = ctx.num_partitions
     dim = ctx.dim
@@ -109,7 +110,7 @@ def split_setup_context(ctx, inputs, output):
     ctx.sparsity_block_size = sparsity_block_size
 
 
-split_forward.register_autograd(split_backward, setup_context=split_setup_context)
+split_forward.register_autograd(split_wrapper_backward, setup_context=split_setup_context)
 
 
 @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
@@ -150,14 +151,15 @@ def merge(x: BlksprsTensor, sparsity_layout: Tensor, partitions: int,
         partitions, adjusted_dim, sparsity_block_size, lut["n_sparse_blocks"])), lut["sparsity_layout_output"]
 
 
-@triton_op("blksprs::merge", mutates_args={})
+@triton_op("blksprs::merge_forward", mutates_args={})
 def merge_forward(x: Tensor, sparsity_layout_o: Tensor, sparsity_lut: Tensor, sparsity_reverse_lut: Tensor,
                   _: int, __: int, sparsity_block_size: int, n_sparse_blocks: int) -> Tensor:
-    return flow_pull_forward(x, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut, sparsity_block_size,
-                             n_sparse_blocks)
+    with torch.no_grad():
+        return flow_pull_forward(x, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut, sparsity_block_size,
+                                 n_sparse_blocks)
 
 
-def merge_backward(ctx, grad_output):
+def merge_wrapper_backward(ctx, grad_output):
     sparsity_layout = ctx.saved_tensors[0]
     num_partitions = ctx.num_partitions
     dim = ctx.dim
@@ -216,4 +218,4 @@ def merge_setup_context(ctx, inputs, output):
     ctx.sparsity_block_size = sparsity_block_size
 
 
-merge_forward.register_autograd(merge_backward, setup_context=merge_setup_context)
+merge_forward.register_autograd(merge_wrapper_backward, setup_context=merge_setup_context)

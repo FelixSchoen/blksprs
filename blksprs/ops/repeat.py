@@ -92,15 +92,16 @@ def repeat_interleave(x: BlksprsTensor, sparsity_layout_x: Tensor, repeats: int,
         lut["sparsity_reverse_lut"], sparsity_block_size, lut["n_sparse_blocks"])), lut["sparsity_layout_o"]
 
 
-@triton_op("blksprs::repeat", mutates_args={})
+@triton_op("blksprs::repeat_forward", mutates_args={})
 def repeat_forward(x: Tensor, _: Tensor, sparsity_layout_o: Tensor, sparsity_lut: Tensor,
                    sparsity_reverse_lut: Tensor,
                    sparsity_block_size: int, n_sparse_blocks: int) -> Tensor:
-    return flow_pull_forward(x, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut, sparsity_block_size,
-                             n_sparse_blocks)
+    with torch.no_grad():
+        return flow_pull_forward(x, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut, sparsity_block_size,
+                                 n_sparse_blocks)
 
 
-def repeat_backward(ctx, grad_output):
+def repeat_wrapper_backward(ctx, grad_output):
     sparsity_layout_x, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut = ctx.saved_tensors
     sparsity_block_size = ctx.sparsity_block_size
     n_sparse_blocks = torch.sum(sparsity_layout_x.to(torch.int)).item()
@@ -190,4 +191,4 @@ def repeat_setup_context(ctx, inputs, output):
     ctx.sparsity_block_size = sparsity_block_size
 
 
-repeat_forward.register_autograd(repeat_backward, setup_context=repeat_setup_context)
+repeat_forward.register_autograd(repeat_wrapper_backward, setup_context=repeat_setup_context)

@@ -52,33 +52,34 @@ def to_sparse(x: Tensor, sparsity_layout: Tensor,
                                            lut["sparsity_lut"], sparsity_block_size, lut["n_sparse_blocks"]))
 
 
-@triton_op("blksprs::to_sparse", mutates_args={})
+@triton_op("blksprs::to_sparse_forward", mutates_args={})
 def to_sparse_forward(x: Tensor, _: Tensor,
                       sparsity_lut: Tensor, sparsity_block_size: int, n_sparse_blocks: int) -> Tensor:
-    output = torch.zeros(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
-                         dtype=x.dtype, device=x.device)
+    with torch.no_grad():
+        output = torch.zeros(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
+                             dtype=x.dtype, device=x.device)
 
-    x_b, x_r, x_c = x.size()
-    x_b_s, x_r_s, x_c_s = stride(x)
-    s_lut_r, s_lut_c = sparsity_lut.size()
-    s_lut_r_s, s_lut_c_s = stride(sparsity_lut)
-    o_b, o_r, o_c = output.size()
-    o_b_s, o_r_s, o_c_s = stride(output)
+        x_b, x_r, x_c = x.size()
+        x_b_s, x_r_s, x_c_s = stride(x)
+        s_lut_r, s_lut_c = sparsity_lut.size()
+        s_lut_r_s, s_lut_c_s = stride(sparsity_lut)
+        o_b, o_r, o_c = output.size()
+        o_b_s, o_r_s, o_c_s = stride(output)
 
-    triton_grid = lambda meta: [o_b,
-                                triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),
-                                triton.cdiv(o_c, meta["TRITON_BLOCK_SIZE"])]
+        triton_grid = lambda meta: [o_b,
+                                    triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),
+                                    triton.cdiv(o_c, meta["TRITON_BLOCK_SIZE"])]
 
-    (wrap_triton(to_sparse_kernel)[triton_grid]
-     (x, x_b, x_b_s, x_r_s, x_c_s,
-      sparsity_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
-      output, o_b_s, o_r_s, o_c_s,
-      sparsity_block_size))
+        (wrap_triton(to_sparse_kernel)[triton_grid]
+         (x, x_b, x_b_s, x_r_s, x_c_s,
+          sparsity_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
+          output, o_b_s, o_r_s, o_c_s,
+          sparsity_block_size))
 
-    return output
+        return output
 
 
-def to_sparse_backward(ctx, grad_output):
+def to_sparse_wrapper_backward(ctx, grad_output):
     sparsity_layout = ctx.saved_tensors[0]
     sparsity_block_size = ctx.sparsity_block_size
 
@@ -161,7 +162,7 @@ def to_sparse_setup_context(ctx, inputs, output):
     ctx.sparsity_block_size = sparsity_block_size
 
 
-to_sparse_forward.register_autograd(to_sparse_backward, setup_context=to_sparse_setup_context)
+to_sparse_forward.register_autograd(to_sparse_wrapper_backward, setup_context=to_sparse_setup_context)
 
 
 def from_blksprs(x: BlksprsTensor, sparsity_layout: Tensor,
@@ -207,38 +208,39 @@ def to_dense(x: BlksprsTensor, sparsity_layout: Tensor,
                             lut["sparsity_reverse_lut"], sparsity_block_size, fill_value)
 
 
-@triton_op("blksprs::to_dense", mutates_args={})
+@triton_op("blksprs::to_dense_forward", mutates_args={})
 def to_dense_forward(x: Tensor, sparsity_layout: Tensor,
                      sparsity_reverse_lut: Tensor,
                      sparsity_block_size: int, fill_value: float) -> Tensor:
-    output = torch.full(size=(sparsity_layout.size(0), sparsity_layout.size(1) * sparsity_block_size,
-                              sparsity_layout.size(2) * sparsity_block_size), fill_value=fill_value,
-                        dtype=x.dtype, device=x.device)
+    with torch.no_grad():
+        output = torch.full(size=(sparsity_layout.size(0), sparsity_layout.size(1) * sparsity_block_size,
+                                  sparsity_layout.size(2) * sparsity_block_size), fill_value=fill_value,
+                            dtype=x.dtype, device=x.device)
 
-    x_b, x_r, x_c = x.shape
-    x_b_s, x_r_s, x_c_s = stride(x)
-    s_l_b, s_l_r, s_l_c = sparsity_layout.size()
-    s_l_b_s, s_l_r_s, s_l_c_s = stride(sparsity_layout)
-    o_b, o_r, o_c = output.size()
-    o_b_s, o_r_s, o_c_s = stride(output)
+        x_b, x_r, x_c = x.shape
+        x_b_s, x_r_s, x_c_s = stride(x)
+        s_l_b, s_l_r, s_l_c = sparsity_layout.size()
+        s_l_b_s, s_l_r_s, s_l_c_s = stride(sparsity_layout)
+        o_b, o_r, o_c = output.size()
+        o_b_s, o_r_s, o_c_s = stride(output)
 
-    triton_grid = lambda meta: [o_b,
-                                triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),
-                                triton.cdiv(o_c, meta["TRITON_BLOCK_SIZE"])]
+        triton_grid = lambda meta: [o_b,
+                                    triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),
+                                    triton.cdiv(o_c, meta["TRITON_BLOCK_SIZE"])]
 
-    (wrap_triton(to_dense_kernel)[triton_grid]
-     (x,
-      x_b, x_b_s, x_r_s, x_c_s,
-      s_l_b, s_l_b_s, s_l_r_s, s_l_c_s,
-      sparsity_reverse_lut,
-      output,
-      o_b, o_b_s, o_r_s, o_c_s,
-      sparsity_block_size))
+        (wrap_triton(to_dense_kernel)[triton_grid]
+         (x,
+          x_b, x_b_s, x_r_s, x_c_s,
+          s_l_b, s_l_b_s, s_l_r_s, s_l_c_s,
+          sparsity_reverse_lut,
+          output,
+          o_b, o_b_s, o_r_s, o_c_s,
+          sparsity_block_size))
 
-    return output
+        return output
 
 
-def to_dense_backward(ctx, grad_output):
+def to_dense_wrapper_backward(ctx, grad_output):
     sparsity_layout = ctx.saved_tensors[0]
     sparsity_block_size = ctx.sparsity_block_size
 
@@ -316,7 +318,7 @@ def to_dense_setup_context(ctx, inputs, output):
     ctx.sparsity_block_size = sparsity_block_size
 
 
-to_dense_forward.register_autograd(to_dense_backward, setup_context=to_dense_setup_context)
+to_dense_forward.register_autograd(to_dense_wrapper_backward, setup_context=to_dense_setup_context)
 
 
 @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
@@ -372,45 +374,45 @@ def adapt_layout(x: BlksprsTensor, sparsity_layout_from: Tensor, sparsity_block_
                                               n_sparse_blocks_to)), sparsity_layout_to
 
 
-@triton_op("blksprs::adapt_layout", mutates_args={})
+@triton_op("blksprs::adapt_layout_forward", mutates_args={})
 def adapt_layout_forward(x: Tensor,
                          sparsity_layout_from: Tensor, sparsity_reverse_lut_from: Tensor,
                          sparsity_block_size_from: int,
                          _: Tensor, sparsity_lut_to: Tensor,
                          sparsity_block_size_to: int,
                          n_sparse_blocks_to: int) -> Tensor:
-    output = torch.zeros(size=(n_sparse_blocks_to, sparsity_block_size_to, sparsity_block_size_to),
-                         dtype=x.dtype, device=x.device)
+    with torch.no_grad():
+        output = torch.zeros(size=(n_sparse_blocks_to, sparsity_block_size_to, sparsity_block_size_to),
+                             dtype=x.dtype, device=x.device)
 
-    x_b, x_r, x_c = x.size()
-    x_b_s, x_r_s, x_c_s = stride(x)
-    s_l_x_b, s_l_x_r, s_l_x_c = sparsity_layout_from.size()
-    s_l_x_b_s, s_l_x_r_s, s_l_x_c_s = stride(sparsity_layout_from)
-    o_b, o_r, o_c = output.size()
-    o_b_s, o_r_s, o_c_s = stride(output)
-    s_lut_o_r, s_lut_o_c = sparsity_lut_to.size()
-    s_lut_o_r_s, s_lut_o_c_s = stride(sparsity_lut_to)
+        x_b, x_r, x_c = x.size()
+        x_b_s, x_r_s, x_c_s = stride(x)
+        s_l_x_b, s_l_x_r, s_l_x_c = sparsity_layout_from.size()
+        s_l_x_b_s, s_l_x_r_s, s_l_x_c_s = stride(sparsity_layout_from)
+        o_b, o_r, o_c = output.size()
+        o_b_s, o_r_s, o_c_s = stride(output)
+        s_lut_o_r, s_lut_o_c = sparsity_lut_to.size()
+        s_lut_o_r_s, s_lut_o_c_s = stride(sparsity_lut_to)
 
-    triton_grid = lambda meta: [o_b,
-                                triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),
-                                triton.cdiv(o_c, meta["TRITON_BLOCK_SIZE"])]
+        triton_grid = lambda meta: [o_b,
+                                    triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),
+                                    triton.cdiv(o_c, meta["TRITON_BLOCK_SIZE"])]
 
-    # TODO wrap
-    (adapt_layout_kernel[triton_grid]
-     (x,
-      x_b, x_b_s, x_r_s, x_c_s,
-      s_l_x_b, s_l_x_b_s, s_l_x_r_s, s_l_x_c_s,
-      sparsity_reverse_lut_from,
-      output,
-      o_b, o_b_s, o_r_s, o_c_s,
-      sparsity_lut_to, s_lut_o_r, s_lut_o_r_s, s_lut_o_c_s,
-      sparsity_block_size_from,
-      sparsity_block_size_to))
+        (wrap_triton(adapt_layout_kernel)[triton_grid]
+         (x,
+          x_b, x_b_s, x_r_s, x_c_s,
+          s_l_x_b, s_l_x_b_s, s_l_x_r_s, s_l_x_c_s,
+          sparsity_reverse_lut_from,
+          output,
+          o_b, o_b_s, o_r_s, o_c_s,
+          sparsity_lut_to, s_lut_o_r, s_lut_o_r_s, s_lut_o_c_s,
+          sparsity_block_size_from,
+          sparsity_block_size_to))
 
-    return output
+        return output
 
 
-def adapt_layout_backward(ctx, grad_output):
+def adapt_layout_wrapper_backward(ctx, grad_output):
     x, sparsity_layout_from, sparsity_layout_to = ctx.saved_tensors
     sparsity_block_size_from = ctx.sparsity_block_size_from
     sparsity_block_size_to = ctx.sparsity_block_size_to
@@ -501,4 +503,4 @@ def adapt_layout_setup_context(ctx, inputs, output):
     ctx.sparsity_block_size_to = sparsity_block_size_to
 
 
-adapt_layout_forward.register_autograd(adapt_layout_backward, setup_context=adapt_layout_setup_context)
+adapt_layout_forward.register_autograd(adapt_layout_wrapper_backward, setup_context=adapt_layout_setup_context)

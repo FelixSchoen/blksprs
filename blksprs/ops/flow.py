@@ -9,39 +9,41 @@ from blksprs.utils.tools import stride
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 
 
-@triton_op("blksprs::flow_pull", mutates_args={})
+@triton_op("blksprs::flow_pull_forward", mutates_args={})
 def flow_pull_forward(x: Tensor, sparsity_layout_o: Tensor,
                       sparsity_lut: Tensor, sparsity_reverse_lut: Tensor,
                       sparsity_block_size: int, n_sparse_blocks: int) -> Tensor:
-    output = torch.zeros(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
-                         dtype=x.dtype, device=x.device)
+    with torch.no_grad():
+        output = torch.zeros(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
+                             dtype=x.dtype, device=x.device)
 
-    x_b, x_r, x_c = x.size()
-    x_b_s, x_r_s, x_c_s = stride(x)
-    o_b, o_r, o_c = output.size()
-    o_b_s, o_r_s, o_c_s = stride(output)
-    s_l_o_b, s_l_o_r, s_l_o_c = sparsity_layout_o.size()
-    s_l_o_b_s, s_l_o_r_s, s_l_o_c_s = stride(sparsity_layout_o)
-    s_lut_r, s_lut_c = sparsity_lut.size()
-    s_lut_r_s, s_lut_c_s = stride(sparsity_lut)
+        x_b, x_r, x_c = x.size()
+        x_b_s, x_r_s, x_c_s = stride(x)
+        o_b, o_r, o_c = output.size()
+        o_b_s, o_r_s, o_c_s = stride(output)
+        s_l_o_b, s_l_o_r, s_l_o_c = sparsity_layout_o.size()
+        s_l_o_b_s, s_l_o_r_s, s_l_o_c_s = stride(sparsity_layout_o)
+        s_lut_r, s_lut_c = sparsity_lut.size()
+        s_lut_r_s, s_lut_c_s = stride(sparsity_lut)
 
-    triton_grid = lambda meta: [o_b,
-                                triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),
-                                triton.cdiv(o_c, meta["TRITON_BLOCK_SIZE"])]
+        triton_grid = lambda meta: [o_b,
+                                    triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),
+                                    triton.cdiv(o_c, meta["TRITON_BLOCK_SIZE"])]
 
-    (wrap_triton(flow_pull_kernel)[triton_grid]
-     (x,
-      x_b, x_b_s, x_r_s, x_c_s,
-      output,
-      o_b, o_b_s, o_r_s, o_c_s,
-      s_l_o_b, s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
-      sparsity_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
-      sparsity_reverse_lut,
-      sparsity_block_size))
+        (wrap_triton(flow_pull_kernel)[triton_grid]
+         (x,
+          x_b, x_b_s, x_r_s, x_c_s,
+          output,
+          o_b, o_b_s, o_r_s, o_c_s,
+          s_l_o_b, s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
+          sparsity_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
+          sparsity_reverse_lut,
+          sparsity_block_size))
 
-    return output
+        return output
 
 
+# noinspection PyUnusedLocal
 @triton.autotune(
     configs=get_autotune_configs(),
     key=["sparsity_block_size"],
@@ -99,38 +101,40 @@ def flow_pull_kernel(x,
         tl.store(o + blk_o_idx, blk_x, mask=blk_o_msk)
 
 
-@triton_op("blksprs::flow_push", mutates_args={})
+@triton_op("blksprs::flow_push_forward", mutates_args={})
 def flow_push_forward(x: Tensor, sparsity_layout_x: Tensor, sparsity_lut: Tensor, sparsity_reverse_lut: Tensor,
                       sparsity_block_size: int, n_sparse_blocks: int) -> Tensor:
-    output = torch.zeros(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
-                         dtype=x.dtype, device=x.device)
+    with torch.no_grad():
+        output = torch.zeros(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
+                             dtype=x.dtype, device=x.device)
 
-    x_b, x_r, x_c = x.size()
-    x_b_s, x_r_s, x_c_s = stride(x)
-    s_l_x_b, s_l_x_r, s_l_x_c = sparsity_layout_x.size()
-    s_l_x_b_s, s_l_x_r_s, s_l_x_c_s = stride(sparsity_layout_x)
-    s_lut_r, s_lut_c = sparsity_lut.size()
-    s_lut_r_s, s_lut_c_s = stride(sparsity_lut)
-    o_b, o_r, o_c = output.size()
-    o_b_s, o_r_s, o_c_s = stride(output)
+        x_b, x_r, x_c = x.size()
+        x_b_s, x_r_s, x_c_s = stride(x)
+        s_l_x_b, s_l_x_r, s_l_x_c = sparsity_layout_x.size()
+        s_l_x_b_s, s_l_x_r_s, s_l_x_c_s = stride(sparsity_layout_x)
+        s_lut_r, s_lut_c = sparsity_lut.size()
+        s_lut_r_s, s_lut_c_s = stride(sparsity_lut)
+        o_b, o_r, o_c = output.size()
+        o_b_s, o_r_s, o_c_s = stride(output)
 
-    triton_grid = lambda meta: [x_b,
-                                triton.cdiv(x_r, meta["TRITON_BLOCK_SIZE"]),
-                                triton.cdiv(x_c, meta["TRITON_BLOCK_SIZE"])]
+        triton_grid = lambda meta: [x_b,
+                                    triton.cdiv(x_r, meta["TRITON_BLOCK_SIZE"]),
+                                    triton.cdiv(x_c, meta["TRITON_BLOCK_SIZE"])]
 
-    (wrap_triton(flow_push_kernel)[triton_grid]
-     (x,
-      x_b, x_b_s, x_r_s, x_c_s,
-      s_l_x_b, s_l_x_b_s, s_l_x_r_s, s_l_x_c_s,
-      sparsity_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
-      sparsity_reverse_lut,
-      output,
-      o_b, o_b_s, o_r_s, o_c_s,
-      sparsity_block_size))
+        (wrap_triton(flow_push_kernel)[triton_grid]
+         (x,
+          x_b, x_b_s, x_r_s, x_c_s,
+          s_l_x_b, s_l_x_b_s, s_l_x_r_s, s_l_x_c_s,
+          sparsity_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
+          sparsity_reverse_lut,
+          output,
+          o_b, o_b_s, o_r_s, o_c_s,
+          sparsity_block_size))
 
-    return output
+        return output
 
 
+# noinspection PyUnusedLocal
 @triton.autotune(
     configs=get_autotune_configs(),
     key=["sparsity_block_size"],

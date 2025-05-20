@@ -55,53 +55,54 @@ def matmul(x: BlksprsTensor, sparsity_layout_x: Tensor,
                                         sparsity_block_size, lut["n_sparse_blocks"]))
 
 
-@triton_op("blksprs::matmul", mutates_args={})
+@triton_op("blksprs::matmul_forward", mutates_args={})
 def matmul_forward(x: Tensor, y: Tensor,
                    sparsity_layout_x: Tensor, sparsity_reverse_lut_x: Tensor,
                    sparsity_layout_y: Tensor, sparsity_reverse_lut_y: Tensor,
                    _: Tensor, sparsity_lut_o: Tensor,
                    sparsity_block_size: int, n_sparse_blocks: int) -> Tensor:
-    output = torch.zeros(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
-                         dtype=x.dtype, device=x.device)
+    with torch.no_grad():
+        output = torch.zeros(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
+                             dtype=x.dtype, device=x.device)
 
-    x_b, x_r, x_c = x.size()
-    x_b_s, x_r_s, x_c_s = stride(x)
-    s_l_x_b, s_l_x_r, s_l_x_c = sparsity_layout_x.size()
-    s_l_x_b_s, s_l_x_r_s, s_l_x_c_s = stride(sparsity_layout_x)
-    y_b, y_r, y_c = y.size()
-    y_b_s, y_r_s, y_c_s = stride(y)
-    s_l_y_b, s_l_y_r, s_l_y_c = sparsity_layout_y.size()
-    s_l_y_b_s, s_l_y_r_s, s_l_y_c_s = stride(sparsity_layout_y)
-    o_b, o_r, o_c = output.size()
-    o_b_s, o_r_s, o_c_s = stride(output)
-    s_lut_o_r, s_lut_o_c = sparsity_lut_o.size()
-    s_lut_o_r_s, s_lut_o_c_s = stride(sparsity_lut_o)
+        x_b, x_r, x_c = x.size()
+        x_b_s, x_r_s, x_c_s = stride(x)
+        s_l_x_b, s_l_x_r, s_l_x_c = sparsity_layout_x.size()
+        s_l_x_b_s, s_l_x_r_s, s_l_x_c_s = stride(sparsity_layout_x)
+        y_b, y_r, y_c = y.size()
+        y_b_s, y_r_s, y_c_s = stride(y)
+        s_l_y_b, s_l_y_r, s_l_y_c = sparsity_layout_y.size()
+        s_l_y_b_s, s_l_y_r_s, s_l_y_c_s = stride(sparsity_layout_y)
+        o_b, o_r, o_c = output.size()
+        o_b_s, o_r_s, o_c_s = stride(output)
+        s_lut_o_r, s_lut_o_c = sparsity_lut_o.size()
+        s_lut_o_r_s, s_lut_o_c_s = stride(sparsity_lut_o)
 
-    triton_grid = lambda meta: [o_b,
-                                triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),
-                                triton.cdiv(o_c, meta["TRITON_BLOCK_SIZE"])]
+        triton_grid = lambda meta: [o_b,
+                                    triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),
+                                    triton.cdiv(o_c, meta["TRITON_BLOCK_SIZE"])]
 
-    (wrap_triton(matmul_kernel)[triton_grid]
-     (x,
-      x_b, x_b_s, x_r_s, x_c_s,
-      s_l_x_b, s_l_x_b_s, s_l_x_r_s,
-      s_l_x_c, s_l_x_c_s,
-      sparsity_reverse_lut_x,
-      y,
-      y_b, y_b_s, y_r_s, y_c_s,
-      s_l_y_b, s_l_y_b_s, s_l_y_r_s,
-      s_l_y_c_s,
-      sparsity_reverse_lut_y,
-      output,
-      o_b, o_b_s, o_r_s, o_c_s,
-      sparsity_lut_o,
-      s_lut_o_r, s_lut_o_r_s, s_lut_o_c_s,
-      sparsity_block_size))
+        (wrap_triton(matmul_kernel)[triton_grid]
+         (x,
+          x_b, x_b_s, x_r_s, x_c_s,
+          s_l_x_b, s_l_x_b_s, s_l_x_r_s,
+          s_l_x_c, s_l_x_c_s,
+          sparsity_reverse_lut_x,
+          y,
+          y_b, y_b_s, y_r_s, y_c_s,
+          s_l_y_b, s_l_y_b_s, s_l_y_r_s,
+          s_l_y_c_s,
+          sparsity_reverse_lut_y,
+          output,
+          o_b, o_b_s, o_r_s, o_c_s,
+          sparsity_lut_o,
+          s_lut_o_r, s_lut_o_r_s, s_lut_o_c_s,
+          sparsity_block_size))
 
-    return output
+        return output
 
 
-def matmul_backward(ctx, grad_output):
+def matmul_wrapper_backward(ctx, grad_output):
     x, sparsity_layout_x, y, sparsity_layout_y, sparsity_layout_o = ctx.saved_tensors
     sparsity_block_size = ctx.sparsity_block_size
 
@@ -256,4 +257,4 @@ def matmul_setup_context(ctx, inputs, output):
     ctx.sparsity_block_size = sparsity_block_size
 
 
-matmul_forward.register_autograd(matmul_backward, setup_context=matmul_setup_context)
+matmul_forward.register_autograd(matmul_wrapper_backward, setup_context=matmul_setup_context)

@@ -51,44 +51,45 @@ def gather(src: BlksprsTensor, sparsity_layout_src: Tensor,
                                         sparsity_block_size))
 
 
-@triton_op("blksprs::gather", mutates_args={})
+@triton_op("blksprs::gather_forward", mutates_args={})
 def gather_forward(x: Tensor, sparsity_layout_x: Tensor, sparsity_reverse_lut_x: Tensor,
                    dim: int, i: Tensor, _: Tensor, sparsity_lut_i: Tensor,
                    sparsity_block_size: int) -> Tensor:
-    output = torch.zeros_like(i, dtype=x.dtype)
+    with torch.no_grad():
+        output = torch.zeros_like(i, dtype=x.dtype)
 
-    x_b, x_r, x_c = x.size()
-    x_b_s, x_r_s, x_c_s = stride(x)
-    s_l_x_b, s_l_x_r, s_l_x_c = sparsity_layout_x.size()
-    s_l_x_b_s, s_l_x_r_s, s_l_x_c_s = stride(sparsity_layout_x)
-    i_b, i_r, i_c = i.size()
-    i_b_s, i_r_s, i_c_s = stride(i)
-    s_lut_i_r, s_lut_i_c = sparsity_lut_i.size()
-    s_lut_i_r_s, s_lut_i_c_s = stride(sparsity_lut_i)
-    o_b, o_r, o_c = output.size()
-    o_b_s, o_r_s, o_c_s = stride(output)
+        x_b, x_r, x_c = x.size()
+        x_b_s, x_r_s, x_c_s = stride(x)
+        s_l_x_b, s_l_x_r, s_l_x_c = sparsity_layout_x.size()
+        s_l_x_b_s, s_l_x_r_s, s_l_x_c_s = stride(sparsity_layout_x)
+        i_b, i_r, i_c = i.size()
+        i_b_s, i_r_s, i_c_s = stride(i)
+        s_lut_i_r, s_lut_i_c = sparsity_lut_i.size()
+        s_lut_i_r_s, s_lut_i_c_s = stride(sparsity_lut_i)
+        o_b, o_r, o_c = output.size()
+        o_b_s, o_r_s, o_c_s = stride(output)
 
-    triton_grid = lambda meta: [o_b,
-                                triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),
-                                triton.cdiv(o_c, meta["TRITON_BLOCK_SIZE"])]
+        triton_grid = lambda meta: [o_b,
+                                    triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),
+                                    triton.cdiv(o_c, meta["TRITON_BLOCK_SIZE"])]
 
-    (wrap_triton(gather_kernel)[triton_grid]
-     (x,
-      x_b, x_b_s, x_r_s, x_c_s,
-      s_l_x_b, s_l_x_b_s, s_l_x_r_s, s_l_x_c_s,
-      sparsity_reverse_lut_x,
-      dim,
-      i,
-      i_b, i_b_s, i_r_s, i_c_s,
-      output,
-      o_b, o_b_s, o_r_s, o_c_s,
-      sparsity_lut_i, s_lut_i_r, s_lut_i_r_s, s_lut_i_c_s,
-      sparsity_block_size))
+        (wrap_triton(gather_kernel)[triton_grid]
+         (x,
+          x_b, x_b_s, x_r_s, x_c_s,
+          s_l_x_b, s_l_x_b_s, s_l_x_r_s, s_l_x_c_s,
+          sparsity_reverse_lut_x,
+          dim,
+          i,
+          i_b, i_b_s, i_r_s, i_c_s,
+          output,
+          o_b, o_b_s, o_r_s, o_c_s,
+          sparsity_lut_i, s_lut_i_r, s_lut_i_r_s, s_lut_i_c_s,
+          sparsity_block_size))
 
-    return output
+        return output
 
 
-def gather_backward(ctx, grad_output):
+def gather_wrapper_backward(ctx, grad_output):
     sparsity_layout_x, i, sparsity_layout_i = ctx.saved_tensors
     dim = ctx.dim
     sparsity_block_size = ctx.sparsity_block_size
@@ -221,7 +222,7 @@ def gather_setup_context(ctx, inputs, output):
     ctx.sparsity_block_size = sparsity_block_size
 
 
-gather_forward.register_autograd(gather_backward, setup_context=gather_setup_context)
+gather_forward.register_autograd(gather_wrapper_backward, setup_context=gather_setup_context)
 
 
 def scatter(src: BlksprsTensor, sparsity_layout_src: Tensor,
@@ -288,52 +289,53 @@ def scatter_reduce(src: BlksprsTensor, sparsity_layout_src: Tensor,
                                                 reduce_op))
 
 
-@triton_op("blksprs::scatter_reduce", mutates_args={})
+@triton_op("blksprs::scatter_reduce_forward", mutates_args={})
 def scatter_reduce_forward(x: Tensor, _: Tensor, sparsity_lut_x: Tensor,
                            dim: int, i: Tensor,
                            sparsity_layout_o: Tensor, sparsity_reverse_lut_o: Tensor,
                            sparsity_block_size: int, n_sparse_blocks: int,
                            reduce_op: str) -> Tensor:
-    output = torch.zeros(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
-                         dtype=x.dtype, device=x.device)
+    with torch.no_grad():
+        output = torch.zeros(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
+                             dtype=x.dtype, device=x.device)
 
-    x_b, x_r, x_c = x.size()
-    x_b_s, x_r_s, x_c_s = stride(x)
-    s_lut_x_r, s_lut_x_c = sparsity_lut_x.size()
-    s_lut_x_r_s, s_lut_x_c_s = stride(sparsity_lut_x)
-    i_b, i_r, i_c = i.size()
-    i_b_s, i_r_s, i_c_s = stride(i)
-    o_b, o_r, o_c = output.size()
-    o_b_s, o_r_s, o_c_s = stride(output)
-    s_l_o_b, s_l_o_r, s_l_o_c = sparsity_layout_o.size()
-    s_l_o_b_s, s_l_o_r_s, s_l_o_c_s = stride(sparsity_layout_o)
+        x_b, x_r, x_c = x.size()
+        x_b_s, x_r_s, x_c_s = stride(x)
+        s_lut_x_r, s_lut_x_c = sparsity_lut_x.size()
+        s_lut_x_r_s, s_lut_x_c_s = stride(sparsity_lut_x)
+        i_b, i_r, i_c = i.size()
+        i_b_s, i_r_s, i_c_s = stride(i)
+        o_b, o_r, o_c = output.size()
+        o_b_s, o_r_s, o_c_s = stride(output)
+        s_l_o_b, s_l_o_r, s_l_o_c = sparsity_layout_o.size()
+        s_l_o_b_s, s_l_o_r_s, s_l_o_c_s = stride(sparsity_layout_o)
 
-    triton_grid = lambda meta: [x_b,
-                                triton.cdiv(x_r, meta["TRITON_BLOCK_SIZE"]),
-                                triton.cdiv(x_c, meta["TRITON_BLOCK_SIZE"])]
+        triton_grid = lambda meta: [x_b,
+                                    triton.cdiv(x_r, meta["TRITON_BLOCK_SIZE"]),
+                                    triton.cdiv(x_c, meta["TRITON_BLOCK_SIZE"])]
 
-    reduce_op_ind = 0
-    if reduce_op == "sum":
-        reduce_op_ind = 1
+        reduce_op_ind = 0
+        if reduce_op == "sum":
+            reduce_op_ind = 1
 
-    (wrap_triton(scatter_reduce_kernel)[triton_grid]
-     (x,
-      x_b, x_b_s, x_r_s, x_c_s,
-      sparsity_lut_x, s_lut_x_r, s_lut_x_r_s, s_lut_x_c_s,
-      dim,
-      i,
-      i_b, i_b_s, i_r_s, i_c_s,
-      output,
-      o_b, o_b_s,
-      s_l_o_b, s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
-      sparsity_reverse_lut_o,
-      reduce_op_ind,
-      sparsity_block_size))
+        (wrap_triton(scatter_reduce_kernel)[triton_grid]
+         (x,
+          x_b, x_b_s, x_r_s, x_c_s,
+          sparsity_lut_x, s_lut_x_r, s_lut_x_r_s, s_lut_x_c_s,
+          dim,
+          i,
+          i_b, i_b_s, i_r_s, i_c_s,
+          output,
+          o_b, o_b_s,
+          s_l_o_b, s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
+          sparsity_reverse_lut_o,
+          reduce_op_ind,
+          sparsity_block_size))
 
-    return output
+        return output
 
 
-def scatter_reduce_backward(ctx, grad_output):
+def scatter_reduce_wrapper_backward(ctx, grad_output):
     sparsity_layout_x, i, sparsity_layout_o = ctx.saved_tensors
     dim = ctx.dim
     sparsity_block_size = ctx.sparsity_block_size
@@ -477,4 +479,4 @@ def scatter_reduce_setup_context(ctx, inputs, output):
     ctx.reduce_op = reduce_op
 
 
-scatter_reduce_forward.register_autograd(scatter_reduce_backward, setup_context=scatter_reduce_setup_context)
+scatter_reduce_forward.register_autograd(scatter_reduce_wrapper_backward, setup_context=scatter_reduce_setup_context)
