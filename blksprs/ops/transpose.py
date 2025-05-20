@@ -28,7 +28,6 @@ def transpose(x: BlksprsTensor, sparsity_layout: Tensor,
 
     """
     x = x.contiguous()
-    x_t = x.transpose(-1, -2).contiguous()
 
     validate_dimensions(x)
     validate_contiguous(x)
@@ -38,7 +37,7 @@ def transpose(x: BlksprsTensor, sparsity_layout: Tensor,
 
     lut = transpose_build_lut(lut, sparsity_layout)
 
-    return BlksprsTensor(transpose_forward(x_t, lut["sparsity_layout_t"],
+    return BlksprsTensor(transpose_forward(x, lut["sparsity_layout_t"],
                                            lut["sparsity_lut"], lut["sparsity_reverse_lut"],
                                            sparsity_block_size, lut["n_sparse_blocks"])), lut["sparsity_layout_t"]
 
@@ -47,7 +46,8 @@ def transpose(x: BlksprsTensor, sparsity_layout: Tensor,
 def transpose_forward(x: Tensor, sparsity_layout_o: Tensor,
                       sparsity_lut: Tensor, sparsity_reverse_lut: Tensor,
                       sparsity_block_size: int, n_sparse_blocks: int) -> Tensor:
-    return flow_pull_forward(x, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut,
+    x_t = x.detach().transpose(-1, -2).contiguous()
+    return flow_pull_forward(x_t, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut,
                              sparsity_block_size, n_sparse_blocks)
 
 
