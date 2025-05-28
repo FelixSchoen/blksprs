@@ -5,14 +5,14 @@ from torch import Tensor, Size
 torch._dynamo.config.capture_scalar_outputs = True
 
 
-def do_shape_blocksparse(x: Tensor):
+def do_shape_blocksparse(x: Tensor) -> tuple[Tensor, Size]:
     if x.dim() == 3:
         return x.contiguous(), x.size()
 
     return x.reshape(-1, x.size(-2), x.size(-1)).contiguous(), x.size()
 
 
-def undo_shape_blocksparse(x: Tensor, shape: Size):
+def undo_shape_blocksparse(x: Tensor, shape: Size | tuple[int, ...]) -> Tensor:
     if x.shape[:-2] == shape[:-2]:
         return x
 
