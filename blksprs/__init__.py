@@ -1,5 +1,6 @@
-from blksprs.utils.tools import version
 from blksprs.utils.blksprs_tensor import BlksprsTensor
+
+__version__ = "2.0-rc.8"
 
 
 class ops:

@@ -1,16 +1,8 @@
-import tomllib
-from pathlib import Path
-
 import torch
 from torch import Tensor, Size
 
 # Capture scalar outputs for JIT compilation
 torch._dynamo.config.capture_scalar_outputs = True
-
-
-def version():
-    with open(Path(__file__).parent.parent.parent.joinpath("pyproject.toml"), "rb") as f:
-        return tomllib.load(f)["project"]["version"]
 
 
 def do_shape_blocksparse(x: Tensor):

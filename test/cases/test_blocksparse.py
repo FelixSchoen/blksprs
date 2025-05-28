@@ -1,4 +1,5 @@
 import os
+import tomllib
 
 os.environ["BLKSPRS_TEST"] = "TEST"
 
@@ -1087,8 +1088,7 @@ def test_subclass(config: list):
     assert type(x_bs).__name__ == BlksprsTensor.__name__
 
 def test_version():
-    version = bs.version()
-    print(version)
+    assert bs.__version__ == _get_version()
 
 # Utility
 
@@ -1127,6 +1127,9 @@ def _blocksparse_roundtrip(x, sparsity_layout, sparsity_block_size, fill_value=0
                            sparsity_layout,
                            sparsity_block_size, fill_value=fill_value)
 
+def _get_version():
+    with open(Path(__file__).parent.parent.parent.joinpath("pyproject.toml"), "rb") as f:
+        return tomllib.load(f)["project"]["version"]
 
 # Visualisation
 
