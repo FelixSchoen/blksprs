@@ -204,8 +204,8 @@ def to_dense(x: BlksprsTensor, sparsity_layout: Tensor,
     if sparsity_layout.size(1) == 1 and sparsity_layout.size(2) == 1 and torch.all(sparsity_layout):
         return x
 
-    return to_dense_forward(x, sparsity_layout,
-                            lut["sparsity_reverse_lut"], sparsity_block_size, fill_value)
+    return Tensor(to_dense_forward(x, sparsity_layout,
+                            lut["sparsity_reverse_lut"], sparsity_block_size, fill_value))
 
 
 @triton_op("blksprs::to_dense_forward", mutates_args={})
