@@ -1,3 +1,5 @@
+import pdb
+
 import torch
 import triton
 from torch import Tensor
@@ -7,6 +9,7 @@ from triton import language as tl
 
 from blksprs.ops.misc.row_wise import row_wise_sum, row_wise_max, row_wise_sub
 from blksprs.utils.blksprs_tensor import BlksprsTensor
+from blksprs.utils.debugging import dbg_tensor_full
 from blksprs.utils.tools import stride
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
@@ -302,3 +305,128 @@ def softmax_setup_context(ctx, inputs, output):
 
 
 softmax_forward.register_autograd(softmax_backward_wrapper, setup_context=softmax_setup_context)
+
+
+@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float32)
+def softmax_fused(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
+                  lut: dict = None) -> BlksprsTensor:
+    """Computes the softmax fused for each row of a block-sparse tensor in compressed form.
+
+    Note:
+        This softmax implementation is a fused version that loads the entire row of a block-sparse tensor into memory.
+        See :func:`softmax` for a true block-wise softmax implementation.
+
+    Args:
+        x (BlksprsTensor): A block-sparse tensor in compressed form.
+        sparsity_layout (Tensor): The sparsity layout of the block-sparse tensor.
+        sparsity_block_size (int): The size of the sparsity blocks.
+        lut (dict, optional): A dictionary containing the look-up tables for the operation (default ``None``).
+
+    Returns:
+        BlksprsTensor: The result of the softmax operation as a block-sparse tensor in compressed form.
+
+    """
+    x = x.contiguous()
+
+    validate_dimensions(x)
+    validate_contiguous(x)
+    validate_dtype_float_32(x)
+    validate_device(x)
+    validate_sparsity(sparsity_block_size, (x, sparsity_layout))
+    validate_sparsity_block_size(sparsity_block_size, x)
+
+    lut = softmax_fused_build_lut(lut, sparsity_layout)
+
+    return BlksprsTensor(softmax_fused_forward(x, sparsity_layout,
+                                               lut["sparsity_reverse_lut"],
+                                               sparsity_block_size))
+
+
+@triton_op("blksprs::softmax_fused_forward", mutates_args={})
+def softmax_fused_forward(x: Tensor, sparsity_layout: Tensor,
+                          sparsity_reverse_lut: Tensor,
+                          sparsity_block_size: int) -> Tensor:
+    output = torch.zeros_like(x)
+
+    x_b, x_r, x_c = x.size()
+    x_b_s, x_r_s, x_c_s = stride(x)
+    s_l_b, s_l_r, s_l_c = sparsity_layout.size()
+    s_l_b_s, s_l_r_s, s_l_c_s = stride(sparsity_layout)
+
+    triton_grid = lambda meta: [s_l_b,
+                                s_l_r,
+                                sparsity_block_size]
+
+    (wrap_triton(softmax_fused_kernel)[triton_grid]
+     (x,
+      x_b, x_b_s, x_r_s, x_c_s,
+      output,
+      s_l_b, s_l_b_s, s_l_r_s, s_l_c, s_l_c_s,
+      sparsity_reverse_lut,
+      sparsity_block_size))
+
+    return output
+
+
+@triton.autotune(
+    configs=get_autotune_configs(),
+    key=["sparsity_block_size"],
+    prune_configs_by={"early_config_prune": prune_autotune_configs},
+    reset_to_zero=["o"]
+)
+@triton.jit
+def softmax_fused_kernel(x,
+                         x_b, x_b_s, x_r_s, x_c_s,
+                         o,
+                         s_l_b, s_l_b_s, s_l_r_s, s_l_c: tl.constexpr, s_l_c_s,
+                         r_lut,
+                         sparsity_block_size: tl.constexpr,
+                         TRITON_BLOCK_SIZE: tl.constexpr) -> None:
+    # Get triton block indices
+    pid_bat = tl.program_id(axis=0)
+    pid_row = tl.program_id(axis=1)
+    pid_lin = tl.program_id(axis=2)
+
+    # Load reverse sparsity indices of row
+    blk_rev_idx = (pid_bat * s_l_b_s +
+                   pid_row * s_l_r_s +
+                   (tl.arange(0, s_l_c) * s_l_c_s))
+    blk_rev_msk = (blk_rev_idx >= 0 and blk_rev_idx < s_l_b * s_l_b_s)
+    blk_rev = tl.load(r_lut + blk_rev_idx, mask=blk_rev_msk).to(tl.int32)
+
+    # Extend sparsity indices to cover sparsity blocks
+    blk_rev_ext = tl.expand_dims(blk_rev, -1)
+    blk_rev_ext = tl.broadcast_to(blk_rev_ext, (s_l_c, sparsity_block_size))
+    blk_rev_ext = tl.reshape(blk_rev_ext, (s_l_c * sparsity_block_size))
+
+    # Load line of x
+    blk_x_idx = (blk_rev_ext * x_b_s +
+                 pid_lin * x_r_s +
+                 (tl.arange(0, s_l_c * sparsity_block_size) % sparsity_block_size) * x_c_s)
+    blk_x_mask = ((blk_x_idx >= 0 and blk_x_idx < x_b * x_b_s)
+                  and blk_rev_ext != -1)
+    blk_x = tl.load(x + blk_x_idx, mask=blk_x_mask, other=float("-inf"))
+
+    # Compute softmax
+    blk_x_softmax = tl.softmax(blk_x)
+
+    # Store output
+    tl.store(o + blk_x_idx, blk_x_softmax, mask=blk_x_mask)
+
+
+def softmax_fused_build_lut(lut: dict, sparsity_layout: Tensor):
+    if lut is None:
+        lut = dict()
+
+    if "sparsity_reverse_lut" not in lut:
+        sparsity_layout_flat = sparsity_layout.reshape(-1)
+        sparsity_reverse_lut = (((torch.cumsum(sparsity_layout_flat, dim=-1) - 1) *
+                                 (sparsity_layout_flat == 1) -
+                                 (1 * (sparsity_layout_flat == 0)))
+                                .reshape(sparsity_layout.size())
+                                .reshape(-1).contiguous())
+        lut["sparsity_reverse_lut"] = sparsity_reverse_lut
+
+    validate_contiguous(sparsity_layout, lut["sparsity_reverse_lut"])
+
+    return lut

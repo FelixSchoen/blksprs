@@ -7,7 +7,7 @@ class ops:
     from blksprs.ops.conversion import to_dense, to_sparse, from_blksprs, to_blksprs, adapt_layout
     from blksprs.ops.distribution import gather, scatter, scatter_reduce
     from blksprs.ops.matmul import matmul
-    from blksprs.ops.softmax import softmax
+    from blksprs.ops.softmax import softmax, softmax_fused
     from blksprs.ops.transpose import transpose
     from blksprs.ops.repeat import repeat, repeat_interleave
     from blksprs.ops.partitioning import split, merge

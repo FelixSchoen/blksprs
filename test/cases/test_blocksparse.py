@@ -75,7 +75,7 @@ RTOL = 1e-2
 
 # Seed
 SEED = 0
-RANDOM_SEED = True
+RANDOM_SEED = False
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -534,41 +534,49 @@ def test_blksprs_softmax(config: list, use_amp: bool):
     with torch.amp.autocast(device_type="cuda", enabled=use_amp):
         b, m, n, k, sparsity_block_size, sparsity_percentage = config
 
-        with torch.amp.autocast(device_type="cuda"):
-            x_d = torch.randn(size=(b, m, k), device=DEVICE)
-            sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size),
-                                             device=DEVICE)
+        x_d = torch.randn(size=(b, m, k), device=DEVICE)
+        sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size),
+                                         device=DEVICE)
 
-            sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
-            x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size,
-                                          fill_value=_get_autocast_min_val())
+        sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
+        x_bs = _blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size,
+                                      fill_value=_get_autocast_min_val())
 
-            for x, sparsity_layout_x in [(x_d, sparsity_layout_x_d), (x_bs, sparsity_layout_x_bs)]:
-                x_stock = x.clone().requires_grad_(True)
-                x_blksprs = x.clone().requires_grad_(True)
+        for x, sparsity_layout_x in [(x_d, sparsity_layout_x_d), (x_bs, sparsity_layout_x_bs)]:
+            x_stock = x.clone().requires_grad_(True)
+            x_blksprs = x.clone().requires_grad_(True)
 
-                stock_softmax_out = torch.softmax(x_stock, dim=-1)
-                stock_dtype = stock_softmax_out.dtype
+            stock_softmax_out = _blocksparse_roundtrip(torch.softmax(x_stock, dim=-1), sparsity_layout_x,
+                                                       sparsity_block_size)
+            stock_dtype = stock_softmax_out.dtype
 
-                blksprs_softmax_out = bs.ops.softmax(
-                    bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
-                    sparsity_layout_x, sparsity_block_size)
-                blksprs_softmax_dense_out = bs.ops.to_dense(blksprs_softmax_out, sparsity_layout_x,
-                                                            sparsity_block_size)
+            blksprs_softmax_out = bs.ops.softmax(
+                bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
+                sparsity_layout_x, sparsity_block_size)
+            blksprs_softmax_dense_out = bs.ops.to_dense(blksprs_softmax_out, sparsity_layout_x,
+                                                        sparsity_block_size)
 
-                assert torch.allclose(blksprs_softmax_dense_out.to(stock_dtype), stock_softmax_out, atol=ATOL,
-                                      rtol=RTOL)
+            blksprs_softmax_fused_out = bs.ops.softmax_fused(
+                bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
+                sparsity_layout_x, sparsity_block_size)
+            blksprs_softmax_fused_dense_out = bs.ops.to_dense(blksprs_softmax_fused_out, sparsity_layout_x,
+                                                              sparsity_block_size)
 
-                target = torch.randn_like(stock_softmax_out)
-                stock_loss = torch.nn.L1Loss()
-                blksprs_loss = torch.nn.L1Loss()
-                stock_loss = stock_loss(stock_softmax_out, target)
-                blksprs_loss = blksprs_loss(blksprs_softmax_dense_out, target)
+            assert torch.allclose(blksprs_softmax_dense_out.to(stock_dtype), stock_softmax_out, atol=ATOL,
+                                  rtol=RTOL)
+            assert torch.allclose(blksprs_softmax_fused_dense_out.to(stock_dtype), stock_softmax_out, atol=ATOL,
+                                  rtol=RTOL)
 
-                stock_loss.backward()
-                blksprs_loss.backward()
+            target = torch.randn_like(stock_softmax_out)
+            stock_loss = torch.nn.L1Loss()
+            blksprs_loss = torch.nn.L1Loss()
+            stock_loss = stock_loss(stock_softmax_out, target)
+            blksprs_loss = blksprs_loss(blksprs_softmax_dense_out, target)
 
-                assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
+            stock_loss.backward()
+            blksprs_loss.backward()
+
+            assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
 
 
 @pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
@@ -1087,8 +1095,10 @@ def test_subclass(config: list):
 
     assert type(x_bs).__name__ == BlksprsTensor.__name__
 
+
 def test_version():
     assert bs.__version__ == _get_version()
+
 
 # Utility
 
@@ -1127,9 +1137,11 @@ def _blocksparse_roundtrip(x, sparsity_layout, sparsity_block_size, fill_value=0
                            sparsity_layout,
                            sparsity_block_size, fill_value=fill_value)
 
+
 def _get_version():
     with open(Path(__file__).parent.parent.parent.joinpath("pyproject.toml"), "rb") as f:
         return tomllib.load(f)["project"]["version"]
+
 
 # Visualisation
 
