@@ -553,7 +553,7 @@ def test_blksprs_softmax(config: list, use_amp: bool):
 
             blksprs_softmax_out = bs.ops.softmax(
                 bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
-                sparsity_layout_x, sparsity_block_size)
+                sparsity_layout_x, sparsity_block_size, flag_fused=False)
             blksprs_softmax_dense_out = bs.ops.to_dense(blksprs_softmax_out, sparsity_layout_x,
                                                         sparsity_block_size)
 

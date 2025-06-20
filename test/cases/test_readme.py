@@ -66,6 +66,7 @@ def test_readme():
     # Other available functions
     bs.ops.transpose(o_sparse, sparsity_layout_o, sparsity_block_size)
     bs.ops.softmax(o_sparse, sparsity_layout_o, sparsity_block_size)
+    bs.ops.softmax_fused(o_sparse, sparsity_layout_o, sparsity_block_size) # Significantly faster version that requires that rows of matrix fit into memory
     bs.ops.misc.row_wise_sum(o_sparse, sparsity_layout_o, sparsity_block_size)
     bs.ops.misc.row_wise_max(o_sparse, sparsity_layout_o, sparsity_block_size)
 

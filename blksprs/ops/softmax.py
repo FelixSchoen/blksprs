@@ -9,15 +9,26 @@ from triton import language as tl
 
 from blksprs.ops.misc.row_wise import row_wise_sum, row_wise_max, row_wise_sub
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.debugging import dbg_tensor_full
 from blksprs.utils.tools import stride
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity, validate_sparsity_block_size, validate_dtype_float_32
 
 
+def softmax(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int, flag_fused: bool = True,
+            lut: dict = None) -> BlksprsTensor:
+    """Wrapper for :func:`softmax_regular` and :func:`softmax_fused` based on the ``flag_fused`` parameter.
+
+    """
+    if flag_fused:
+        return softmax_fused(x, sparsity_layout, sparsity_block_size, lut)
+    else:
+        return softmax_regular(x, sparsity_layout, sparsity_block_size, lut)
+
+
 @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float32)
-def softmax(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int, lut: dict = None) -> BlksprsTensor:
+def softmax_regular(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
+                    lut: dict = None) -> BlksprsTensor:
     """Computes the softmax of a block-sparse tensor in compressed form.
 
     Note:

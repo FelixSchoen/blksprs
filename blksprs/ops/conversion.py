@@ -13,7 +13,7 @@ from blksprs.utils.validation import validate_contiguous, validate_dimensions, v
 
 
 def to_blksprs(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int) -> BlksprsTensor:
-    """Wrapper for ``to_sparse``.
+    """Wrapper for :func:`to_sparse`.
 
     """
     return to_sparse(x, sparsity_layout, sparsity_block_size)
@@ -167,7 +167,7 @@ to_sparse_forward.register_autograd(to_sparse_wrapper_backward, setup_context=to
 
 def from_blksprs(x: BlksprsTensor, sparsity_layout: Tensor,
                  sparsity_block_size: int, fill_value: float = 0, lut: dict = None) -> Tensor:
-    """Wrapper for ``to_dense``.
+    """Wrapper for :func:`to_dense`.
 
     """
     return to_dense(x, sparsity_layout, sparsity_block_size, fill_value=fill_value, lut=lut)
