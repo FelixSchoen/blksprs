@@ -2,7 +2,7 @@
 name = "blksprs"
 version = "2.1.1"
 authors = [{ name = "Felix Schön", email = "schoen@kr.tuwien.ac.at" }]
-description = "A lightweight library for operations on blocksparse matrices in PyTorch."
+description = "A lightweight library for operations on block-sparse matrices in PyTorch."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE.md" }
