@@ -545,6 +545,7 @@ def test_blksprs_softmax(config: list, use_amp: bool):
         for x, sparsity_layout_x in [(x_d, sparsity_layout_x_d), (x_bs, sparsity_layout_x_bs)]:
             x_stock = x.clone().requires_grad_(True)
             x_blksprs = x.clone().requires_grad_(True)
+            x_blksprs_fused = x.clone().requires_grad_(True)
 
             stock_softmax_out = _blocksparse_roundtrip(torch.softmax(x_stock, dim=-1), sparsity_layout_x,
                                                        sparsity_block_size)
@@ -557,7 +558,7 @@ def test_blksprs_softmax(config: list, use_amp: bool):
                                                         sparsity_block_size)
 
             blksprs_softmax_fused_out = bs.ops.softmax_fused(
-                bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
+                bs.ops.to_sparse(x_blksprs_fused, sparsity_layout_x, sparsity_block_size),
                 sparsity_layout_x, sparsity_block_size)
             blksprs_softmax_fused_dense_out = bs.ops.to_dense(blksprs_softmax_fused_out, sparsity_layout_x,
                                                               sparsity_block_size)
@@ -570,13 +571,17 @@ def test_blksprs_softmax(config: list, use_amp: bool):
             target = torch.randn_like(stock_softmax_out)
             stock_loss = torch.nn.L1Loss()
             blksprs_loss = torch.nn.L1Loss()
+            blksprs_fused_loss = torch.nn.L1Loss()
             stock_loss = stock_loss(stock_softmax_out, target)
             blksprs_loss = blksprs_loss(blksprs_softmax_dense_out, target)
+            blksprs_fused_loss = blksprs_fused_loss(blksprs_softmax_fused_dense_out, target)
 
             stock_loss.backward()
             blksprs_loss.backward()
+            blksprs_fused_loss.backward()
 
             assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
+            assert torch.allclose(x_blksprs_fused.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
 
 
 @pytest.mark.parametrize("config", TEST_CONFIGURATIONS)

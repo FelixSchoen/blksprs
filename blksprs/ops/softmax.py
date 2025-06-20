@@ -103,6 +103,8 @@ def softmax_backward_wrapper(ctx, grad_output):
 def softmax_backward(grad_output: Tensor, o: Tensor, sparsity_lut: Tensor, sparsity_layout: Tensor,
                      sparsity_block_size: int) -> Tensor:
     with torch.no_grad():
+        grad_x = torch.zeros_like(o, dtype=torch.float)
+
         s, sparsity_layout_s = row_wise_sum(grad_output * o, sparsity_layout, sparsity_block_size, flag_slice_only=True)
 
         sparsity_layout_s_flat = sparsity_layout_s.reshape(-1)
@@ -118,8 +120,6 @@ def softmax_backward(grad_output: Tensor, o: Tensor, sparsity_lut: Tensor, spars
         s_b_s, s_r_s, s_c_s = stride(s)
         s_l_s_b, s_l_s_r, s_l_s_c = sparsity_layout_s.size()
         s_l_s_b_s, s_l_s_r_s, s_l_s_c_s = stride(sparsity_layout_s)
-
-        grad_x = torch.zeros_like(o, dtype=torch.float)
 
         triton_grid = lambda meta: [o_b,
                                     triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),
@@ -368,6 +368,45 @@ def softmax_fused_forward(x: Tensor, sparsity_layout: Tensor,
     return output
 
 
+def softmax_fused_backward_wrapper(ctx, grad_output):
+    o, sparsity_layout, sparsity_reverse_lut = ctx.saved_tensors
+    sparsity_block_size = ctx.sparsity_block_size
+
+    return softmax_fused_backward(grad_output, o, sparsity_reverse_lut, sparsity_layout,
+                                  sparsity_block_size), None, None, None, None, None
+
+
+@triton_op("blksprs::softmax_fused_backward", mutates_args={})
+def softmax_fused_backward(grad_output: Tensor, o: Tensor, sparsity_reverse_lut: Tensor, sparsity_layout: Tensor,
+                           sparsity_block_size: int) -> Tensor:
+    with torch.no_grad():
+        grad_x = torch.zeros_like(o)
+
+        g_b, g_r, g_c = grad_output.size()
+        g_b_s, g_r_s, g_c_s = stride(grad_output)
+        o_b, o_r, o_c = o.size()
+        o_b_s, o_r_s, o_c_s = stride(o)
+        s_l_b, s_l_r, s_l_c = sparsity_layout.size()
+        s_l_b_s, s_l_r_s, s_l_c_s = stride(sparsity_layout)
+
+        triton_grid = lambda meta: [s_l_b,
+                                    s_l_r,
+                                    sparsity_block_size]
+
+        (wrap_triton(softmax_fused_kernel_grad)[triton_grid]
+         (grad_output,
+          g_b, g_b_s, g_r_s, g_c_s,
+          o,
+          o_b, o_b_s, o_r_s, o_c_s,
+          s_l_b, s_l_b_s, s_l_r_s, s_l_c, s_l_c_s,
+          sparsity_reverse_lut,
+          grad_x,
+          sparsity_block_size))
+
+        return grad_x
+
+
+# noinspection PyUnusedLocal
 @triton.autotune(
     configs=get_autotune_configs(),
     key=["sparsity_block_size"],
@@ -394,24 +433,84 @@ def softmax_fused_kernel(x,
     blk_rev_msk = (blk_rev_idx >= 0 and blk_rev_idx < s_l_b * s_l_b_s)
     blk_rev = tl.load(r_lut + blk_rev_idx, mask=blk_rev_msk).to(tl.int32)
 
-    # Extend sparsity indices to cover sparsity blocks
-    blk_rev_ext = tl.expand_dims(blk_rev, -1)
-    blk_rev_ext = tl.broadcast_to(blk_rev_ext, (s_l_c, sparsity_block_size))
-    blk_rev_ext = tl.reshape(blk_rev_ext, (s_l_c * sparsity_block_size))
+    if (not (tl.min(blk_rev) == -1 and
+             tl.max(blk_rev) == -1)):
+        # Extend sparsity indices to cover sparsity blocks
+        blk_rev_ext = tl.expand_dims(blk_rev, -1)
+        blk_rev_ext = tl.broadcast_to(blk_rev_ext, (s_l_c, sparsity_block_size))
+        blk_rev_ext = tl.reshape(blk_rev_ext, (s_l_c * sparsity_block_size))
 
-    # Load line of x
-    blk_x_idx = (blk_rev_ext * x_b_s +
-                 pid_lin * x_r_s +
-                 (tl.arange(0, s_l_c * sparsity_block_size) % sparsity_block_size) * x_c_s)
-    blk_x_mask = ((blk_x_idx >= 0 and blk_x_idx < x_b * x_b_s)
-                  and blk_rev_ext != -1)
-    blk_x = tl.load(x + blk_x_idx, mask=blk_x_mask, other=float("-inf"))
+        # Load line of x
+        blk_x_idx = (blk_rev_ext * x_b_s +
+                     pid_lin * x_r_s +
+                     (tl.arange(0, s_l_c * sparsity_block_size) % sparsity_block_size) * x_c_s)
+        blk_x_mask = ((blk_x_idx >= 0 and blk_x_idx < x_b * x_b_s)
+                      and blk_rev_ext != -1)
+        blk_x = tl.load(x + blk_x_idx, mask=blk_x_mask, other=float("-inf"))
 
-    # Compute softmax
-    blk_x_softmax = tl.softmax(blk_x)
+        # Compute softmax
+        blk_x_softmax = tl.softmax(blk_x)
 
-    # Store output
-    tl.store(o + blk_x_idx, blk_x_softmax, mask=blk_x_mask)
+        # Store output
+        tl.store(o + blk_x_idx, blk_x_softmax, mask=blk_x_mask)
+
+
+# noinspection PyUnusedLocal
+@triton.autotune(
+    configs=get_autotune_configs(),
+    key=["sparsity_block_size"],
+    prune_configs_by={"early_config_prune": prune_autotune_configs},
+    reset_to_zero=["o"]
+)
+@triton.jit
+def softmax_fused_kernel_grad(g,
+                              g_b, g_b_s, g_r_s, g_c_s,
+                              x,
+                              x_b, x_b_s, x_r_s, x_c_s,
+                              s_l_b, s_l_b_s, s_l_r_s, s_l_c: tl.constexpr, s_l_c_s,
+                              r_lut,
+                              o,
+                              sparsity_block_size: tl.constexpr,
+                              TRITON_BLOCK_SIZE: tl.constexpr) -> None:
+    # Get triton block indices
+    pid_bat = tl.program_id(axis=0)
+    pid_row = tl.program_id(axis=1)
+    pid_lin = tl.program_id(axis=2)
+
+    # Load reverse sparsity indices of row
+    blk_rev_idx = (pid_bat * s_l_b_s +
+                   pid_row * s_l_r_s +
+                   (tl.arange(0, s_l_c) * s_l_c_s))
+    blk_rev_msk = (blk_rev_idx >= 0 and blk_rev_idx < s_l_b * s_l_b_s)
+    blk_rev = tl.load(r_lut + blk_rev_idx, mask=blk_rev_msk).to(tl.int32)
+
+    if (not (tl.min(blk_rev) == -1 and
+             tl.max(blk_rev) == -1)):
+        # Extend sparsity indices to cover sparsity blocks
+        blk_rev_ext = tl.expand_dims(blk_rev, -1)
+        blk_rev_ext = tl.broadcast_to(blk_rev_ext, (s_l_c, sparsity_block_size))
+        blk_rev_ext = tl.reshape(blk_rev_ext, (s_l_c * sparsity_block_size))
+
+        # Load line of g
+        blk_g_idx = (blk_rev_ext * g_b_s +
+                     pid_lin * g_r_s +
+                     (tl.arange(0, s_l_c * sparsity_block_size) % sparsity_block_size) * g_c_s)
+        blk_g_mask = ((blk_g_idx >= 0 and blk_g_idx < g_b * g_b_s)
+                      and blk_rev_ext != -1)
+        blk_g = tl.load(g + blk_g_idx, mask=blk_g_mask)
+
+        # Load line of x
+        blk_x_idx = (blk_rev_ext * x_b_s +
+                     pid_lin * x_r_s +
+                     (tl.arange(0, s_l_c * sparsity_block_size) % sparsity_block_size) * x_c_s)
+        blk_x_mask = ((blk_x_idx >= 0 and blk_x_idx < x_b * x_b_s)
+                      and blk_rev_ext != -1)
+        blk_x = tl.load(x + blk_x_idx, mask=blk_x_mask)
+
+        # Compute gradients
+        blk_grad = blk_x * (blk_g - tl.sum(blk_x * blk_g))
+
+        tl.store(o + blk_x_idx, blk_grad, mask=blk_x_mask)
 
 
 def softmax_fused_build_lut(lut: dict, sparsity_layout: Tensor):
@@ -430,3 +529,14 @@ def softmax_fused_build_lut(lut: dict, sparsity_layout: Tensor):
     validate_contiguous(sparsity_layout, lut["sparsity_reverse_lut"])
 
     return lut
+
+
+# noinspection PyUnusedLocal
+def softmax_fused_setup_context(ctx, inputs, output):
+    (_, sparsity_layout, sparsity_reverse_lut, sparsity_block_size) = inputs
+
+    ctx.save_for_backward(output, sparsity_layout, sparsity_reverse_lut)
+    ctx.sparsity_block_size = sparsity_block_size
+
+
+softmax_fused_forward.register_autograd(softmax_fused_backward_wrapper, setup_context=softmax_fused_setup_context)
