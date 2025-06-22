@@ -1,7 +1,7 @@
 import os
 import tomllib
 
-os.environ["BLKSPRS_TEST"] = "TEST"
+os.environ["BLKSPRS_AUTOTUNE"] = "TEST"
 
 import random
 from pathlib import Path

@@ -349,13 +349,15 @@ def softmax_fused(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size
     lut = softmax_fused_build_lut(lut, sparsity_layout)
 
     return BlksprsTensor(softmax_fused_forward(x, sparsity_layout,
-                                               lut["sparsity_reverse_lut"],
+                                               lut["sparsity_reverse_lut_sorted"],
+                                               lut["max_blocks_line"],
                                                sparsity_block_size))
 
 
 @triton_op("blksprs::softmax_fused_forward", mutates_args={})
 def softmax_fused_forward(x: Tensor, sparsity_layout: Tensor,
-                          sparsity_reverse_lut: Tensor,
+                          sparsity_reverse_lut_sorted: Tensor,
+                          max_blocks_line: int,
                           sparsity_block_size: int) -> Tensor:
     output = torch.zeros_like(x)
 
@@ -372,23 +374,29 @@ def softmax_fused_forward(x: Tensor, sparsity_layout: Tensor,
      (x,
       x_b, x_b_s, x_r_s, x_c_s,
       output,
-      s_l_b, s_l_b_s, s_l_r_s, s_l_c, s_l_c_s,
-      sparsity_reverse_lut,
+      s_l_b, s_l_b_s, s_l_r_s, s_l_c_s,
+      sparsity_reverse_lut_sorted,
+      max_blocks_line,
       sparsity_block_size))
 
     return output
 
 
 def softmax_fused_backward_wrapper(ctx, grad_output):
-    o, sparsity_layout, sparsity_reverse_lut = ctx.saved_tensors
+    o, sparsity_layout, sparsity_reverse_lut_sorted = ctx.saved_tensors
+    max_blocks_line = ctx.max_blocks_line
     sparsity_block_size = ctx.sparsity_block_size
 
-    return softmax_fused_backward(grad_output, o, sparsity_reverse_lut, sparsity_layout,
-                                  sparsity_block_size), None, None, None, None, None
+    return softmax_fused_backward(grad_output, o, sparsity_reverse_lut_sorted, sparsity_layout,
+                                  max_blocks_line, sparsity_block_size), None, None, None, None
 
 
 @triton_op("blksprs::softmax_fused_backward", mutates_args={})
-def softmax_fused_backward(grad_output: Tensor, o: Tensor, sparsity_reverse_lut: Tensor, sparsity_layout: Tensor,
+def softmax_fused_backward(grad_output: Tensor,
+                           o: Tensor,
+                           sparsity_reverse_lut_sorted: Tensor,
+                           sparsity_layout: Tensor,
+                           max_blocks_line: int,
                            sparsity_block_size: int) -> Tensor:
     with torch.no_grad():
         grad_x = torch.zeros_like(o)
@@ -409,9 +417,10 @@ def softmax_fused_backward(grad_output: Tensor, o: Tensor, sparsity_reverse_lut:
           g_b, g_b_s, g_r_s, g_c_s,
           o,
           o_b, o_b_s, o_r_s, o_c_s,
-          s_l_b, s_l_b_s, s_l_r_s, s_l_c, s_l_c_s,
-          sparsity_reverse_lut,
+          s_l_b, s_l_b_s, s_l_r_s, s_l_c_s,
+          sparsity_reverse_lut_sorted,
           grad_x,
+          max_blocks_line,
           sparsity_block_size))
 
         return grad_x
@@ -428,8 +437,9 @@ def softmax_fused_backward(grad_output: Tensor, o: Tensor, sparsity_reverse_lut:
 def softmax_fused_kernel(x,
                          x_b, x_b_s, x_r_s, x_c_s,
                          o,
-                         s_l_b, s_l_b_s, s_l_r_s, s_l_c: tl.constexpr, s_l_c_s,
-                         r_lut,
+                         s_l_b, s_l_b_s, s_l_r_s, s_l_c_s,
+                         r_lut_s,
+                         mbs: tl.constexpr,
                          sparsity_block_size: tl.constexpr,
                          TRITON_BLOCK_SIZE: tl.constexpr) -> None:
     # Get triton block indices
@@ -440,21 +450,21 @@ def softmax_fused_kernel(x,
     # Load reverse sparsity indices of row
     blk_rev_idx = (pid_bat * s_l_b_s +
                    pid_row * s_l_r_s +
-                   (tl.arange(0, s_l_c) * s_l_c_s))
+                   (tl.arange(0, mbs) * s_l_c_s))
     blk_rev_msk = (blk_rev_idx >= 0 and blk_rev_idx < s_l_b * s_l_b_s)
-    blk_rev = tl.load(r_lut + blk_rev_idx, mask=blk_rev_msk).to(tl.int32)
+    blk_rev = tl.load(r_lut_s + blk_rev_idx, mask=blk_rev_msk).to(tl.int32)
 
     if (not (tl.min(blk_rev) == -1 and
              tl.max(blk_rev) == -1)):
         # Extend sparsity indices to cover sparsity blocks
         blk_rev_ext = tl.expand_dims(blk_rev, -1)
-        blk_rev_ext = tl.broadcast_to(blk_rev_ext, (s_l_c, sparsity_block_size))
-        blk_rev_ext = tl.reshape(blk_rev_ext, (s_l_c * sparsity_block_size))
+        blk_rev_ext = tl.broadcast_to(blk_rev_ext, (mbs, sparsity_block_size))
+        blk_rev_ext = tl.reshape(blk_rev_ext, (mbs * sparsity_block_size))
 
         # Load line of x
         blk_x_idx = (blk_rev_ext * x_b_s +
                      pid_lin * x_r_s +
-                     (tl.arange(0, s_l_c * sparsity_block_size) % sparsity_block_size) * x_c_s)
+                     (tl.arange(0, mbs * sparsity_block_size) % sparsity_block_size) * x_c_s)
         blk_x_mask = ((blk_x_idx >= 0 and blk_x_idx < x_b * x_b_s)
                       and blk_rev_ext != -1)
         blk_x = tl.load(x + blk_x_idx, mask=blk_x_mask, other=float("-inf"))
@@ -478,9 +488,10 @@ def softmax_fused_kernel_grad(g,
                               g_b, g_b_s, g_r_s, g_c_s,
                               x,
                               x_b, x_b_s, x_r_s, x_c_s,
-                              s_l_b, s_l_b_s, s_l_r_s, s_l_c: tl.constexpr, s_l_c_s,
-                              r_lut,
+                              s_l_b, s_l_b_s, s_l_r_s, s_l_c_s,
+                              r_lut_s,
                               o,
+                              mbs: tl.constexpr,
                               sparsity_block_size: tl.constexpr,
                               TRITON_BLOCK_SIZE: tl.constexpr) -> None:
     # Get triton block indices
@@ -491,21 +502,21 @@ def softmax_fused_kernel_grad(g,
     # Load reverse sparsity indices of row
     blk_rev_idx = (pid_bat * s_l_b_s +
                    pid_row * s_l_r_s +
-                   (tl.arange(0, s_l_c) * s_l_c_s))
+                   (tl.arange(0, mbs) * s_l_c_s))
     blk_rev_msk = (blk_rev_idx >= 0 and blk_rev_idx < s_l_b * s_l_b_s)
-    blk_rev = tl.load(r_lut + blk_rev_idx, mask=blk_rev_msk).to(tl.int32)
+    blk_rev = tl.load(r_lut_s + blk_rev_idx, mask=blk_rev_msk).to(tl.int32)
 
     if (not (tl.min(blk_rev) == -1 and
              tl.max(blk_rev) == -1)):
         # Extend sparsity indices to cover sparsity blocks
         blk_rev_ext = tl.expand_dims(blk_rev, -1)
-        blk_rev_ext = tl.broadcast_to(blk_rev_ext, (s_l_c, sparsity_block_size))
-        blk_rev_ext = tl.reshape(blk_rev_ext, (s_l_c * sparsity_block_size))
+        blk_rev_ext = tl.broadcast_to(blk_rev_ext, (mbs, sparsity_block_size))
+        blk_rev_ext = tl.reshape(blk_rev_ext, (mbs * sparsity_block_size))
 
         # Load line of g
         blk_g_idx = (blk_rev_ext * g_b_s +
                      pid_lin * g_r_s +
-                     (tl.arange(0, s_l_c * sparsity_block_size) % sparsity_block_size) * g_c_s)
+                     (tl.arange(0, mbs * sparsity_block_size) % sparsity_block_size) * g_c_s)
         blk_g_mask = ((blk_g_idx >= 0 and blk_g_idx < g_b * g_b_s)
                       and blk_rev_ext != -1)
         blk_g = tl.load(g + blk_g_idx, mask=blk_g_mask)
@@ -513,7 +524,7 @@ def softmax_fused_kernel_grad(g,
         # Load line of x
         blk_x_idx = (blk_rev_ext * x_b_s +
                      pid_lin * x_r_s +
-                     (tl.arange(0, s_l_c * sparsity_block_size) % sparsity_block_size) * x_c_s)
+                     (tl.arange(0, mbs * sparsity_block_size) % sparsity_block_size) * x_c_s)
         blk_x_mask = ((blk_x_idx >= 0 and blk_x_idx < x_b * x_b_s)
                       and blk_rev_ext != -1)
         blk_x = tl.load(x + blk_x_idx, mask=blk_x_mask)
@@ -521,6 +532,7 @@ def softmax_fused_kernel_grad(g,
         # Compute gradients
         blk_grad = blk_x * (blk_g - tl.sum(blk_x * blk_g))
 
+        # Store output
         tl.store(o + blk_x_idx, blk_grad, mask=blk_x_mask)
 
 
@@ -528,25 +540,36 @@ def softmax_fused_build_lut(lut: dict, sparsity_layout: Tensor):
     if lut is None:
         lut = dict()
 
-    if "sparsity_reverse_lut" not in lut:
+    if "sparsity_reverse_lut_sorted" not in lut:
         sparsity_layout_flat = sparsity_layout.reshape(-1)
-        sparsity_reverse_lut = (((torch.cumsum(sparsity_layout_flat, dim=-1) - 1) *
-                                 (sparsity_layout_flat == 1) -
-                                 (1 * (sparsity_layout_flat == 0)))
-                                .reshape(sparsity_layout.size())
-                                .reshape(-1).contiguous())
-        lut["sparsity_reverse_lut"] = sparsity_reverse_lut
+        sparsity_reverse_lut_sorted = (((torch.cumsum(sparsity_layout_flat, dim=-1) - 1) *
+                                        (sparsity_layout_flat == 1) -
+                                        (1 * (sparsity_layout_flat == 0)))
+                                       .reshape(sparsity_layout.size())
+                                       .sort(descending=True, dim=-1)[0]
+                                       .reshape(-1).contiguous())
+        lut["sparsity_reverse_lut_sorted"] = sparsity_reverse_lut_sorted
 
-    validate_contiguous(sparsity_layout, lut["sparsity_reverse_lut"])
+    if "max_blocks_line" not in lut:
+        sparsity_reverse_lut_sorted = lut["sparsity_reverse_lut_sorted"]
+        max_blocks_line = ((torch.reshape(sparsity_reverse_lut_sorted, (-1, sparsity_layout.size(-1)))
+                            != -1)
+                           .sum(dim=-1)
+                           .max()
+                           .item())
+        lut["max_blocks_line"] = max(max_blocks_line, 1)
+
+    validate_contiguous(sparsity_layout, lut["sparsity_reverse_lut_sorted"])
 
     return lut
 
 
 # noinspection PyUnusedLocal
 def softmax_fused_setup_context(ctx, inputs, output):
-    (_, sparsity_layout, sparsity_reverse_lut, sparsity_block_size) = inputs
+    (_, sparsity_layout, sparsity_reverse_lut_sorted, max_blocks_line, sparsity_block_size) = inputs
 
-    ctx.save_for_backward(output, sparsity_layout, sparsity_reverse_lut)
+    ctx.save_for_backward(output, sparsity_layout, sparsity_reverse_lut_sorted)
+    ctx.max_blocks_line = max_blocks_line
     ctx.sparsity_block_size = sparsity_block_size
 
 

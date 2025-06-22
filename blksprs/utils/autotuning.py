@@ -22,6 +22,12 @@ if blksprs_autotune_mode == "DEFAULT":
     ]
 elif blksprs_autotune_mode == "TEST":
     autotune_parameters = [
+        (2, 3, 8),
+
+        (4, 3, 8),
+
+        (8, 3, 8),
+
         (16, 3, 8),
 
         (32, 3, 8),
