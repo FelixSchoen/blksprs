@@ -26,3 +26,8 @@ def stride(x: Tensor):
         return x.size(1) * x.size(2), x.size(2), 1
     else:
         raise NotImplementedError
+
+def ceil_pow2(x: int) -> int:
+    if x <= 0:
+        raise ValueError("Input must be a positive integer.")
+    return 1 << (x - 1).bit_length()

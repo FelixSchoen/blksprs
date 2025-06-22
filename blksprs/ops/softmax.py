@@ -9,7 +9,7 @@ from triton import language as tl
 
 from blksprs.ops.misc.row_wise import row_wise_sum, row_wise_max, row_wise_sub
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import stride
+from blksprs.utils.tools import stride, ceil_pow2
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity, validate_sparsity_block_size, validate_dtype_float_32
@@ -557,7 +557,7 @@ def softmax_fused_build_lut(lut: dict, sparsity_layout: Tensor):
                            .sum(dim=-1)
                            .max()
                            .item())
-        lut["max_blocks_line"] = max(max_blocks_line, 1)
+        lut["max_blocks_line"] = min(ceil_pow2(max(max_blocks_line, 2)), sparsity_layout.size(-1))
 
     validate_contiguous(sparsity_layout, lut["sparsity_reverse_lut_sorted"])
 
