@@ -66,7 +66,7 @@ def softmax_forward(x: Tensor, sparsity_layout: Tensor,
                     sparsity_lut: Tensor,
                     sparsity_reverse_lut_rws: Tensor,
                     sparsity_block_size: int) -> Tensor:
-    output = torch.zeros_like(x)
+    output = torch.empty_like(x)
 
     x_row_wise_max, sparsity_layout_rwm = row_wise_max(x, sparsity_layout, sparsity_block_size,
                                                        flag_slice_only=True)
@@ -114,7 +114,7 @@ def softmax_backward_wrapper(ctx, grad_output):
 def softmax_backward(grad_output: Tensor, o: Tensor, sparsity_lut: Tensor, sparsity_layout: Tensor,
                      sparsity_block_size: int) -> Tensor:
     with torch.no_grad():
-        grad_x = torch.zeros_like(o, dtype=torch.float)
+        grad_x = torch.empty_like(o, dtype=torch.float)
 
         s, sparsity_layout_s = row_wise_sum(grad_output * o, sparsity_layout, sparsity_block_size, flag_slice_only=True)
 
@@ -359,7 +359,7 @@ def softmax_fused_forward(x: Tensor, sparsity_layout: Tensor,
                           sparsity_reverse_lut_sorted: Tensor,
                           max_blocks_line: int,
                           sparsity_block_size: int) -> Tensor:
-    output = torch.zeros_like(x)
+    output = torch.empty_like(x)
 
     x_b, x_r, x_c = x.size()
     x_b_s, x_r_s, x_c_s = stride(x)
@@ -399,7 +399,7 @@ def softmax_fused_backward(grad_output: Tensor,
                            max_blocks_line: int,
                            sparsity_block_size: int) -> Tensor:
     with torch.no_grad():
-        grad_x = torch.zeros_like(o)
+        grad_x = torch.empty_like(o)
 
         g_b, g_r, g_c = grad_output.size()
         g_b_s, g_r_s, g_c_s = stride(grad_output)
