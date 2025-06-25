@@ -374,7 +374,7 @@ def softmax_fused_forward(x: Tensor, sparsity_layout: Tensor,
      (x,
       x_b, x_b_s, x_r_s, x_c_s,
       output,
-      s_l_b, s_l_b_s, s_l_r_s, s_l_c_s,
+      s_l_b, s_l_b_s, s_l_r_s, s_l_c, s_l_c_s,
       sparsity_reverse_lut_sorted,
       max_blocks_line,
       sparsity_block_size))
@@ -417,7 +417,7 @@ def softmax_fused_backward(grad_output: Tensor,
           g_b, g_b_s, g_r_s, g_c_s,
           o,
           o_b, o_b_s, o_r_s, o_c_s,
-          s_l_b, s_l_b_s, s_l_r_s, s_l_c_s,
+          s_l_b, s_l_b_s, s_l_r_s, s_l_c, s_l_c_s,
           sparsity_reverse_lut_sorted,
           grad_x,
           max_blocks_line,
@@ -437,7 +437,7 @@ def softmax_fused_backward(grad_output: Tensor,
 def softmax_fused_kernel(x,
                          x_b, x_b_s, x_r_s, x_c_s,
                          o,
-                         s_l_b, s_l_b_s, s_l_r_s, s_l_c_s,
+                         s_l_b, s_l_b_s, s_l_r_s, s_l_c, s_l_c_s,
                          r_lut_s,
                          mbs: tl.constexpr,
                          sparsity_block_size: tl.constexpr,
@@ -451,8 +451,9 @@ def softmax_fused_kernel(x,
     blk_rev_idx = (pid_bat * s_l_b_s +
                    pid_row * s_l_r_s +
                    (tl.arange(0, mbs) * s_l_c_s))
-    blk_rev_msk = (blk_rev_idx >= 0 and blk_rev_idx < s_l_b * s_l_b_s)
-    blk_rev = tl.load(r_lut_s + blk_rev_idx, mask=blk_rev_msk).to(tl.int32)
+    blk_rev_msk = ((blk_rev_idx >= 0 and blk_rev_idx < s_l_b * s_l_b_s) and
+                   (tl.arange(0, mbs) < s_l_c))
+    blk_rev = tl.load(r_lut_s + blk_rev_idx, mask=blk_rev_msk, other=-1).to(tl.int32)
 
     if (not (tl.min(blk_rev) == -1 and
              tl.max(blk_rev) == -1)):
@@ -488,7 +489,7 @@ def softmax_fused_kernel_grad(g,
                               g_b, g_b_s, g_r_s, g_c_s,
                               x,
                               x_b, x_b_s, x_r_s, x_c_s,
-                              s_l_b, s_l_b_s, s_l_r_s, s_l_c_s,
+                              s_l_b, s_l_b_s, s_l_r_s, s_l_c, s_l_c_s,
                               r_lut_s,
                               o,
                               mbs: tl.constexpr,
@@ -503,8 +504,9 @@ def softmax_fused_kernel_grad(g,
     blk_rev_idx = (pid_bat * s_l_b_s +
                    pid_row * s_l_r_s +
                    (tl.arange(0, mbs) * s_l_c_s))
-    blk_rev_msk = (blk_rev_idx >= 0 and blk_rev_idx < s_l_b * s_l_b_s)
-    blk_rev = tl.load(r_lut_s + blk_rev_idx, mask=blk_rev_msk).to(tl.int32)
+    blk_rev_msk = ((blk_rev_idx >= 0 and blk_rev_idx < s_l_b * s_l_b_s) and
+                   (tl.arange(0, mbs) < s_l_c))
+    blk_rev = tl.load(r_lut_s + blk_rev_idx, mask=blk_rev_msk, other=-1).to(tl.int32)
 
     if (not (tl.min(blk_rev) == -1 and
              tl.max(blk_rev) == -1)):
@@ -557,7 +559,7 @@ def softmax_fused_build_lut(lut: dict, sparsity_layout: Tensor):
                            .sum(dim=-1)
                            .max()
                            .item())
-        lut["max_blocks_line"] = min(ceil_pow2(max(max_blocks_line, 2)), sparsity_layout.size(-1))
+        lut["max_blocks_line"] = ceil_pow2(max(max_blocks_line, 2))
 
     validate_contiguous(sparsity_layout, lut["sparsity_reverse_lut_sorted"])
 
