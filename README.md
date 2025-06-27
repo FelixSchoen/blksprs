@@ -1,7 +1,8 @@
 # blksprs
 
 [![GitHub Release](https://img.shields.io/github/v/release/FelixSchoen/blksprs?include_prereleases&label=Latest%20Release)](https://github.com/FelixSchoen/blksprs/releases)
-[![Python Version](https://img.shields.io/badge/Python%20Version-3.11-blue)](https://www.python.org/downloads/release/python-3119/)
+[![Python 3.11](https://img.shields.io/badge/Python%20Version-3.11-blue)](https://www.python.org/downloads/release/python-3119/)
+[![Python 3.12](https://img.shields.io/badge/Python%20Version-3.12-blue)](https://www.python.org/downloads/release/python-31210/)
 
 ## Overview
 
@@ -56,9 +57,7 @@ _* see the [Roadmap](#roadmap) section for more information_
 
 ## Installation
 
-Note that due to the dependency on [Triton](https://github.com/triton-lang/triton) this library is **only compatible
-with
-the Linux platform**.
+Note that due to the dependency on [Triton](https://github.com/triton-lang/triton) this library is **only compatible with the Linux platform**.
 Keep track of this [issue](https://github.com/triton-lang/triton/issues/1640) for updates.
 
 We recommend installing blksprs from [PyPI](https://pypi.org/project/blksprs/) using pip:
@@ -67,8 +66,8 @@ We recommend installing blksprs from [PyPI](https://pypi.org/project/blksprs/) u
 
 ### Dependencies
 
-- [PyTorch](https://pytorch.org/) (built with v2.6)
-- _[NumPy](https://numpy.org/) (to get rid of warnings, built with v2.2.4)_
+- [PyTorch](https://pytorch.org/) (built with v2.7.1)
+- _[NumPy](https://numpy.org/) (to get rid of warnings, built with v2.3.1)_
 - _[Triton](https://github.com/triton-lang/triton) (included with PyTorch)_
 
 ## Changelog
@@ -84,7 +83,7 @@ We will continue to maintain the library and fix any issues that arise.
 Should you find any bugs please open an [issue](https://github.com/FelixSchoen/blksprs/issues).
 We also encourage [pull requests](https://github.com/FelixSchoen/blksprs/pulls).
 
-It might be that this changes with future projects, but as of March 2025, we are content with the current state of the
+It might be that this changes with future projects, but as of June 2025, we are content with the current state of the
 library.
 
 ## Known Limitations and Issues
@@ -93,9 +92,6 @@ library.
   In order to work around this bug a manual conversion of some values is needed, (slightly) negatively impacting
   performance.
   Watch the [issue](https://github.com/triton-lang/triton/issues/6376) on Triton's issue tracker for more information.
-- PyTorch's `wrap_triton()` currently does not support config pruning. It thus cannot be used for some of the kernels,
-  which could impact graph compilation.
-- There seem to be some issues with autocasting, forcing some operations to manually cast.
 - There will be some slight numerical differences between vanilla and blksprs operations.
   These instabilities are due to Triton and thus cannot be fixed by this library alone.
   However, for all intents and purposes, these very minor differences should not matter and can safely be ignored.

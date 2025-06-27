@@ -91,7 +91,7 @@ RTOL = 1e-2
 
 # Seed
 SEED = 0
-RANDOM_SEED = False
+RANDOM_SEED = True
 
 
 @pytest.fixture(scope="session", autouse=True)
