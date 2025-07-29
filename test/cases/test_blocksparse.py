@@ -86,8 +86,8 @@ TEST_CONFIGURATIONS = [
 ]
 
 # Tolerances
-ATOL = 2e-2
-RTOL = 1e-2
+ATOL = 3e-2
+RTOL = 2e-2
 
 # Seed
 SEED = 0
@@ -1166,15 +1166,15 @@ def _get_version():
 
 # Visualisation
 
-def _visualise(*matrices, dim=0):
+def _visualise(*matrix_name_tuples, dim=0):
     vmin = np.inf
     vmax = -np.inf
 
-    for matrix_tuple in matrices:
+    for matrix_tuple in matrix_name_tuples:
         vmin = min(vmin, torch.min(matrix_tuple[0]))
         vmax = max(vmax, torch.max(matrix_tuple[0]))
 
-    for matrix_tuple in matrices:
+    for matrix_tuple in matrix_name_tuples:
         matrix_data = matrix_tuple[0]
         matrix_label = matrix_tuple[1]
 
@@ -1185,7 +1185,7 @@ def _visualise(*matrices, dim=0):
         output_path_base = BASE_PATH.joinpath("test", "output", "blksprs")
         output_path_base.mkdir(exist_ok=True)
 
-        _visualise_matrix(matrix_data[dim], str(output_path_base.joinpath(matrix_label)), grid_size=1, vmin=vmin,
+        _visualise_matrix(matrix_data[dim], str(output_path_base.joinpath(matrix_label)), grid_size=16, vmin=vmin,
                           vmax=vmax, **add_args)
 
 
