@@ -176,13 +176,12 @@ def softmax_kernel(x,
     pid_col = tl.program_id(axis=2)
 
     # Get position of current sparsity block consisting of its batch and row index
-    spa_bat_idx = (pid_blk * s_lut_r_s + 0 * s_lut_c_s)
-    spa_bat_msk = (spa_bat_idx >= 0 and spa_bat_idx < s_lut_r * s_lut_r_s)
-    spa_bat = tl.load(s_lut + spa_bat_idx, mask=spa_bat_msk)
+    spa_val_idx = pid_blk * s_lut_r_s + tl.arange(0, 4) * s_lut_c_s
+    spa_val_msk = (tl.arange(0, 4) < 3)
+    spa_val = tl.load(s_lut + spa_val_idx, mask=spa_val_msk)
 
-    spa_row_idx = (pid_blk * s_lut_r_s + 1 * s_lut_c_s)
-    spa_row_msk = (spa_row_idx >= 0 and spa_row_idx < s_lut_r * s_lut_r_s)
-    spa_row = tl.load(s_lut + spa_row_idx, mask=spa_row_msk)
+    spa_bat = tl.sum(spa_val * (tl.arange(0, 4) == 0))
+    spa_row = tl.sum(spa_val * (tl.arange(0, 4) == 1))
 
     # Get reverse sparsity indices for s
     rev_idx_spa_s_idx = (spa_bat * s_l_s_b_s +
@@ -241,13 +240,12 @@ def softmax_kernel_grad(g,
     pid_col = tl.program_id(axis=2)
 
     # Get position of current sparsity block consisting of its batch and row index
-    spa_bat_idx = (pid_blk * s_lut_r_s + 0 * s_lut_c_s)
-    spa_bat_msk = (spa_bat_idx >= 0 and spa_bat_idx < s_lut_r * s_lut_r_s)
-    spa_bat = tl.load(s_lut + spa_bat_idx, mask=spa_bat_msk)
+    spa_val_idx = pid_blk * s_lut_r_s + tl.arange(0, 4) * s_lut_c_s
+    spa_val_msk = (tl.arange(0, 4) < 3)
+    spa_val = tl.load(s_lut + spa_val_idx, mask=spa_val_msk)
 
-    spa_row_idx = (pid_blk * s_lut_r_s + 1 * s_lut_c_s)
-    spa_row_msk = (spa_row_idx >= 0 and spa_row_idx < s_lut_r * s_lut_r_s)
-    spa_row = tl.load(s_lut + spa_row_idx, mask=spa_row_msk)
+    spa_bat = tl.sum(spa_val * (tl.arange(0, 4) == 0))
+    spa_row = tl.sum(spa_val * (tl.arange(0, 4) == 1))
 
     rev_idx_spa_s_idx = (spa_bat * s_l_s_b_s +
                          spa_row * s_l_s_r_s)

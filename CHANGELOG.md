@@ -12,6 +12,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Rework lookup of sparsity LUT values
 - Refactor `disable_validation()` to `bs.utils`
 
 ### Fixed

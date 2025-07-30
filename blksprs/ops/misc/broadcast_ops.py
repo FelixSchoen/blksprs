@@ -110,17 +110,13 @@ def broadcast_add_kernel(x,
     pid_col = tl.program_id(axis=2)
 
     # Get position of current sparsity block consisting of its batch, row, and column index
-    spa_bat_o_idx = (pid_blk * s_lut_o_r_s + 0 * s_lut_o_c_s)
-    spa_bat_o_msk = (spa_bat_o_idx >= 0 and spa_bat_o_idx < s_lut_o_r * s_lut_o_r_s)
-    spa_bat_o = tl.load(s_lut_o + spa_bat_o_idx, mask=spa_bat_o_msk)
+    spa_val_idx = pid_blk * s_lut_o_r_s + tl.arange(0, 4) * s_lut_o_c_s
+    spa_val_msk = (tl.arange(0, 4) < 3)
+    spa_val = tl.load(s_lut_o + spa_val_idx, mask=spa_val_msk)
 
-    spa_row_o_idx = (pid_blk * s_lut_o_r_s + 1 * s_lut_o_c_s)
-    spa_row_o_msk = (spa_row_o_idx >= 0 and spa_row_o_idx < s_lut_o_r * s_lut_o_r_s)
-    spa_row_o = tl.load(s_lut_o + spa_row_o_idx, mask=spa_row_o_msk)
-
-    spa_col_o_idx = (pid_blk * s_lut_o_r_s + 2 * s_lut_o_c_s)
-    spa_col_o_msk = (spa_col_o_idx >= 0 and spa_col_o_idx < s_lut_o_r * s_lut_o_r_s)
-    spa_col_o = tl.load(s_lut_o + spa_col_o_idx, mask=spa_col_o_msk)
+    spa_bat_o = tl.sum(spa_val * (tl.arange(0, 4) == 0))
+    spa_row_o = tl.sum(spa_val * (tl.arange(0, 4) == 1))
+    spa_col_o = tl.sum(spa_val * (tl.arange(0, 4) == 2))
 
     # Load x block
     blk_x_idx = (spa_bat_o * x_b_s +

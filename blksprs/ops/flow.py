@@ -153,17 +153,13 @@ def flow_push_kernel(x,
     pid_col = tl.program_id(axis=2)
 
     # Get sparsity index of current input block consisting of its batch, row, and column index
-    spa_bat_idx = (pid_blk * s_lut_r_s + 0 * s_lut_c_s)
-    spa_bat_msk = (spa_bat_idx >= 0 and spa_bat_idx < s_lut_r * s_lut_r_s)
-    spa_bat = tl.load(s_lut + spa_bat_idx, mask=spa_bat_msk)
+    spa_val_idx = pid_blk * s_lut_r_s + tl.arange(0, 4) * s_lut_c_s
+    spa_val_msk = (tl.arange(0, 4) < 3)
+    spa_val = tl.load(s_lut + spa_val_idx, mask=spa_val_msk)
 
-    spa_row_idx = (pid_blk * s_lut_r_s + 1 * s_lut_c_s)
-    spa_row_msk = (spa_row_idx >= 0 and spa_row_idx < s_lut_r * s_lut_r_s)
-    spa_row = tl.load(s_lut + spa_row_idx, mask=spa_row_msk)
-
-    spa_col_idx = (pid_blk * s_lut_r_s + 2 * s_lut_c_s)
-    spa_col_msk = (spa_col_idx >= 0 and spa_col_idx < s_lut_r * s_lut_r_s)
-    spa_col = tl.load(s_lut + spa_col_idx, mask=spa_col_msk)
+    spa_bat = tl.sum(spa_val * (tl.arange(0, 4) == 0))
+    spa_row = tl.sum(spa_val * (tl.arange(0, 4) == 1))
+    spa_col = tl.sum(spa_val * (tl.arange(0, 4) == 2))
 
     # Get reverse sparsity index
     rev_idx_spa_idx = (spa_bat * s_l_x_b_s +
