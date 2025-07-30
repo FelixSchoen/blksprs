@@ -15,8 +15,6 @@ from torch import Tensor
 import blksprs as bs
 from blksprs import BlksprsTensor
 
-# TODO fix lut not looking up lut
-
 # Device setup
 DEVICE = torch.device("cuda:0")
 
