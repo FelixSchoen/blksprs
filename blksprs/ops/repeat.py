@@ -142,7 +142,7 @@ def repeat_build_lut(lut: dict, sparsity_layout_x: Tensor, repeats: tuple[int, i
         n_sparse_blocks = torch.sum(lut["sparsity_layout_o"].to(torch.int)).item()
         lut["n_sparse_blocks"] = n_sparse_blocks
 
-    validate_contiguous(sparsity_layout_o, lut["sparsity_lut"], lut["sparsity_reverse_lut"])
+    validate_contiguous(lut["sparsity_layout_o"], lut["sparsity_lut"], lut["sparsity_reverse_lut"])
 
     return lut
 
@@ -178,7 +178,7 @@ def repeat_interleave_build_lut(lut: dict, sparsity_layout_x: Tensor, repeats: i
         n_sparse_blocks = torch.sum(lut["sparsity_layout_o"].to(torch.int)).item()
         lut["n_sparse_blocks"] = n_sparse_blocks
 
-    validate_contiguous(sparsity_layout_o, lut["sparsity_lut"], lut["sparsity_reverse_lut"])
+    validate_contiguous(lut["sparsity_layout_o"], lut["sparsity_lut"], lut["sparsity_reverse_lut"])
 
     return lut
 
