@@ -27,9 +27,9 @@ class utils:
     from blksprs.utils.processing import apply_torch_linear, apply_torch_normalisation, apply_torch_dropout, \
         apply_function_applicable_row_wise
     from blksprs.utils.tools import do_shape_blocksparse, undo_shape_blocksparse
+    from blksprs.utils.validation import disable_contiguous, disable_validation
 
     class validation:
-        from blksprs.utils.validation import disable_validation
         from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_dtype_float, \
             validate_dtype_int, validate_device, validate_sparsity, validate_sparsity_dense, \
             validate_sparsity_block_size

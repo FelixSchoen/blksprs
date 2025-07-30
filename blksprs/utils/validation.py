@@ -1,7 +1,15 @@
 import torch
 from torch import Tensor
 
+CONTIGUOUS = True
 VALIDATION = True
+
+
+def ensure_contiguous(*tensors: Tensor) -> tuple[Tensor, ...]:
+    if _check_skip_contiguous():
+        return tensors
+
+    return tuple(tensor.contiguous() for tensor in tensors)
 
 
 def validate_dimensions(*tensors: Tensor, dims=3) -> None:
@@ -122,6 +130,19 @@ def validate_sparsity_block_size(sparsity_block_size: int, *tensors):
     for tensor in tensors:
         if not (tensor.size(-1) % sparsity_block_size == 0 and tensor.size(-2) % sparsity_block_size == 0):
             raise ValueError("Tensor sizes must be divisible by sparsity block size")
+
+
+def _check_skip_contiguous():
+    return not CONTIGUOUS
+
+
+def _set_skip_contiguous(skip_contiguous: bool):
+    global CONTIGUOUS
+    CONTIGUOUS = not skip_contiguous
+
+
+def disable_contiguous():
+    _set_skip_contiguous(True)
 
 
 def _check_skip_validation():
