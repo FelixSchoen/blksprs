@@ -9,7 +9,7 @@ from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import stride
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
-    validate_sparsity, validate_dtype_int, validate_sparsity_block_size
+    validate_sparsity, validate_dtype_int, validate_sparsity_block_size, ensure_contiguous
 
 
 @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
@@ -32,8 +32,7 @@ def gather(src: BlksprsTensor, sparsity_layout_src: Tensor,
         BlksprsTensor: The result of the gather operation as a block-sparse tensor in compressed form.
 
     """
-    src = src.contiguous()
-    idx = idx.contiguous()
+    src, idx = ensure_contiguous(src, idx)
 
     validate_dimensions(src, idx)
     validate_contiguous(src, idx)
@@ -261,8 +260,7 @@ def scatter_reduce(src: BlksprsTensor, sparsity_layout_src: Tensor,
         BlksprsTensor: The result of the scatter operation as a block-sparse tensor in compressed form.
 
     """
-    src = src.contiguous()
-    idx = idx.contiguous()
+    src, idx = ensure_contiguous(src, idx)
 
     validate_dimensions(src, idx)
     validate_contiguous(src, idx)

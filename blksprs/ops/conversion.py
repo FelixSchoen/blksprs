@@ -9,7 +9,7 @@ from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import stride
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs, prune_autotune_configs_conversion
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
-    validate_sparsity, validate_sparsity_block_size, validate_sparsity_dense
+    validate_sparsity, validate_sparsity_block_size, validate_sparsity_dense, ensure_contiguous
 
 
 def to_blksprs(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int) -> BlksprsTensor:
@@ -35,7 +35,7 @@ def to_sparse(x: Tensor, sparsity_layout: Tensor,
         BlksprsTensor: The block-sparse tensor converted to compressed form.
 
     """
-    x = x.contiguous()
+    x = ensure_contiguous(x)
 
     validate_dimensions(x)
     validate_contiguous(x)
@@ -187,7 +187,7 @@ def to_dense(x: BlksprsTensor, sparsity_layout: Tensor,
         Tensor: The block-sparse tensor converted to regular form.
 
     """
-    x = x.contiguous()
+    x = ensure_contiguous(x)
 
     validate_dimensions(x)
     validate_contiguous(x, sparsity_layout)
@@ -335,7 +335,7 @@ def adapt_layout(x: BlksprsTensor, sparsity_layout_from: Tensor, sparsity_block_
         Tensor: The sparsity layout of the resulting output tensor.
 
     """
-    x = x.contiguous()
+    x = ensure_contiguous(x)
 
     validate_dimensions(x)
     validate_contiguous(x, sparsity_layout_from)

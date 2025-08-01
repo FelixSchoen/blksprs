@@ -9,7 +9,7 @@ from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import stride
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.validation import validate_contiguous, validate_device, \
-    validate_sparsity_block_size
+    validate_sparsity_block_size, ensure_contiguous
 
 
 @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
@@ -29,8 +29,7 @@ def broadcast_add(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
             output tensor corresponds to x(i) + y(j).
 
     """
-    x = x.contiguous()
-    y = y.contiguous()
+    x, y = ensure_contiguous(x, y)
 
     validate_device(x, y)
     validate_contiguous(x, y)

@@ -12,7 +12,7 @@ from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import stride, ceil_pow2
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
-    validate_sparsity, validate_sparsity_block_size, validate_dtype_float_32
+    validate_sparsity, validate_sparsity_block_size, validate_dtype_float_32, ensure_contiguous
 
 
 def softmax(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int, flag_fused: bool = True,
@@ -44,7 +44,7 @@ def softmax_regular(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_si
         BlksprsTensor: The result of the softmax operation as a block-sparse tensor in compressed form.
 
     """
-    x = x.contiguous()
+    x = ensure_contiguous(x)
 
     validate_dimensions(x)
     validate_contiguous(x)
@@ -335,7 +335,7 @@ def softmax_fused(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size
         BlksprsTensor: The result of the softmax operation as a block-sparse tensor in compressed form.
 
     """
-    x = x.contiguous()
+    x = ensure_contiguous(x)
 
     validate_dimensions(x)
     validate_contiguous(x)

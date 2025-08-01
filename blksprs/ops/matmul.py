@@ -9,7 +9,7 @@ from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import stride
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
-    validate_sparsity, validate_sparsity_block_size, validate_dtype_float
+    validate_sparsity, validate_sparsity_block_size, validate_dtype_float, ensure_contiguous
 
 
 @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
@@ -34,8 +34,7 @@ def matmul(x: BlksprsTensor, sparsity_layout_x: Tensor,
         BlksprsTensor: The result of the matrix multiplication as a block-sparse tensor in compressed form.
 
     """
-    x = x.contiguous()
-    y = y.contiguous()
+    x, y = ensure_contiguous(x, y)
 
     validate_dimensions(x, y)
     validate_contiguous(x, y)

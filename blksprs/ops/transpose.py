@@ -5,7 +5,7 @@ from torch._library import triton_op
 from blksprs.ops.flow import flow_pull_forward
 from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_device, \
-    validate_sparsity, validate_sparsity_block_size
+    validate_sparsity, validate_sparsity_block_size, ensure_contiguous
 
 
 @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
@@ -27,7 +27,7 @@ def transpose(x: BlksprsTensor, sparsity_layout: Tensor,
         Tensor: The sparsity layout of the transposed tensor.
 
     """
-    x = x.contiguous()
+    x = ensure_contiguous(x)
 
     validate_dimensions(x)
     validate_contiguous(x)

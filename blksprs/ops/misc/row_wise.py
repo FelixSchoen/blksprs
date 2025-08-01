@@ -8,7 +8,7 @@ from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_config
 from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import stride
 from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_device, validate_sparsity, \
-    validate_sparsity_block_size
+    validate_sparsity_block_size, ensure_contiguous
 
 
 @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float32)
@@ -34,7 +34,7 @@ def row_wise_sum(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size:
             of the input and the sparsity layout of the output tensor.
 
     """
-    x = x.contiguous()
+    x = ensure_contiguous(x)
 
     validate_dimensions(x)
     validate_contiguous(x)
@@ -176,7 +176,7 @@ def row_wise_max(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size:
     """
     # TODO Fix for triton bug, see https://github.com/triton-lang/triton/issues/6376, should be fixed with the upcoming 3.4.0 release
     x = torch.where(x == -0.0, torch.tensor(0.0), x)
-    x = x.contiguous()
+    x = ensure_contiguous(x)
 
     validate_dimensions(x)
     validate_contiguous(x)
@@ -311,6 +311,8 @@ def row_wise_add(x: BlksprsTensor, sparsity_layout_x: Tensor, y: Tensor,
             compressed form.
 
     """
+    x = ensure_contiguous(x)
+
     validate_dimensions(x)
     validate_contiguous(x)
     validate_device(x)
