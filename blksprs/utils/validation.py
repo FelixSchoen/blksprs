@@ -6,10 +6,11 @@ VALIDATION = True
 
 
 def ensure_contiguous(*tensors: Tensor) -> tuple[Tensor, ...]:
-    if _check_skip_contiguous():
-        return tensors
+    transformed = tensors
 
-    transformed = tuple(tensor.contiguous() for tensor in tensors)
+    if _check_contiguous():
+        transformed = tuple(tensor.contiguous() for tensor in tensors)
+
     return transformed[0] if len(transformed) == 1 else transformed
 
 
@@ -133,8 +134,8 @@ def validate_sparsity_block_size(sparsity_block_size: int, *tensors):
             raise ValueError("Tensor sizes must be divisible by sparsity block size")
 
 
-def _check_skip_contiguous():
-    return not CONTIGUOUS
+def _check_contiguous():
+    return CONTIGUOUS
 
 
 def _set_skip_contiguous(skip_contiguous: bool):
