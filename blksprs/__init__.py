@@ -1,6 +1,6 @@
 from blksprs.utils.blksprs_tensor import BlksprsTensor
 
-__version__ = "2.1.5"
+__version__ = "2.1.6"
 
 
 class ops:

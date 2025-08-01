@@ -9,7 +9,8 @@ def ensure_contiguous(*tensors: Tensor) -> tuple[Tensor, ...]:
     if _check_skip_contiguous():
         return tensors
 
-    return tuple(tensor.contiguous() for tensor in tensors)
+    transformed = tuple(tensor.contiguous() for tensor in tensors)
+    return transformed[0] if len(transformed) == 1 else transformed
 
 
 def validate_dimensions(*tensors: Tensor, dims=3) -> None:
