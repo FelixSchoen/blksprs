@@ -1,6 +1,14 @@
-from blksprs.utils.blksprs_tensor import BlksprsTensor
+# Settings
+import torch
 
-__version__ = "2.1.7"
+# Capture scalar outputs for JIT compilation
+torch._dynamo.config.capture_scalar_outputs = True
+# Set version
+__version__ = "2.1.8"
+
+# Imports
+
+from blksprs.utils.blksprs_tensor import BlksprsTensor
 
 
 class ops:
