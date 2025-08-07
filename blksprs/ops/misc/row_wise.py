@@ -55,7 +55,7 @@ def row_wise_sum(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size:
     validate_contiguous(sparsity_layout, sparsity_lut,
                         sparsity_layout_output, sparsity_reverse_lut_output)
 
-    return BlksprsTensor(row_wise_sum_forward(
+    return BlksprsTensor.wrap(row_wise_sum_forward(
         x, sparsity_lut, sparsity_layout_output, sparsity_reverse_lut_output,
         sparsity_block_size, n_sparse_blocks_output, flag_slice_only)), sparsity_layout_output
 
@@ -195,7 +195,7 @@ def row_wise_max(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size:
     validate_contiguous(sparsity_layout, sparsity_lut,
                         sparsity_layout_output, sparsity_reverse_lut_output)
 
-    return BlksprsTensor(
+    return BlksprsTensor.wrap(
         row_wise_max_forward(x, sparsity_lut, sparsity_layout_output, sparsity_reverse_lut_output, sparsity_block_size,
                              n_sparse_blocks_output, flag_slice_only)), sparsity_layout_output
 
@@ -327,8 +327,8 @@ def row_wise_add(x: BlksprsTensor, sparsity_layout_x: Tensor, y: Tensor,
 
     validate_contiguous(sparsity_layout_x, sparsity_lut_x, sparsity_reverse_lut_rwm)
 
-    return BlksprsTensor(row_wise_add_forward(x, sparsity_lut_x, sparsity_layout_rwm,
-                                              sparsity_reverse_lut_rwm, y, sparsity_block_size))
+    return BlksprsTensor.wrap(row_wise_add_forward(x, sparsity_lut_x, sparsity_layout_rwm,
+                                                   sparsity_reverse_lut_rwm, y, sparsity_block_size))
 
 
 def row_wise_sub(x: BlksprsTensor, sparsity_layout_x: Tensor, y: Tensor,

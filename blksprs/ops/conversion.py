@@ -5,9 +5,9 @@ from torch._library.triton import wrap_triton, triton_op
 from triton import language as tl
 
 from blksprs.layouting.sparsity_layout import build_sparsity_layout_adaption
+from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs, prune_autotune_configs_conversion
 from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import stride
-from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs, prune_autotune_configs_conversion
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity, validate_sparsity_block_size, validate_sparsity_dense, ensure_contiguous
 
@@ -46,10 +46,10 @@ def to_sparse(x: Tensor, sparsity_layout: Tensor,
     lut = to_sparse_build_lut(lut, sparsity_layout)
 
     if sparsity_layout.size(1) == 1 and sparsity_layout.size(2) == 1 and torch.all(sparsity_layout):
-        return BlksprsTensor(x)
+        return BlksprsTensor.wrap(x)
 
-    return BlksprsTensor(to_sparse_forward(x, sparsity_layout,
-                                           lut["sparsity_lut"], sparsity_block_size, lut["n_sparse_blocks"]))
+    return BlksprsTensor.wrap(to_sparse_forward(x, sparsity_layout,
+                                                lut["sparsity_lut"], sparsity_block_size, lut["n_sparse_blocks"]))
 
 
 @triton_op("blksprs::to_sparse_forward", mutates_args={})
@@ -201,7 +201,7 @@ def to_dense(x: BlksprsTensor, sparsity_layout: Tensor,
         return x
 
     return Tensor(to_dense_forward(x, sparsity_layout,
-                            lut["sparsity_reverse_lut"], sparsity_block_size, fill_value))
+                                   lut["sparsity_reverse_lut"], sparsity_block_size, fill_value))
 
 
 @triton_op("blksprs::to_dense_forward", mutates_args={})
@@ -360,14 +360,14 @@ def adapt_layout(x: BlksprsTensor, sparsity_layout_from: Tensor, sparsity_block_
     validate_contiguous(sparsity_reverse_lut_from, sparsity_layout_to, sparsity_lut_to)
 
     if (sparsity_block_size_from == sparsity_block_size_to) and torch.equal(sparsity_layout_from, sparsity_layout_to):
-        return BlksprsTensor(x), sparsity_layout_to
+        return BlksprsTensor.wrap(x), sparsity_layout_to
 
-    return BlksprsTensor(adapt_layout_forward(x,
-                                              sparsity_layout_from, sparsity_reverse_lut_from,
-                                              sparsity_block_size_from,
-                                              sparsity_layout_to, sparsity_lut_to,
-                                              sparsity_block_size_to,
-                                              n_sparse_blocks_to)), sparsity_layout_to
+    return BlksprsTensor.wrap(adapt_layout_forward(x,
+                                                   sparsity_layout_from, sparsity_reverse_lut_from,
+                                                   sparsity_block_size_from,
+                                                   sparsity_layout_to, sparsity_lut_to,
+                                                   sparsity_block_size_to,
+                                                   n_sparse_blocks_to)), sparsity_layout_to
 
 
 @triton_op("blksprs::adapt_layout_forward", mutates_args={})

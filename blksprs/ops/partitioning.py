@@ -41,7 +41,7 @@ def split(x: BlksprsTensor, sparsity_layout: Tensor, partitions: int,
 
     lut = split_build_lut(lut, sparsity_layout, partitions)
 
-    return BlksprsTensor(split_forward(
+    return BlksprsTensor.wrap(split_forward(
         x, lut["sparsity_layout_output"], lut["sparsity_lut"], lut["sparsity_reverse_lut"],
         partitions, adjusted_dim, sparsity_block_size, lut["n_sparse_blocks"])), lut["sparsity_layout_output"]
 
@@ -146,7 +146,7 @@ def merge(x: BlksprsTensor, sparsity_layout: Tensor, partitions: int,
 
     lut = merge_build_lut(lut, sparsity_layout, partitions)
 
-    return BlksprsTensor(merge_forward(
+    return BlksprsTensor.wrap(merge_forward(
         x, lut["sparsity_layout_output"], lut["sparsity_lut"], lut["sparsity_reverse_lut"],
         partitions, adjusted_dim, sparsity_block_size, lut["n_sparse_blocks"])), lut["sparsity_layout_output"]
 

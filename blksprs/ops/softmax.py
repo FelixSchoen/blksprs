@@ -1,5 +1,3 @@
-import pdb
-
 import torch
 import triton
 from torch import Tensor
@@ -8,9 +6,9 @@ from torch._library.triton import wrap_triton
 from triton import language as tl
 
 from blksprs.ops.misc.row_wise import row_wise_sum, row_wise_max, row_wise_sub
+from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import stride, ceil_pow2
-from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity, validate_sparsity_block_size, validate_dtype_float_32, ensure_contiguous
 
@@ -55,10 +53,10 @@ def softmax_regular(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_si
 
     lut = softmax_build_lut(lut, sparsity_layout)
 
-    return BlksprsTensor(softmax_forward(x, sparsity_layout,
-                                         lut["sparsity_lut"],
-                                         lut["sparsity_reverse_lut_rws"],
-                                         sparsity_block_size))
+    return BlksprsTensor.wrap(softmax_forward(x, sparsity_layout,
+                                              lut["sparsity_lut"],
+                                              lut["sparsity_reverse_lut_rws"],
+                                              sparsity_block_size))
 
 
 @triton_op("blksprs::softmax_forward", mutates_args={})
@@ -346,10 +344,10 @@ def softmax_fused(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size
 
     lut = softmax_fused_build_lut(lut, sparsity_layout)
 
-    return BlksprsTensor(softmax_fused_forward(x, sparsity_layout,
-                                               lut["sparsity_reverse_lut_sorted"],
-                                               lut["max_blocks_line"],
-                                               sparsity_block_size))
+    return BlksprsTensor.wrap(softmax_fused_forward(x, sparsity_layout,
+                                                    lut["sparsity_reverse_lut_sorted"],
+                                                    lut["max_blocks_line"],
+                                                    sparsity_block_size))
 
 
 @triton_op("blksprs::softmax_fused_forward", mutates_args={})

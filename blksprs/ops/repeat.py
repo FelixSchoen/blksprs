@@ -46,7 +46,7 @@ def repeat(x: BlksprsTensor, sparsity_layout_x: Tensor, repeats: tuple[int, int,
 
     lut = repeat_build_lut(lut, sparsity_layout_x, repeats, sparsity_layout_output)
 
-    return BlksprsTensor(repeat_forward(
+    return BlksprsTensor.wrap(repeat_forward(
         x, sparsity_layout_x, lut["sparsity_layout_o"], lut["sparsity_lut"],
         lut["sparsity_reverse_lut"], sparsity_block_size, lut["n_sparse_blocks"])), lut["sparsity_layout_o"]
 
@@ -87,7 +87,7 @@ def repeat_interleave(x: BlksprsTensor, sparsity_layout_x: Tensor, repeats: int,
 
     lut = repeat_interleave_build_lut(lut, sparsity_layout_x, repeats, sparsity_layout_output)
 
-    return BlksprsTensor(repeat_forward(
+    return BlksprsTensor.wrap(repeat_forward(
         x, sparsity_layout_x, lut["sparsity_layout_o"], lut["sparsity_lut"],
         lut["sparsity_reverse_lut"], sparsity_block_size, lut["n_sparse_blocks"])), lut["sparsity_layout_o"]
 

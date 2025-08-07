@@ -5,9 +5,9 @@ from torch._library import triton_op
 from torch._library.triton import wrap_triton
 from triton import language as tl
 
+from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import stride
-from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity, validate_dtype_int, validate_sparsity_block_size, ensure_contiguous
 
@@ -45,9 +45,9 @@ def gather(src: BlksprsTensor, sparsity_layout_src: Tensor,
 
     lut = gather_build_lut(lut, sparsity_layout_src, sparsity_layout_idx)
 
-    return BlksprsTensor(gather_forward(src, sparsity_layout_src, lut["sparsity_reverse_lut_x"],
-                                        adjusted_dim, idx, sparsity_layout_idx, lut["sparsity_lut_i"],
-                                        sparsity_block_size))
+    return BlksprsTensor.wrap(gather_forward(src, sparsity_layout_src, lut["sparsity_reverse_lut_x"],
+                                             adjusted_dim, idx, sparsity_layout_idx, lut["sparsity_lut_i"],
+                                             sparsity_block_size))
 
 
 @triton_op("blksprs::gather_forward", mutates_args={})
@@ -276,11 +276,11 @@ def scatter_reduce(src: BlksprsTensor, sparsity_layout_src: Tensor,
 
     lut = scatter_reduce_build_lut(lut, sparsity_layout_src, sparsity_layout_tgt)
 
-    return BlksprsTensor(scatter_reduce_forward(src, sparsity_layout_src, lut["sparsity_lut_x"],
-                                                adjusted_dim, idx,
-                                                sparsity_layout_tgt, lut["sparsity_reverse_lut_o"],
-                                                sparsity_block_size, lut["n_sparse_blocks"],
-                                                reduce_op))
+    return BlksprsTensor.wrap(scatter_reduce_forward(src, sparsity_layout_src, lut["sparsity_lut_x"],
+                                                     adjusted_dim, idx,
+                                                     sparsity_layout_tgt, lut["sparsity_reverse_lut_o"],
+                                                     sparsity_block_size, lut["n_sparse_blocks"],
+                                                     reduce_op))
 
 
 @triton_op("blksprs::scatter_reduce_forward", mutates_args={})

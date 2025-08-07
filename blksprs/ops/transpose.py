@@ -37,9 +37,9 @@ def transpose(x: BlksprsTensor, sparsity_layout: Tensor,
 
     lut = transpose_build_lut(lut, sparsity_layout)
 
-    return BlksprsTensor(transpose_forward(x, lut["sparsity_layout_t"],
-                                           lut["sparsity_lut"], lut["sparsity_reverse_lut"],
-                                           sparsity_block_size, lut["n_sparse_blocks"])), lut["sparsity_layout_t"]
+    return BlksprsTensor.wrap(transpose_forward(x, lut["sparsity_layout_t"],
+                                                lut["sparsity_lut"], lut["sparsity_reverse_lut"],
+                                                sparsity_block_size, lut["n_sparse_blocks"])), lut["sparsity_layout_t"]
 
 
 @triton_op("blksprs::transpose_forward", mutates_args={})

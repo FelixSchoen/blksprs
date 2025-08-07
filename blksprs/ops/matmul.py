@@ -5,9 +5,9 @@ from torch.library import triton_op, wrap_triton
 from triton import language as tl
 
 from blksprs.ops.transpose import transpose
+from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import stride
-from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity, validate_sparsity_block_size, validate_dtype_float, ensure_contiguous
 
@@ -47,11 +47,11 @@ def matmul(x: BlksprsTensor, sparsity_layout_x: Tensor,
 
     lut = matmul_build_lut(lut, sparsity_layout_x, sparsity_layout_y, sparsity_layout_output)
 
-    return BlksprsTensor(matmul_forward(x, y,
-                                        sparsity_layout_x, lut["sparsity_reverse_lut_x"],
-                                        sparsity_layout_y, lut["sparsity_reverse_lut_y"],
-                                        sparsity_layout_output, lut["sparsity_lut_o"],
-                                        sparsity_block_size, lut["n_sparse_blocks"]))
+    return BlksprsTensor.wrap(matmul_forward(x, y,
+                                             sparsity_layout_x, lut["sparsity_reverse_lut_x"],
+                                             sparsity_layout_y, lut["sparsity_reverse_lut_y"],
+                                             sparsity_layout_output, lut["sparsity_lut_o"],
+                                             sparsity_block_size, lut["n_sparse_blocks"]))
 
 
 @triton_op("blksprs::matmul_forward", mutates_args={})

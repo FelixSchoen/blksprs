@@ -5,9 +5,9 @@ from torch._library import triton_op
 from torch._library.triton import wrap_triton
 from triton import language as tl
 
+from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import stride
-from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.validation import validate_contiguous, validate_device, \
     validate_sparsity_block_size, ensure_contiguous
 
@@ -43,7 +43,7 @@ def broadcast_add(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
 
     validate_contiguous(sparsity_layout_output, sparsity_lut_o)
 
-    return BlksprsTensor(broadcast_add_forward(x, y, sparsity_lut_o, sparsity_block_size, n_sparse_blocks))
+    return BlksprsTensor.wrap(broadcast_add_forward(x, y, sparsity_lut_o, sparsity_block_size, n_sparse_blocks))
 
 
 def broadcast_sub(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,

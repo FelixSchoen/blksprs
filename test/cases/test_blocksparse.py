@@ -1112,7 +1112,7 @@ def test_subclass(config: list):
 
     x_d = torch.randn(size=(b, m, k), device=DEVICE)
     sparsity_layout_x_bs = _get_blocksparse_layout(b, m, k, sparsity_block_size, sparsity_percentage)
-    x_bs = BlksprsTensor(_blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size))
+    x_bs = BlksprsTensor.wrap(_blocksparse_roundtrip(x_d, sparsity_layout_x_bs, sparsity_block_size))
 
     assert type(x_bs).__name__ == BlksprsTensor.__name__
 

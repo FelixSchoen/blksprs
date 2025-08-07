@@ -1,8 +1,4 @@
-import torch
 from torch import Tensor, Size
-
-# Capture scalar outputs for JIT compilation
-torch._dynamo.config.capture_scalar_outputs = True
 
 
 def do_shape_blocksparse(x: Tensor) -> tuple[Tensor, Size]:
@@ -26,6 +22,7 @@ def stride(x: Tensor):
         return x.size(1) * x.size(2), x.size(2), 1
     else:
         raise NotImplementedError
+
 
 def ceil_pow2(x: int) -> int:
     if x <= 0:
