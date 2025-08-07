@@ -174,8 +174,6 @@ def row_wise_max(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size:
             of the input and the sparsity layout of the output tensor.
 
     """
-    # TODO Fix for triton bug, see https://github.com/triton-lang/triton/issues/6376, should be fixed with the upcoming 3.4.0 release
-    x = torch.where(x == -0.0, torch.tensor(0.0), x)
     x = ensure_contiguous(x)
 
     validate_dimensions(x)
