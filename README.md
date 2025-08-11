@@ -83,7 +83,7 @@ We will continue to maintain the library and fix any issues that arise.
 Should you find any bugs please open an [issue](https://github.com/FelixSchoen/blksprs/issues).
 We also encourage [pull requests](https://github.com/FelixSchoen/blksprs/pulls).
 
-It might be that this changes with future projects, but as of June 2025, we are content with the current state of the
+It might be that this changes with future projects, but as of August 2025, we are content with the current state of the
 library.
 
 ## Known Limitations and Issues
