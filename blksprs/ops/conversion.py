@@ -120,16 +120,16 @@ def to_sparse_kernel(x,
                    tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
                  ((pid_col * TRITON_BLOCK_SIZE + spa_col * sparsity_block_size +
                    tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-    blk_d_msk = (blk_d_idx >= 0 and
-                 blk_d_idx < x_b * x_b_s)
+    blk_d_msk = ((blk_d_idx >= 0) &
+                 (blk_d_idx < x_b * x_b_s))
     blk_d = tl.load(x + blk_d_idx, mask=blk_d_msk)
 
     # Store block in sparse tensor
     blk_o_idx = ((pid_blk * o_b_s) +
                  ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
                  ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE) * o_c_s))[None, :])
-    blk_o_msk = (blk_o_idx >= 0 and
-                 blk_o_idx < (pid_blk + 1) * o_b_s)
+    blk_o_msk = ((blk_o_idx >= 0) &
+                 (blk_o_idx < (pid_blk + 1) * o_b_s))
     tl.store(o + blk_o_idx, blk_d, mask=blk_o_msk)
 
 
@@ -269,7 +269,8 @@ def to_dense_kernel(x,
 
     # Get reverse sparsity index for current block
     rev_idx_spa_idx = (pid_blk * s_l_b_s + spa_row * s_l_r_s + spa_col * s_l_c_s)
-    rev_idx_spa_msk = (rev_idx_spa_idx >= 0 and rev_idx_spa_idx < s_l_b * s_l_b_s)
+    rev_idx_spa_msk = ((rev_idx_spa_idx >= 0) &
+                       (rev_idx_spa_idx < s_l_b * s_l_b_s))
     rev_idx_spa = tl.load(sparsity_reverse_lut + rev_idx_spa_idx, mask=rev_idx_spa_msk).to(tl.int32)
 
     # If block is present commence operations
@@ -279,14 +280,15 @@ def to_dense_kernel(x,
                      tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
                    (((pid_col % (sparsity_block_size // TRITON_BLOCK_SIZE)) * TRITON_BLOCK_SIZE +
                      tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-        blk_msk = (blk_idx >= 0 and
-                   blk_idx < x_b * x_b_s)
+        blk_msk = ((blk_idx >= 0) &
+                   (blk_idx < x_b * x_b_s))
         blk = tl.load(x + blk_idx, mask=blk_msk)
 
         o_idx = (pid_blk * o_b_s +
                  ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
                  ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
-        o_msk = (o_idx >= 0 and o_idx < o_b * o_b_s)
+        o_msk = ((o_idx >= 0) &
+                 (o_idx < o_b * o_b_s))
         tl.store(o + o_idx, blk, o_msk)
 
 
@@ -458,7 +460,8 @@ def adapt_layout_kernel(x,
     rev_idx_spa_x_idx = (spa_bat_x * s_l_x_b_s +
                          spa_row_x * s_l_x_r_s +
                          spa_col_x * s_l_x_c_s)
-    rev_idx_spa_x_msk = (rev_idx_spa_x_idx >= 0 and rev_idx_spa_x_idx < s_l_x_b * s_l_x_b_s)
+    rev_idx_spa_x_msk = ((rev_idx_spa_x_idx >= 0) &
+                         (rev_idx_spa_x_idx < s_l_x_b * s_l_x_b_s))
     rev_idx_spa_x = tl.load(r_lut_x + rev_idx_spa_x_idx, mask=rev_idx_spa_x_msk).to(tl.int32)
 
     # If block is present commence operations
@@ -473,16 +476,16 @@ def adapt_layout_kernel(x,
         blk_x_idx = ((rev_idx_spa_x * x_b_s) +
                      ((shift_row_x * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
                      ((shift_col_x * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-        blk_x_msk = (blk_x_idx >= 0 and
-                     blk_x_idx < x_b * x_b_s)
+        blk_x_msk = ((blk_x_idx >= 0) &
+                     (blk_x_idx < x_b * x_b_s))
         blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
 
         # Store output
         blk_o_idx = ((pid_blk * o_b_s) +
                      ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
                      ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
-        blk_o_msk = (blk_o_idx >= 0 and
-                     blk_o_idx < o_b * o_b_s)
+        blk_o_msk = ((blk_o_idx >= 0) &
+                     (blk_o_idx < o_b * o_b_s))
         tl.store(o + blk_o_idx, blk_x, mask=blk_o_msk)
 
 

@@ -169,12 +169,14 @@ def matmul_kernel(x,
         rev_idx_spa_x_idx = (spa_bat_o * s_l_x_b_s +
                              spa_row_o * s_l_x_r_s +
                              i_seg_spa * s_l_x_c_s)
-        rev_idx_spa_x_msk = (rev_idx_spa_x_idx >= 0 and rev_idx_spa_x_idx < s_l_x_b * s_l_x_b_s)
+        rev_idx_spa_x_msk = ((rev_idx_spa_x_idx >= 0) &
+                             (rev_idx_spa_x_idx < s_l_x_b * s_l_x_b_s))
         rev_idx_spa_x = tl.load(r_lut_x + rev_idx_spa_x_idx, mask=rev_idx_spa_x_msk).to(tl.int32)
 
         # Get reverse sparsity indices for y
         rev_idx_spa_y_idx = (spa_bat_o * s_l_y_b_s + i_seg_spa * s_l_y_r_s + spa_col_o * s_l_y_c_s)
-        rev_idx_spa_y_msk = (rev_idx_spa_y_idx >= 0 and rev_idx_spa_y_idx < s_l_y_b * s_l_y_b_s)
+        rev_idx_spa_y_msk = ((rev_idx_spa_y_idx >= 0) &
+                             (rev_idx_spa_y_idx < s_l_y_b * s_l_y_b_s))
         rev_idx_spa_y = tl.load(r_lut_y + rev_idx_spa_y_idx, mask=rev_idx_spa_y_msk).to(tl.int32)
 
         # If both blocks are present commence calculation
@@ -183,16 +185,16 @@ def matmul_kernel(x,
                          ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
                          ((i_seg_tri_mod * TRITON_BLOCK_SIZE +
                            tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-            blk_x_msk = (blk_x_idx >= 0 and
-                         blk_x_idx < x_b * x_b_s)
+            blk_x_msk = ((blk_x_idx >= 0) &
+                         (blk_x_idx < x_b * x_b_s))
             blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
 
             blk_y_idx = ((rev_idx_spa_y * y_b_s) +
                          ((i_seg_tri_mod * TRITON_BLOCK_SIZE +
                            tl.arange(0, TRITON_BLOCK_SIZE)) * y_r_s)[:, None] +
                          ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * y_c_s)[None, :])
-            blk_y_msk = (blk_y_idx >= 0 and
-                         blk_y_idx < y_b * y_b_s)
+            blk_y_msk = ((blk_y_idx >= 0) &
+                         (blk_y_idx < y_b * y_b_s))
             blk_y = tl.load(y + blk_y_idx, mask=blk_y_msk)
 
             # Perform matrix multiplication
@@ -205,8 +207,8 @@ def matmul_kernel(x,
     blk_o_idx = ((pid_blk * o_b_s) +
                  ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
                  ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
-    blk_o_msk = (blk_o_idx >= 0 and
-                 blk_o_idx < o_b * o_b_s)
+    blk_o_msk = ((blk_o_idx >= 0) &
+                 (blk_o_idx < o_b * o_b_s))
     tl.store(o + blk_o_idx, buf, mask=blk_o_msk)
 
 

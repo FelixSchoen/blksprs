@@ -98,22 +98,25 @@ def build_distribution_layout_kernel(i,
 
     # Get position of current sparsity block consisting of its batch, row, and column index
     spa_bat_i_idx = (pid_blk * s_lut_i_r_s + 0 * s_lut_i_c_s)
-    spa_bat_i_msk = (spa_bat_i_idx >= 0 and spa_bat_i_idx < s_lut_i_r * s_lut_i_r_s)
+    spa_bat_i_msk = ((spa_bat_i_idx >= 0) &
+                     (spa_bat_i_idx < s_lut_i_r * s_lut_i_r_s))
     spa_bat_i = tl.load(s_lut_i + spa_bat_i_idx, mask=spa_bat_i_msk)
 
     spa_row_i_idx = (pid_blk * s_lut_i_r_s + 1 * s_lut_i_c_s)
-    spa_row_i_msk = (spa_row_i_idx >= 0 and spa_row_i_idx < s_lut_i_r * s_lut_i_r_s)
+    spa_row_i_msk = ((spa_row_i_idx >= 0) &
+                     (spa_row_i_idx < s_lut_i_r * s_lut_i_r_s))
     spa_row_i = tl.load(s_lut_i + spa_row_i_idx, mask=spa_row_i_msk)
 
     spa_col_i_idx = (pid_blk * s_lut_i_r_s + 2 * s_lut_i_c_s)
-    spa_col_i_msk = (spa_col_i_idx >= 0 and spa_col_i_idx < s_lut_i_r * s_lut_i_r_s)
+    spa_col_i_msk = ((spa_col_i_idx >= 0) &
+                     (spa_col_i_idx < s_lut_i_r * s_lut_i_r_s))
     spa_col_i = tl.load(s_lut_i + spa_col_i_idx, mask=spa_col_i_msk)
 
     blk_i_idx = (pid_blk * i_b_s +
                  ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * i_r_s)[:, None] +
                  ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * i_c_s)[None, :])
-    blk_i_msk = (blk_i_idx >= 0 and
-                 blk_i_idx < i_b * i_b_s)
+    blk_i_msk = ((blk_i_idx >= 0) &
+                 (blk_i_idx < i_b * i_b_s))
     blk_i = tl.load(i + blk_i_idx, mask=blk_i_msk)
 
     dst_bat_idx = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), spa_bat_i, dtype=tl.int32)
@@ -131,6 +134,6 @@ def build_distribution_layout_kernel(i,
     blk_o_idx = ((dst_bat_idx * o_b_s) +
                  (dst_row_idx * o_r_s) +
                  (dst_col_idx * o_c_s))
-    blk_o_msk = (blk_o_idx >= 0 and
-                 blk_o_idx < o_b * o_b_s)
+    blk_o_msk = ((blk_o_idx >= 0) &
+                 (blk_o_idx < o_b * o_b_s))
     tl.store(o + blk_o_idx, blk_v, mask=blk_o_msk)

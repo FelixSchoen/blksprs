@@ -121,16 +121,16 @@ def broadcast_add_kernel(x,
     blk_x_idx = (spa_bat_o * x_b_s +
                  ((pid_row * TRITON_BLOCK_SIZE + spa_row_o * sparsity_block_size +
                    tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
-    blk_x_msk = (blk_x_idx >= 0 and
-                 blk_x_idx < x_b * x_b_s)
+    blk_x_msk = ((blk_x_idx >= 0) &
+                 (blk_x_idx < x_b * x_b_s))
     blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
 
     # Load y block
     blk_y_idx = (spa_bat_o * y_b_s +
                  ((pid_col * TRITON_BLOCK_SIZE + spa_col_o * sparsity_block_size +
                    tl.arange(0, TRITON_BLOCK_SIZE)) * y_c_s)[None, :])
-    blk_y_msk = (blk_y_idx >= 0 and
-                 blk_y_idx < y_b * y_b_s)
+    blk_y_msk = ((blk_y_idx >= 0) &
+                 (blk_y_idx < y_b * y_b_s))
     blk_y = tl.load(y + blk_y_idx, mask=blk_y_msk)
 
     # Compute sum
@@ -141,6 +141,6 @@ def broadcast_add_kernel(x,
     blk_o_idx = ((pid_blk * o_b_s) +
                  ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
                  ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
-    blk_o_msk = (blk_o_idx >= 0 and
-                 blk_o_idx < o_b * o_b_s)
+    blk_o_msk = ((blk_o_idx >= 0) &
+                 (blk_o_idx < o_b * o_b_s))
     tl.store(o + blk_o_idx, buf, mask=blk_o_msk)
