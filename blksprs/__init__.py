@@ -14,6 +14,7 @@ from blksprs.utils.blksprs_tensor import BlksprsTensor
 class ops:
     from blksprs.ops.conversion import to_dense, to_sparse, from_blksprs, to_blksprs, adapt_layout
     from blksprs.ops.distribution import gather, scatter, scatter_reduce
+    from blksprs.ops.flash_attention import flash_attention, flash_attention_build_lut
     from blksprs.ops.matmul import matmul
     from blksprs.ops.softmax import softmax, softmax_fused
     from blksprs.ops.transpose import transpose
