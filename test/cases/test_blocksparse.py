@@ -1288,3 +1288,152 @@ def _get_autocast_min_val():
         dtype = torch.float
 
     return torch.finfo(dtype).min
+
+
+# Flash Attention Tests
+
+FLASH_ATTENTION_TEST_CONFIGS = [
+    # (batch, seq_q, seq_k, n_heads, head_dim, block_size, attn_sparsity_pct, use_causal_mask)
+    # Dense attention
+    (2, 64, 64, 4, 64, 16, 0, False),
+    (2, 64, 64, 4, 64, 16, 0, True),
+    (2, 64, 64, 4, 64, 32, 0, False),
+    # Sparse attention
+    (2, 128, 128, 4, 64, 16, 0.5, False),
+    (2, 128, 128, 4, 64, 16, 0.75, False),
+    (2, 128, 128, 4, 64, 32, 0.75, False),
+    # Sparse + causal mask
+    (2, 128, 128, 4, 64, 16, 0.5, True),
+    (2, 128, 128, 4, 64, 32, 0.75, True),
+    # Different head_dim / block_size ratios
+    (2, 128, 128, 4, 64, 16, 0.5, False),
+    (2, 128, 128, 4, 64, 32, 0.5, False),
+    (2, 128, 128, 4, 128, 32, 0.5, False),
+    # Asymmetric Q/K lengths (cross-attention)
+    (2, 256, 128, 4, 64, 32, 0.5, False),
+    (2, 128, 256, 4, 64, 32, 0.5, False),
+    # Edge cases
+    (1, 64, 64, 1, 64, 16, 0, False),
+    (2, 32, 32, 4, 32, 16, 0, False),
+    (2, 32, 32, 4, 32, 16, 0, True),
+    # Larger configurations
+    (2, 256, 256, 4, 64, 32, 0.5, False),
+    (2, 256, 256, 4, 64, 32, 0.5, True),
+]
+
+
+def _get_flash_attention_layout(n_batches: int, n_seq_q: int, n_seq_k: int,
+                                 sparsity_pct: float) -> Tensor:
+    """Generate a random attention sparsity layout."""
+    attention_layout = torch.ones(n_batches, n_seq_q, n_seq_k,
+                                  dtype=torch.bool, device=DEVICE)
+
+    num_zero_elements = int(n_seq_q * n_seq_k * sparsity_pct)
+    for b in range(n_batches):
+        indices = torch.randperm(n_seq_q * n_seq_k, device=DEVICE)[:num_zero_elements]
+        attention_layout[b, indices // n_seq_k, indices % n_seq_k] = False
+
+    return attention_layout
+
+
+def _build_causal_mask(n_batches: int, seq_q: int, seq_k: int) -> Tensor:
+    """Build a causal attention mask (upper triangular = masked)."""
+    mask = torch.triu(torch.ones(seq_q, seq_k, dtype=torch.bool, device=DEVICE), diagonal=1)
+    return mask.unsqueeze(0).expand(n_batches, -1, -1)
+
+
+def _reference_attention(q: Tensor, k: Tensor, v: Tensor,
+                         attention_layout: Tensor, block_size: int,
+                         attention_mask: Tensor = None, scale: float = None) -> Tensor:
+    """Compute reference attention using PyTorch."""
+    batch, seq_q, n_heads, head_dim = q.shape
+    _, seq_k, _, _ = k.shape
+
+    if scale is None:
+        scale = 1.0 / (head_dim ** 0.5)
+
+    q_t = q.permute(0, 2, 1, 3)
+    k_t = k.permute(0, 2, 1, 3)
+    v_t = v.permute(0, 2, 1, 3)
+
+    attn_scores = torch.matmul(q_t, k_t.transpose(-2, -1)) * scale
+
+    # Apply block sparsity mask
+    attn_layout_expanded = attention_layout.reshape(batch, n_heads,
+                                                     seq_q // block_size,
+                                                     seq_k // block_size)
+
+    for b in range(batch):
+        for h in range(n_heads):
+            for i in range(seq_q // block_size):
+                for j in range(seq_k // block_size):
+                    if not attn_layout_expanded[b, h, i, j]:
+                        attn_scores[b, h,
+                                    i * block_size:(i + 1) * block_size,
+                                    j * block_size:(j + 1) * block_size] = float("-inf")
+
+    # Apply attention mask if provided
+    if attention_mask is not None:
+        attention_mask_expanded = attention_mask.reshape(batch, n_heads, seq_q, seq_k)
+        attn_scores = attn_scores.masked_fill(attention_mask_expanded, float("-inf"))
+
+    attn_probs = torch.softmax(attn_scores, dim=-1)
+    attn_probs = torch.nan_to_num(attn_probs, nan=0.0)
+
+    out = torch.matmul(attn_probs, v_t)
+    return out.permute(0, 2, 1, 3)
+
+
+@pytest.mark.parametrize("config", FLASH_ATTENTION_TEST_CONFIGS)
+@pytest.mark.parametrize("use_amp", [True, False])
+def test_blksprs_flash_attention(config: tuple, use_amp: bool):
+    with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+        batch, seq_q, seq_k, n_heads, head_dim, sparsity_block_size, attn_sparsity, use_causal_mask = config
+
+        q = torch.randn(batch, seq_q, n_heads, head_dim, device=DEVICE)
+        k = torch.randn(batch, seq_k, n_heads, head_dim, device=DEVICE)
+        v = torch.randn(batch, seq_k, n_heads, head_dim, device=DEVICE)
+
+        n_batches = batch * n_heads
+        n_seq_blocks_q = seq_q // sparsity_block_size
+        n_seq_blocks_k = seq_k // sparsity_block_size
+
+        attention_layout = _get_flash_attention_layout(n_batches, n_seq_blocks_q, n_seq_blocks_k,
+                                                       attn_sparsity)
+
+        attention_mask = None
+        if use_causal_mask and seq_q == seq_k:
+            attention_mask = _build_causal_mask(n_batches, seq_q, seq_k)
+
+        q_stock = q.clone().requires_grad_(True)
+        k_stock = k.clone().requires_grad_(True)
+        v_stock = v.clone().requires_grad_(True)
+        q_blksprs = q.clone().requires_grad_(True)
+        k_blksprs = k.clone().requires_grad_(True)
+        v_blksprs = v.clone().requires_grad_(True)
+
+        stock_flash_attention_out = _reference_attention(q_stock, k_stock, v_stock, attention_layout,
+                                                         sparsity_block_size, attention_mask=attention_mask)
+        stock_dtype = stock_flash_attention_out.dtype
+
+        blksprs_flash_attention_out = bs.ops.flash_attention(
+            q_blksprs, k_blksprs, v_blksprs, attention_layout, sparsity_block_size, attention_mask=attention_mask
+        )
+
+        assert torch.allclose(blksprs_flash_attention_out.to(stock_dtype), stock_flash_attention_out,
+                              atol=ATOL, rtol=RTOL)
+
+        target = torch.randn_like(stock_flash_attention_out)
+        stock_loss = torch.nn.L1Loss()
+        blksprs_loss = torch.nn.L1Loss()
+        stock_loss = stock_loss(stock_flash_attention_out, target)
+        blksprs_loss = blksprs_loss(blksprs_flash_attention_out, target)
+
+        stock_loss.backward()
+        blksprs_loss.backward()
+
+        assert torch.allclose(q_blksprs.grad.to(q_stock.grad.dtype), q_stock.grad, atol=ATOL, rtol=RTOL)
+        assert torch.allclose(k_blksprs.grad.to(k_stock.grad.dtype), k_stock.grad, atol=ATOL, rtol=RTOL)
+        assert torch.allclose(v_blksprs.grad.to(v_stock.grad.dtype), v_stock.grad, atol=ATOL, rtol=RTOL)
+
+

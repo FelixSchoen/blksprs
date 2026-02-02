@@ -71,6 +71,25 @@ def test_readme():
     bs.ops.misc.row_wise_sum(o_sparse, sparsity_layout_o, sparsity_block_size)
     bs.ops.misc.row_wise_max(o_sparse, sparsity_layout_o, sparsity_block_size)
 
+    # Flash Attention
+    seq_len, head_dim = 512, 64
+    sparsity_block_size_attn = 128
+
+    q = torch.randn(b, seq_len, h, head_dim, device="cuda")
+    k = torch.randn(b, seq_len, h, head_dim, device="cuda")
+    v = torch.randn(b, seq_len, h, head_dim, device="cuda")
+
+    n_batches_attn = b * h
+    n_seq_blocks = seq_len // sparsity_block_size_attn
+    attention_layout = torch.tril(torch.ones(n_batches_attn, n_seq_blocks, n_seq_blocks, device="cuda", dtype=torch.bool))
+
+    lut = bs.ops.flash_attention_build_lut(attention_layout, n_seq_blocks, n_seq_blocks)
+
+    attn_out = bs.ops.flash_attention(q, k, v, attention_layout, sparsity_block_size_attn, lut=lut)
+
+    assert attn_out.shape == (b, seq_len, h, head_dim)
+
+
 
 def _get_random_sparsity_layout(b, m, n, sparsity_block_size, sparsity_percentage):
     """Helper function, creates a random sparsity layout for a given shape with a given percentage of blocks marked as sparse.

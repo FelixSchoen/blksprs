@@ -1,17 +1,10 @@
-# blksprs
+# 🧊 blksprs
 
 [![GitHub Release](https://img.shields.io/github/v/release/FelixSchoen/blksprs?include_prereleases&label=Latest%20Release)](https://github.com/FelixSchoen/blksprs/releases)
 [![Python 3.11](https://img.shields.io/badge/Python%20Version-3.11-blue)](https://www.python.org/downloads/release/python-3119/)
 [![Python 3.12](https://img.shields.io/badge/Python%20Version-3.12-blue)](https://www.python.org/downloads/release/python-31210/)
 
-## Overview
-
-### News
-
-🎉 ***Version 2.0 released***. blksprs now supports kernel auto-tuning, JIT compilation, specification of pre-calculated
-LUTs, autocasting, and makes use of `torch.library.triton_op()`!
-
----
+## 📖 Overview
 
 A lightweight and efficient library for operations on block-sparse matrices in PyTorch using Triton.
 
@@ -27,6 +20,7 @@ Currently supported operations (includes gradient calculation):
 - Splitting and merging of matrices (_currently* only supports splitting and merging along the last dimension_)
 - Conversion to and from sparse form
 - Conversion to different sparsity layouts and different sparsity block sizes
+- Flash Attention (_supports custom masks and cross-attention_)
 
 As with this library sparse matrices are represented using a tuple of `(matrix, sparsity_layout, sparsity_block_size)`,
 any element-wise operations can be applied in regular torch-like fashion.
@@ -55,7 +49,7 @@ Furthermore, the library provides a set of utility functions
 
 _* see the [Roadmap](#roadmap) section for more information_
 
-## Installation
+## 🛠️ Installation
 
 Note that due to the dependency on [Triton](https://github.com/triton-lang/triton) this library is **only compatible with the Linux platform**.
 Keep track of this [issue](https://github.com/triton-lang/triton/issues/1640) for updates.
@@ -70,11 +64,11 @@ We recommend installing blksprs from [PyPI](https://pypi.org/project/blksprs/) u
 - _[NumPy](https://numpy.org/) (to get rid of warnings, built with v2.3.1)_
 - _[Triton](https://github.com/triton-lang/triton) (included with PyTorch)_
 
-## Changelog
+## 📝 Changelog
 
 See [`CHANGELOG.md`](https://github.com/FelixSchoen/blksprs/blob/main/CHANGELOG.md) for a detailed changelog.
 
-## Roadmap
+## 🗺️ Roadmap
 
 Note that since this library covers all our current needs it is in a **bugfix-only** state.
 This means that there are no plans to add new features, e.g., support for dimension specification of the ``split`` and
@@ -86,17 +80,15 @@ We also encourage [pull requests](https://github.com/FelixSchoen/blksprs/pulls).
 It might be that this changes with future projects, but as of August 2025, we are content with the current state of the
 library.
 
-## Known Limitations and Issues
+## ⚠️ Known Limitations and Issues
 
-- Triton has a bug with `tl.atomix_max()` used for the row-wise max operation.
-  In order to work around this bug a manual conversion of some values is needed, (slightly) negatively impacting
-  performance.
-  Watch the [issue](https://github.com/triton-lang/triton/issues/6376) on Triton's issue tracker for more information.
 - There will be some slight numerical differences between vanilla and blksprs operations.
   These instabilities are due to Triton and thus cannot be fixed by this library alone.
   However, for all intents and purposes, these very minor differences should not matter and can safely be ignored.
 
-## Usage
+- Flash Attention is a recent addition. While it has been tested and appears stable, please report any issues you encounter.
+
+## 💻 Usage
 
 We provide an example below to demonstrate the usage of the library.
 For more detailed examples, please refer to
@@ -108,7 +100,6 @@ the [test cases](https://github.com/FelixSchoen/blksprs/blob/main/test/cases/tes
 ```python
 import torch
 import blksprs as bs
-
 
 def test_readme():
     # Set up parameters (batch size, number of heads, dimensions for matrices (m, k) and (n, k))
@@ -174,9 +165,29 @@ def test_readme():
     # Other available functions
     bs.ops.transpose(o_sparse, sparsity_layout_o, sparsity_block_size)
     bs.ops.softmax(o_sparse, sparsity_layout_o, sparsity_block_size, flag_fused=False)
-    bs.ops.softmax_fused(o_sparse, sparsity_layout_o, sparsity_block_size) # Significantly faster version that requires that rows of matrix fit into memory (default if flag is not set)
+    bs.ops.softmax_fused(o_sparse, sparsity_layout_o,
+                         sparsity_block_size)  # Significantly faster version that requires that rows of matrix fit into memory (default if flag is not set)
     bs.ops.misc.row_wise_sum(o_sparse, sparsity_layout_o, sparsity_block_size)
     bs.ops.misc.row_wise_max(o_sparse, sparsity_layout_o, sparsity_block_size)
+
+    # Flash Attention
+    seq_len, head_dim = 512, 64
+    sparsity_block_size_attn = 128
+
+    q = torch.randn(b, seq_len, h, head_dim, device="cuda")
+    k = torch.randn(b, seq_len, h, head_dim, device="cuda")
+    v = torch.randn(b, seq_len, h, head_dim, device="cuda")
+
+    n_batches_attn = b * h
+    n_seq_blocks = seq_len // sparsity_block_size_attn
+    attention_layout = torch.tril(torch.ones(n_batches_attn, n_seq_blocks, n_seq_blocks, device="cuda", dtype=torch.bool))
+
+    lut = bs.ops.flash_attention_build_lut(attention_layout, n_seq_blocks, n_seq_blocks)
+
+    attn_out = bs.ops.flash_attention(q, k, v, attention_layout, sparsity_block_size_attn, lut=lut)
+
+    assert attn_out.shape == (b, seq_len, h, head_dim)
+
 
 
 def _get_random_sparsity_layout(b, m, n, sparsity_block_size, sparsity_percentage):
