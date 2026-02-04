@@ -174,7 +174,7 @@ def gather_kernel(x,
                  dst_col_x)
     blk_x_msk = (((blk_x_idx >= 0) &
                   (blk_x_idx < x_b * x_b_s)) &
-                 (rev_idx_spa_x_msk != -1))
+                 (rev_idx_spa_x >= 0))
     blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
 
     # Store output
@@ -183,7 +183,7 @@ def gather_kernel(x,
                  ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
     blk_o_msk = (((blk_o_idx >= 0) &
                   (blk_o_idx < o_b * o_b_s)) &
-                 (rev_idx_spa_x_msk != -1))
+                 (rev_idx_spa_x >= 0))
     tl.store(o + blk_o_idx, blk_x, mask=blk_o_msk)
 
 
@@ -426,7 +426,7 @@ def scatter_reduce_kernel(x,
                  dst_col_o)
     blk_o_msk = (((blk_o_idx >= 0) &
                   (blk_o_idx < o_b * o_b_s)) &
-                 (rev_idx_spa_o_msk != -1))
+                 (rev_idx_spa_o >= 0))
 
     if reduce_op_ind == 0:
         tl.store(o + blk_o_idx, blk_x, mask=blk_o_msk)

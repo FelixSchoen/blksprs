@@ -65,7 +65,6 @@ def prune_autotune_configs_conversion(autotune_configs, kernel_args, **kwargs):
     return pruned_configs
 
 
-@torch.compile
 def get_autotune_configs():
     global autotune_parameters
 

@@ -6,10 +6,7 @@ description = "A lightweight library for operations on block-sparse matrices in 
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE.md" }
-dependencies = [
-    "torch >= 2.8.0",
-    "numpy"
-]
+dependencies = ["torch >= 2.8.0", "numpy"]
 
 [project.urls]
 "Homepage" = "https://github.com/FelixSchoen/blksprs"
@@ -22,12 +19,15 @@ test = [
     "pytest-cov",
     "coverage",
     "build",
-    "matplotlib"
+    "matplotlib",
 ]
 
 [build-system]
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["blksprs*"]
 
 [tool.setuptools.package-data]
 "*" = ["*.json", "*.conf"]
