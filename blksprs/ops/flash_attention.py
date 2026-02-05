@@ -324,8 +324,14 @@ def flash_attention_fwd_kernel(
                 qk = qk + mask_vals
             
             m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
-            alpha = tl.math.exp2(m_i - m_ij)
-            p = tl.math.exp2(qk - m_ij[:, None])
+            # Handle case where m_i and m_ij are both -inf (all positions masked so far)
+            # In this case, alpha should be 1.0 (no scaling needed) rather than NaN from exp2(-inf - (-inf))
+            both_neg_inf = (m_i == float("-inf")) & (m_ij == float("-inf"))
+            alpha = tl.where(both_neg_inf, 1.0, tl.math.exp2(m_i - m_ij))
+            # For p, when qk is -inf and m_ij is -inf, exp2(-inf - (-inf)) = NaN
+            # We need to set p = 0 for these cases to avoid NaN contamination
+            p_raw = tl.math.exp2(qk - m_ij[:, None])
+            p = tl.where((qk == float("-inf")) & (m_ij[:, None] == float("-inf")), 0.0, p_raw)
             l_i = l_i * alpha + tl.sum(p, axis=1)
             acc = acc * alpha[:, None]
             
