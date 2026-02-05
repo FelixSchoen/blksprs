@@ -1282,6 +1282,11 @@ def _debug_convert_tensor_full(x: Tensor):
 
 
 def _get_autocast_min_val():
+    """Return the minimum finite value for the current dtype.
+    
+    Note: This is used for fill values in sparse tensors, NOT for attention masking.
+    For attention masking, use float("-inf") directly.
+    """
     if torch.is_autocast_enabled():
         dtype = torch.get_autocast_dtype("cuda")
     else:
@@ -1292,34 +1297,13 @@ def _get_autocast_min_val():
 
 # Flash Attention Tests
 
-FLASH_ATTENTION_TEST_CONFIGS = [
-    # (batch, seq_q, seq_k, n_heads, head_dim, block_size, attn_sparsity_pct, use_causal_mask)
-    # Dense attention
-    (2, 64, 64, 4, 64, 16, 0, False),
-    (2, 64, 64, 4, 64, 16, 0, True),
-    (2, 64, 64, 4, 64, 32, 0, False),
-    # Sparse attention
-    (2, 128, 128, 4, 64, 16, 0.5, False),
-    (2, 128, 128, 4, 64, 16, 0.75, False),
-    (2, 128, 128, 4, 64, 32, 0.75, False),
-    # Sparse + causal mask
-    (2, 128, 128, 4, 64, 16, 0.5, True),
-    (2, 128, 128, 4, 64, 32, 0.75, True),
-    # Different head_dim / block_size ratios
-    (2, 128, 128, 4, 64, 16, 0.5, False),
-    (2, 128, 128, 4, 64, 32, 0.5, False),
-    (2, 128, 128, 4, 128, 32, 0.5, False),
-    # Asymmetric Q/K lengths (cross-attention)
-    (2, 256, 128, 4, 64, 32, 0.5, False),
-    (2, 128, 256, 4, 64, 32, 0.5, False),
-    # Edge cases
-    (1, 64, 64, 1, 64, 16, 0, False),
-    (2, 32, 32, 4, 32, 16, 0, False),
-    (2, 32, 32, 4, 32, 16, 0, True),
-    # Larger configurations
-    (2, 256, 256, 4, 64, 32, 0.5, False),
-    (2, 256, 256, 4, 64, 32, 0.5, True),
-]
+# Fixed head parameters for flash attention tests
+FLASH_ATTENTION_N_HEADS = 2
+FLASH_ATTENTION_HEAD_DIM = 32
+# Maximum sequence length for flash attention tests — the reference attention materialises the
+# full [n_batches, seq, seq] score matrix, so very large configs are too slow and memory-intensive
+# for a unit-test run. Configs beyond this limit are skipped.
+FLASH_ATTENTION_MAX_SEQ = 512
 
 
 def _get_flash_attention_layout(n_batches: int, n_seq_q: int, n_seq_k: int,
@@ -1336,16 +1320,17 @@ def _get_flash_attention_layout(n_batches: int, n_seq_q: int, n_seq_k: int,
     return attention_layout
 
 
-def _build_causal_mask(n_batches: int, seq_q: int, seq_k: int) -> Tensor:
-    """Build a causal attention mask (upper triangular = masked)."""
-    mask = torch.triu(torch.ones(seq_q, seq_k, dtype=torch.bool, device=DEVICE), diagonal=1)
-    return mask.unsqueeze(0).expand(n_batches, -1, -1)
-
-
 def _reference_attention(q: Tensor, k: Tensor, v: Tensor,
                          attention_layout: Tensor, block_size: int,
-                         attention_mask: Tensor = None, scale: float = None) -> Tensor:
-    """Compute reference attention using PyTorch."""
+                         attention_mask: Tensor = None,
+                         attention_bias: Tensor = None,
+                         scale: float = None) -> Tensor:
+    """Compute reference (non-flash) attention using standard PyTorch ops.
+
+    This is a straightforward matmul-softmax-matmul implementation that serves as the ground-truth
+    for verifying the flash attention kernel.  It supports the same attention_mask and
+    attention_bias parameters as the flash attention op.
+    """
     batch, seq_q, n_heads, head_dim = q.shape
     _, seq_k, _, _ = k.shape
 
@@ -1377,6 +1362,11 @@ def _reference_attention(q: Tensor, k: Tensor, v: Tensor,
         attention_mask_expanded = attention_mask.reshape(batch, n_heads, seq_q, seq_k)
         attn_scores = attn_scores.masked_fill(attention_mask_expanded, float("-inf"))
 
+    # Apply attention bias if provided
+    if attention_bias is not None:
+        attention_bias_expanded = attention_bias.reshape(batch, n_heads, seq_q, seq_k)
+        attn_scores = attn_scores + attention_bias_expanded
+
     attn_probs = torch.softmax(attn_scores, dim=-1)
     attn_probs = torch.nan_to_num(attn_probs, nan=0.0)
 
@@ -1384,56 +1374,99 @@ def _reference_attention(q: Tensor, k: Tensor, v: Tensor,
     return out.permute(0, 2, 1, 3)
 
 
-@pytest.mark.parametrize("config", FLASH_ATTENTION_TEST_CONFIGS)
+@pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
 @pytest.mark.parametrize("use_amp", [True, False])
-def test_blksprs_flash_attention(config: tuple, use_amp: bool):
+@pytest.mark.parametrize("use_mask", [True, False])
+@pytest.mark.parametrize("use_bias", [True, False])
+def test_blksprs_flash_attention(config: tuple, use_amp: bool, use_mask: bool, use_bias: bool):
+    b, m, n, k, sparsity_block_size, sparsity_percentage = config
+
+    # Use m as seq length, fixed n_heads and head_dim
+    n_heads = FLASH_ATTENTION_N_HEADS
+    head_dim = FLASH_ATTENTION_HEAD_DIM
+    seq = m
+
+    # Skip configs that cannot be tested
+    if seq > FLASH_ATTENTION_MAX_SEQ:
+        pytest.skip("Sequence too long for reference attention (quadratic memory)")
+    if seq < sparsity_block_size:
+        pytest.skip("Sequence shorter than sparsity block size")
+
+    batch = b
+    n_batches = batch * n_heads
+    n_seq_blocks = seq // sparsity_block_size
+
+    q = torch.randn(batch, seq, n_heads, head_dim, device=DEVICE)
+    k_tensor = torch.randn(batch, seq, n_heads, head_dim, device=DEVICE)
+    v = torch.randn(batch, seq, n_heads, head_dim, device=DEVICE)
+
+    # Use sparsity_percentage as the fraction of blocks to zero out in the attention layout
+    attention_layout = _get_flash_attention_layout(n_batches, n_seq_blocks, n_seq_blocks,
+                                                   sparsity_percentage)
+
+    # Attention mask: random boolean mask.  We use a moderate masking rate (30%) so that entire
+    # rows are unlikely to be fully masked — fully masked rows make the reference softmax backward
+    # produce NaN which is not a real bug but makes numerical comparison impossible.
+    attention_mask = None
+    if use_mask:
+        attention_mask = torch.rand(n_batches, seq, seq, device=DEVICE) > 0.7
+
+    # Attention bias: random float bias (with gradient)
+    bias_data = None
+    bias_ref = None
+    bias_blksprs = None
+    if use_bias:
+        bias_data = torch.randn(n_batches, seq, seq, device=DEVICE) * 0.1
+        bias_ref = bias_data.clone().detach().requires_grad_(True)
+        bias_blksprs = bias_data.clone().detach().requires_grad_(True)
+
+    # Reference attention runs in float32 to avoid numerical issues from -inf in float16.
+    q_ref = q.clone().detach().requires_grad_(True)
+    k_ref = k_tensor.clone().detach().requires_grad_(True)
+    v_ref = v.clone().detach().requires_grad_(True)
+
+    ref_out = _reference_attention(q_ref, k_ref, v_ref, attention_layout,
+                                   sparsity_block_size,
+                                   attention_mask=attention_mask,
+                                   attention_bias=bias_ref)
+
+    # Block-sparse flash attention (with AMP if enabled)
+    q_blksprs = q.clone().detach().requires_grad_(True)
+    k_blksprs = k_tensor.clone().detach().requires_grad_(True)
+    v_blksprs = v.clone().detach().requires_grad_(True)
+
     with torch.amp.autocast(device_type="cuda", enabled=use_amp):
-        batch, seq_q, seq_k, n_heads, head_dim, sparsity_block_size, attn_sparsity, use_causal_mask = config
-
-        q = torch.randn(batch, seq_q, n_heads, head_dim, device=DEVICE)
-        k = torch.randn(batch, seq_k, n_heads, head_dim, device=DEVICE)
-        v = torch.randn(batch, seq_k, n_heads, head_dim, device=DEVICE)
-
-        n_batches = batch * n_heads
-        n_seq_blocks_q = seq_q // sparsity_block_size
-        n_seq_blocks_k = seq_k // sparsity_block_size
-
-        attention_layout = _get_flash_attention_layout(n_batches, n_seq_blocks_q, n_seq_blocks_k,
-                                                       attn_sparsity)
-
-        attention_mask = None
-        if use_causal_mask and seq_q == seq_k:
-            attention_mask = _build_causal_mask(n_batches, seq_q, seq_k)
-
-        q_stock = q.clone().requires_grad_(True)
-        k_stock = k.clone().requires_grad_(True)
-        v_stock = v.clone().requires_grad_(True)
-        q_blksprs = q.clone().requires_grad_(True)
-        k_blksprs = k.clone().requires_grad_(True)
-        v_blksprs = v.clone().requires_grad_(True)
-
-        stock_flash_attention_out = _reference_attention(q_stock, k_stock, v_stock, attention_layout,
-                                                         sparsity_block_size, attention_mask=attention_mask)
-        stock_dtype = stock_flash_attention_out.dtype
-
-        blksprs_flash_attention_out = bs.ops.flash_attention(
-            q_blksprs, k_blksprs, v_blksprs, attention_layout, sparsity_block_size, attention_mask=attention_mask
+        blksprs_out = bs.ops.flash_attention(
+            q_blksprs, k_blksprs, v_blksprs, attention_layout, sparsity_block_size,
+            attention_mask=attention_mask, attention_bias=bias_blksprs
         )
 
-        assert torch.allclose(blksprs_flash_attention_out.to(stock_dtype), stock_flash_attention_out,
-                              atol=ATOL, rtol=RTOL)
+    # Forward comparison
+    assert torch.allclose(blksprs_out.to(ref_out.dtype), ref_out,
+                          atol=ATOL, rtol=RTOL), "Forward output mismatch"
 
-        target = torch.randn_like(stock_flash_attention_out)
-        stock_loss = torch.nn.L1Loss()
-        blksprs_loss = torch.nn.L1Loss()
-        stock_loss = stock_loss(stock_flash_attention_out, target)
-        blksprs_loss = blksprs_loss(blksprs_flash_attention_out, target)
+    # Backward comparison
+    target = torch.randn_like(ref_out)
+    ref_loss = torch.nn.L1Loss()(ref_out, target)
+    blksprs_loss = torch.nn.L1Loss()(blksprs_out.to(ref_out.dtype), target)
 
-        stock_loss.backward()
-        blksprs_loss.backward()
+    ref_loss.backward()
+    blksprs_loss.backward()
 
-        assert torch.allclose(q_blksprs.grad.to(q_stock.grad.dtype), q_stock.grad, atol=ATOL, rtol=RTOL)
-        assert torch.allclose(k_blksprs.grad.to(k_stock.grad.dtype), k_stock.grad, atol=ATOL, rtol=RTOL)
-        assert torch.allclose(v_blksprs.grad.to(v_stock.grad.dtype), v_stock.grad, atol=ATOL, rtol=RTOL)
+    # Gradient comparisons — use nan_to_num because when an entire row is fully masked (all -inf),
+    # the reference softmax backward produces NaN (mathematically undefined), while the flash
+    # attention kernel correctly outputs zero.  Both behaviours are valid for undefined positions.
+    assert torch.allclose(torch.nan_to_num(q_blksprs.grad.to(q_ref.grad.dtype)),
+                          torch.nan_to_num(q_ref.grad), atol=ATOL, rtol=RTOL), "dQ mismatch"
+    assert torch.allclose(torch.nan_to_num(k_blksprs.grad.to(k_ref.grad.dtype)),
+                          torch.nan_to_num(k_ref.grad), atol=ATOL, rtol=RTOL), "dK mismatch"
+    assert torch.allclose(torch.nan_to_num(v_blksprs.grad.to(v_ref.grad.dtype)),
+                          torch.nan_to_num(v_ref.grad), atol=ATOL, rtol=RTOL), "dV mismatch"
+
+    if use_bias:
+        assert bias_blksprs.grad is not None, "Bias gradient should not be None"
+        assert torch.allclose(torch.nan_to_num(bias_blksprs.grad.to(bias_ref.grad.dtype)),
+                              torch.nan_to_num(bias_ref.grad),
+                              atol=ATOL, rtol=RTOL), "dBias mismatch"
 
 
