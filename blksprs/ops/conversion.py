@@ -127,7 +127,7 @@ def to_sparse_kernel(x,
     # Store block in sparse tensor
     blk_o_idx = ((pid_blk * o_b_s) +
                  ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
-                 ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE) * o_c_s))[None, :])
+                 ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
     blk_o_msk = ((blk_o_idx >= 0) &
                  (blk_o_idx < (pid_blk + 1) * o_b_s))
     tl.store(o + blk_o_idx, blk_d, mask=blk_o_msk)
@@ -142,7 +142,7 @@ def to_sparse_build_lut(lut: dict, sparsity_layout: Tensor):
         lut["sparsity_lut"] = sparsity_lut
 
     if "n_sparse_blocks" not in lut:
-        n_sparse_blocks = torch.sum(sparsity_layout.to(torch.int)).item()
+        n_sparse_blocks = int(sparsity_layout.sum().item())
         lut["n_sparse_blocks"] = n_sparse_blocks
 
     validate_contiguous(sparsity_layout, lut["sparsity_lut"])

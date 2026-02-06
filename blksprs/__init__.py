@@ -29,7 +29,8 @@ class ops:
 class layouting:
     from blksprs.layouting.distribution_layout import build_distribution_layout
     from blksprs.layouting.sparsity_layout import build_sparsity_layout, build_sparsity_layout_adaption, \
-        build_sparsity_layout_matmul, build_sparsity_layout_matmul_fast, build_sparsity_layout_full
+        build_sparsity_layout_matmul, build_sparsity_layout_matmul_fast, build_sparsity_layout_matmul_outer, \
+        build_sparsity_layout_full
 
 
 class utils:

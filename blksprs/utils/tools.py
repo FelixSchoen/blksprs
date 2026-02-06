@@ -23,10 +23,11 @@ def stride(x: Tensor):
     elif x.dim() == 3:
         return x.size(1) * x.size(2), x.size(2), 1
     else:
-        raise NotImplementedError
+        raise NotImplementedError(f"stride() not implemented for {x.dim()}-dimensional tensors")
 
 
 def ceil_pow2(x: int) -> int:
+    """Returns the smallest power of 2 that is greater than or equal to x."""
     if x <= 0:
         raise ValueError("Input must be a positive integer.")
     return 1 << (x - 1).bit_length()

@@ -266,7 +266,7 @@ def scatter_reduce(src: BlksprsTensor, sparsity_layout_src: Tensor,
     validate_contiguous(src, idx)
     validate_dtype_int(idx)
     validate_device(src, idx)
-    validate_sparsity(sparsity_block_size, (src, sparsity_layout_src), (idx, sparsity_layout_src))
+    validate_sparsity(sparsity_block_size, (src, sparsity_layout_src), (idx, sparsity_layout_src))  # idx shares src's layout
     validate_sparsity_block_size(sparsity_block_size, src, idx)
 
     if reduce_op not in ["none", "sum"]:

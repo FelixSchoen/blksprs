@@ -956,8 +956,8 @@ def test_build_distribution_layout(config: list, use_amp: bool):
                     bs.ops.to_sparse(i, sparsity_layout_i, sparsity_block_size),
                     sparsity_layout_i, dim, tgt.size(), sparsity_block_size)
 
-                torch.allclose(blksprs_distribution_layout.to(torch.int), stock_distribution_layout.to(torch.int),
-                               atol=ATOL, rtol=RTOL)
+                assert torch.allclose(blksprs_distribution_layout.to(torch.int), stock_distribution_layout.to(torch.int),
+                                      atol=ATOL, rtol=RTOL)
 
 
 # Processing

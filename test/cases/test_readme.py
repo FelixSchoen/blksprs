@@ -116,4 +116,4 @@ def setup():
     torch.manual_seed(0)
     torch.set_printoptions(edgeitems=64, linewidth=10000)
     normal_repr = torch.Tensor.__repr__
-    torch.Tensor.__repr__ = lambda self: f"{self.shape}, {self.dtype}:\n{normal_repr(self)}"
+    torch.Tensor.__repr__ = lambda self, *args, **kwargs: f"{self.shape}, {self.dtype}:\n{normal_repr(self)}"

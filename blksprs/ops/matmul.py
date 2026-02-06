@@ -1,7 +1,7 @@
 import torch
 import triton
 from torch import Tensor
-from torch.library import triton_op, wrap_triton
+from torch._library.triton import wrap_triton, triton_op
 from triton import language as tl
 
 from blksprs.ops.transpose import transpose

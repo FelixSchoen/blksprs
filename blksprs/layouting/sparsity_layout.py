@@ -130,8 +130,8 @@ def build_sparsity_layout_adaption_operation(x: Tensor, sparsity_layout_from: Te
                                              sparsity_block_size_from: int, sparsity_block_size_to: int) -> Tensor:
     with torch.no_grad():
         o_b = sparsity_layout_from.size(0)
-        o_r = math.ceil(sparsity_layout_from.size(1) * sparsity_block_size_from // sparsity_block_size_to)
-        o_c = math.ceil(sparsity_layout_from.size(2) * sparsity_block_size_from // sparsity_block_size_to)
+        o_r = math.ceil(sparsity_layout_from.size(1) * sparsity_block_size_from / sparsity_block_size_to)
+        o_c = math.ceil(sparsity_layout_from.size(2) * sparsity_block_size_from / sparsity_block_size_to)
 
         output = torch.zeros(o_b, o_r, o_c, dtype=torch.bool, device=x.device)
 
@@ -234,8 +234,10 @@ def build_sparsity_layout_matmul_fast(sparsity_layout_x: Tensor, sparsity_layout
 
     Note:
         This function is faster than the ``build_sparsity_layout_matmul`` function due to the fact that it only checks
-            whether at least one of the blocks in either of the vectors participating in the matmul is non-sparse. The
-            resulting sparsity layout may thus overestimate the actual sparsity of the result.
+            whether at least one of the blocks in either of the row/column vectors participating in the matmul is
+            non-sparse. A block in the output layout is marked as non-sparse only if row ``i`` of the first layout and
+            column ``j`` of the second layout both contain at least one non-sparse block. The resulting sparsity layout
+            may thus overestimate the actual sparsity of the result, but provides a tighter bound than a simple union.
 
     Args:
         sparsity_layout_x (Tensor): The sparsity layout of the first block-sparse tensor.
@@ -243,6 +245,34 @@ def build_sparsity_layout_matmul_fast(sparsity_layout_x: Tensor, sparsity_layout
 
     Returns:
         Tensor: The approximate sparsity layout of the result of a matrix multiplication between the two input tensors.
+
+    """
+    sparsity_layout_x_slice = torch.max(sparsity_layout_x, dim=-1).values.unsqueeze(-1)
+    sparsity_layout_y_slice = torch.max(sparsity_layout_y, dim=-2).values.unsqueeze(1)
+
+    return torch.logical_and(sparsity_layout_x_slice, sparsity_layout_y_slice)
+
+
+@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
+def build_sparsity_layout_matmul_outer(sparsity_layout_x: Tensor, sparsity_layout_y: Tensor) -> Tensor:
+    """Builds the outer-bound sparsity layout of the result of a matrix multiplication between the two input tensors.
+
+    This function computes a conservative (outer) approximation of the matmul sparsity layout. A block in the output
+    layout is marked as non-sparse if row ``i`` of the first layout OR column ``j`` of the second layout contains at
+    least one non-sparse block. This provides a looser but safer bound than ``build_sparsity_layout_matmul_fast``,
+    useful when the output may have contributions from operations beyond the matmul itself (e.g., adding a bias term).
+
+    Note:
+        This function is faster than ``build_sparsity_layout_matmul`` but provides a looser approximation than
+        ``build_sparsity_layout_matmul_fast``. The resulting sparsity layout will overestimate the actual sparsity
+        of the result more than the "fast" variant, but ensures all potentially non-zero blocks are included.
+
+    Args:
+        sparsity_layout_x (Tensor): The sparsity layout of the first block-sparse tensor.
+        sparsity_layout_y (Tensor): The sparsity layout of the second block-sparse tensor.
+
+    Returns:
+        Tensor: The outer-bound approximate sparsity layout of the matrix multiplication result.
 
     """
     sparsity_layout_x_slice = torch.max(sparsity_layout_x, dim=-1).values.unsqueeze(-1)

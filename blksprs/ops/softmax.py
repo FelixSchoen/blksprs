@@ -64,7 +64,7 @@ def softmax_forward(x: Tensor, sparsity_layout: Tensor,
                     sparsity_lut: Tensor,
                     sparsity_reverse_lut_rws: Tensor,
                     sparsity_block_size: int) -> Tensor:
-    output = torch.empty_like(x)
+    output = torch.zeros_like(x)
 
     x_row_wise_max, sparsity_layout_rwm = row_wise_max(x, sparsity_layout, sparsity_block_size,
                                                        flag_slice_only=True)

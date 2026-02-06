@@ -42,8 +42,8 @@ def validate_dtype_float(*tensors: Tensor) -> None:
         if i == 0:
             dtype = tensor.dtype
 
-        if tensor.dtype != torch.float16 and tensor.dtype != torch.float32:
-            raise ValueError("Tensor must have either float16 or float32 dtype")
+        if tensor.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            raise ValueError("Tensor must have either float16, bfloat16, or float32 dtype")
 
         if tensor.dtype != dtype:
             raise ValueError("Tensors must have same dtype")
@@ -96,7 +96,7 @@ def validate_sparsity(sparsity_block_size: int, *tensor_sparsity_layout_tuples: 
             raise ValueError("Sparsity layout must have exactly 3 dimensions")
         if not (tensor.size(-1) == tensor.size(-2) == sparsity_block_size):
             raise ValueError("Blocks not conforming to sparsity block size")
-        if not tensor.size(0) == torch.sum(sparsity_layout.reshape(-1)):
+        if not tensor.size(0) == torch.sum(sparsity_layout.reshape(-1).to(torch.int)):
             raise ValueError("Mismatch between sparsity layout and blocks")
 
 
