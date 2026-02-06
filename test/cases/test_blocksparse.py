@@ -1320,153 +1320,217 @@ def _get_flash_attention_layout(n_batches: int, n_seq_q: int, n_seq_k: int,
     return attention_layout
 
 
-def _reference_attention(q: Tensor, k: Tensor, v: Tensor,
-                         attention_layout: Tensor, block_size: int,
-                         attention_mask: Tensor = None,
-                         attention_bias: Tensor = None,
-                         scale: float = None) -> Tensor:
+def _reference_attention_blocksparse(
+    q: Tensor, k: Tensor, v: Tensor,
+    attention_layout: Tensor, block_size: int,
+    n_heads: int,
+    attention_mask: Tensor = None,
+    attention_bias: Tensor = None,
+    scale: float = None,
+) -> Tensor:
     """Compute reference (non-flash) attention using standard PyTorch ops.
 
-    This is a straightforward matmul-softmax-matmul implementation that serves as the ground-truth
-    for verifying the flash attention kernel.  It supports the same attention_mask and
-    attention_bias parameters as the flash attention op.
+    This operates on tensors in the shape ``(n_batches, seq, head_dim)`` where
+    ``n_batches = batch * n_heads``.  The *attention_layout* is
+    ``(n_batches, seq_q // bs, seq_k // bs)``.  Returns the output tensor in
+    the same shape.
+
+    The *attention_mask* and *attention_bias* are optional tensors of shape
+    ``(n_batches, seq_q, seq_k)``.
     """
-    batch, seq_q, n_heads, head_dim = q.shape
-    _, seq_k, _, _ = k.shape
+    n_batches, seq_q, head_dim = q.shape
+    _, seq_k, _ = k.shape
 
     if scale is None:
         scale = 1.0 / (head_dim ** 0.5)
 
-    q_t = q.permute(0, 2, 1, 3)
-    k_t = k.permute(0, 2, 1, 3)
-    v_t = v.permute(0, 2, 1, 3)
+    # (n_batches, seq_q, seq_k)
+    attn_scores = torch.bmm(q, k.transpose(-2, -1)) * scale
 
-    attn_scores = torch.matmul(q_t, k_t.transpose(-2, -1)) * scale
+    n_seq_blocks_q = seq_q // block_size
+    n_seq_blocks_k = seq_k // block_size
 
-    # Apply block sparsity mask
-    attn_layout_expanded = attention_layout.reshape(batch, n_heads,
-                                                     seq_q // block_size,
-                                                     seq_k // block_size)
+    # Apply block sparsity mask from attention_layout
+    for b in range(n_batches):
+        for i in range(n_seq_blocks_q):
+            for j in range(n_seq_blocks_k):
+                if not attention_layout[b, i, j]:
+                    attn_scores[b,
+                                i * block_size:(i + 1) * block_size,
+                                j * block_size:(j + 1) * block_size] = float("-inf")
 
-    for b in range(batch):
-        for h in range(n_heads):
-            for i in range(seq_q // block_size):
-                for j in range(seq_k // block_size):
-                    if not attn_layout_expanded[b, h, i, j]:
-                        attn_scores[b, h,
-                                    i * block_size:(i + 1) * block_size,
-                                    j * block_size:(j + 1) * block_size] = float("-inf")
-
-    # Apply attention mask if provided
+    # Apply attention mask
     if attention_mask is not None:
-        attention_mask_expanded = attention_mask.reshape(batch, n_heads, seq_q, seq_k)
-        attn_scores = attn_scores.masked_fill(attention_mask_expanded, float("-inf"))
+        attn_scores = attn_scores.masked_fill(attention_mask, float("-inf"))
 
-    # Apply attention bias if provided
+    # Apply attention bias
     if attention_bias is not None:
-        attention_bias_expanded = attention_bias.reshape(batch, n_heads, seq_q, seq_k)
-        attn_scores = attn_scores + attention_bias_expanded
+        attn_scores = attn_scores + attention_bias
 
     attn_probs = torch.softmax(attn_scores, dim=-1)
     attn_probs = torch.nan_to_num(attn_probs, nan=0.0)
 
-    out = torch.matmul(attn_probs, v_t)
-    return out.permute(0, 2, 1, 3)
+    out = torch.bmm(attn_probs, v)
+    return out
 
 
-@pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
+# Flash attention test configurations — only those compatible with the
+# block-sparse layout constraints:
+# - seq must be divisible by sparsity_block_size
+# - head_dim must be divisible by sparsity_block_size
+# We filter TEST_CONFIGURATIONS at parametrisation time.
+FLASH_ATTENTION_CONFIGS = [
+    config for config in TEST_CONFIGURATIONS
+    if (config[1] // config[4]) >= 1  # n_seq_blocks >= 1
+    and (FLASH_ATTENTION_HEAD_DIM % config[4]) == 0  # head_dim divisible by SBS
+    and config[1] <= FLASH_ATTENTION_MAX_SEQ
+    and config[1] >= config[4]
+]
+
+
+@pytest.mark.parametrize("config", FLASH_ATTENTION_CONFIGS)
 @pytest.mark.parametrize("use_amp", [True, False])
 @pytest.mark.parametrize("use_mask", [True, False])
 @pytest.mark.parametrize("use_bias", [True, False])
 def test_blksprs_flash_attention(config: tuple, use_amp: bool, use_mask: bool, use_bias: bool):
-    b, m, n, k, sparsity_block_size, sparsity_percentage = config
+    b, m, n, k_dim, sparsity_block_size, sparsity_percentage = config
 
-    # Use m as seq length, fixed n_heads and head_dim
     n_heads = FLASH_ATTENTION_N_HEADS
     head_dim = FLASH_ATTENTION_HEAD_DIM
     seq = m
-
-    # Skip configs that cannot be tested
-    if seq > FLASH_ATTENTION_MAX_SEQ:
-        pytest.skip("Sequence too long for reference attention (quadratic memory)")
-    if seq < sparsity_block_size:
-        pytest.skip("Sequence shorter than sparsity block size")
+    SBS = sparsity_block_size
 
     batch = b
     n_batches = batch * n_heads
-    n_seq_blocks = seq // sparsity_block_size
+    n_seq_blocks = seq // SBS
+    n_head_blocks = head_dim // SBS
 
-    q = torch.randn(batch, seq, n_heads, head_dim, device=DEVICE)
-    k_tensor = torch.randn(batch, seq, n_heads, head_dim, device=DEVICE)
-    v = torch.randn(batch, seq, n_heads, head_dim, device=DEVICE)
+    # --------------- Create dense data in 3-D (n_batches, seq, head_dim) ---------------
+    q_dense = torch.randn(n_batches, seq, head_dim, device=DEVICE)
+    k_dense = torch.randn(n_batches, seq, head_dim, device=DEVICE)
+    v_dense = torch.randn(n_batches, seq, head_dim, device=DEVICE)
 
-    # Use sparsity_percentage as the fraction of blocks to zero out in the attention layout
+    # Sparsity layouts for Q/K/V: all blocks present (dense Q/K/V)
+    sparsity_layout_qkv = torch.ones(n_batches, n_seq_blocks, n_head_blocks,
+                                      dtype=torch.bool, device=DEVICE)
+
+    # Attention layout: controls which Q-K block pairs participate
     attention_layout = _get_flash_attention_layout(n_batches, n_seq_blocks, n_seq_blocks,
                                                    sparsity_percentage)
 
-    # Attention mask: random boolean mask.  We use a moderate masking rate (30%) so that entire
-    # rows are unlikely to be fully masked — fully masked rows make the reference softmax backward
-    # produce NaN which is not a real bug but makes numerical comparison impossible.
-    attention_mask = None
+    # Ensure every Q row has at least one K block to attend to, otherwise reference produces nan
+    for b_i in range(n_batches):
+        for i in range(n_seq_blocks):
+            if not attention_layout[b_i, i].any():
+                j = torch.randint(0, n_seq_blocks, (1,)).item()
+                attention_layout[b_i, i, j] = True
+
+    # Attention mask (optional): random boolean mask in (n_batches, seq, seq)
+    mask_dense = None
+    sparsity_layout_mask = None
     if use_mask:
-        attention_mask = torch.rand(n_batches, seq, seq, device=DEVICE) > 0.7
+        mask_dense = (torch.rand(n_batches, seq, seq, device=DEVICE) > 0.7)
 
-    # Attention bias: random float bias (with gradient)
-    bias_data = None
-    bias_ref = None
-    bias_blksprs = None
+    # Attention bias (optional): random float bias in (n_batches, seq, seq)
+    bias_dense_data = None
     if use_bias:
-        bias_data = torch.randn(n_batches, seq, seq, device=DEVICE) * 0.1
-        bias_ref = bias_data.clone().detach().requires_grad_(True)
-        bias_blksprs = bias_data.clone().detach().requires_grad_(True)
+        bias_dense_data = torch.randn(n_batches, seq, seq, device=DEVICE) * 0.1
 
-    # Reference attention runs in float32 to avoid numerical issues from -inf in float16.
-    q_ref = q.clone().detach().requires_grad_(True)
-    k_ref = k_tensor.clone().detach().requires_grad_(True)
-    v_ref = v.clone().detach().requires_grad_(True)
+    # --------------- Reference attention (float32, dense) ---------------
+    q_ref = q_dense.clone().detach().float().requires_grad_(True)
+    k_ref = k_dense.clone().detach().float().requires_grad_(True)
+    v_ref = v_dense.clone().detach().float().requires_grad_(True)
+    bias_ref = None
+    if use_bias:
+        bias_ref = bias_dense_data.clone().detach().float().requires_grad_(True)
 
-    ref_out = _reference_attention(q_ref, k_ref, v_ref, attention_layout,
-                                   sparsity_block_size,
-                                   attention_mask=attention_mask,
-                                   attention_bias=bias_ref)
+    ref_out = _reference_attention_blocksparse(
+        q_ref, k_ref, v_ref, attention_layout, SBS, n_heads,
+        attention_mask=mask_dense,
+        attention_bias=bias_ref,
+    )
 
-    # Block-sparse flash attention (with AMP if enabled)
-    q_blksprs = q.clone().detach().requires_grad_(True)
-    k_blksprs = k_tensor.clone().detach().requires_grad_(True)
-    v_blksprs = v.clone().detach().requires_grad_(True)
+    # --------------- Block-sparse flash attention ---------------
+    # Convert Q/K/V to block-sparse compressed format
+    q_for_sparse = q_dense.clone().detach().requires_grad_(True)
+    k_for_sparse = k_dense.clone().detach().requires_grad_(True)
+    v_for_sparse = v_dense.clone().detach().requires_grad_(True)
 
     with torch.amp.autocast(device_type="cuda", enabled=use_amp):
-        blksprs_out = bs.ops.flash_attention(
-            q_blksprs, k_blksprs, v_blksprs, attention_layout, sparsity_block_size,
-            attention_mask=attention_mask, attention_bias=bias_blksprs
+        q_sparse = bs.ops.to_sparse(q_for_sparse, sparsity_layout_qkv, SBS)
+        k_sparse = bs.ops.to_sparse(k_for_sparse, sparsity_layout_qkv, SBS)
+        v_sparse = bs.ops.to_sparse(v_for_sparse, sparsity_layout_qkv, SBS)
+
+        # Convert mask to block-sparse (mask layout = attention_layout since mask is
+        # present wherever attention is computed)
+        mask_sparse = None
+        sl_mask = None
+        if use_mask:
+            # Mask needs to cover all (seq_q, seq_k) block positions.
+            # Use a full layout so all blocks are stored.
+            sl_mask = torch.ones(n_batches, n_seq_blocks, n_seq_blocks,
+                                 dtype=torch.bool, device=DEVICE)
+            mask_float = mask_dense.float()
+            mask_sparse = bs.ops.to_sparse(mask_float, sl_mask, SBS)
+
+        # Convert bias to block-sparse
+        bias_sparse = None
+        sl_bias = None
+        bias_blksprs = None
+        if use_bias:
+            sl_bias = torch.ones(n_batches, n_seq_blocks, n_seq_blocks,
+                                 dtype=torch.bool, device=DEVICE)
+            bias_blksprs = bias_dense_data.clone().detach().requires_grad_(True)
+            bias_sparse = bs.ops.to_sparse(bias_blksprs, sl_bias, SBS)
+
+        flash_out_sparse = bs.ops.flash_attention(
+            q_sparse, sparsity_layout_qkv,
+            k_sparse, sparsity_layout_qkv,
+            v_sparse, sparsity_layout_qkv,
+            attention_layout, SBS,
+            attention_mask=mask_sparse, sparsity_layout_mask=sl_mask,
+            attention_bias=bias_sparse, sparsity_layout_bias=sl_bias,
         )
 
-    # Forward comparison
-    assert torch.allclose(blksprs_out.to(ref_out.dtype), ref_out,
-                          atol=ATOL, rtol=RTOL), "Forward output mismatch"
+        # Convert output back to dense for comparison
+        flash_out_dense = bs.ops.to_dense(flash_out_sparse, sparsity_layout_qkv, SBS)
 
-    # Backward comparison
+    # --------------- Forward comparison ---------------
+    assert torch.allclose(
+        flash_out_dense.float(), ref_out, atol=ATOL, rtol=RTOL
+    ), "Forward output mismatch"
+
+    # --------------- Backward comparison ---------------
     target = torch.randn_like(ref_out)
     ref_loss = torch.nn.L1Loss()(ref_out, target)
-    blksprs_loss = torch.nn.L1Loss()(blksprs_out.to(ref_out.dtype), target)
+    blksprs_loss = torch.nn.L1Loss()(flash_out_dense.float(), target)
 
     ref_loss.backward()
     blksprs_loss.backward()
 
-    # Gradient comparisons — use nan_to_num because when an entire row is fully masked (all -inf),
-    # the reference softmax backward produces NaN (mathematically undefined), while the flash
-    # attention kernel correctly outputs zero.  Both behaviours are valid for undefined positions.
-    assert torch.allclose(torch.nan_to_num(q_blksprs.grad.to(q_ref.grad.dtype)),
-                          torch.nan_to_num(q_ref.grad), atol=ATOL, rtol=RTOL), "dQ mismatch"
-    assert torch.allclose(torch.nan_to_num(k_blksprs.grad.to(k_ref.grad.dtype)),
-                          torch.nan_to_num(k_ref.grad), atol=ATOL, rtol=RTOL), "dK mismatch"
-    assert torch.allclose(torch.nan_to_num(v_blksprs.grad.to(v_ref.grad.dtype)),
-                          torch.nan_to_num(v_ref.grad), atol=ATOL, rtol=RTOL), "dV mismatch"
+    # Gradient comparisons
+    assert torch.allclose(
+        torch.nan_to_num(q_for_sparse.grad.float()),
+        torch.nan_to_num(q_ref.grad),
+        atol=ATOL, rtol=RTOL,
+    ), "dQ mismatch"
+    assert torch.allclose(
+        torch.nan_to_num(k_for_sparse.grad.float()),
+        torch.nan_to_num(k_ref.grad),
+        atol=ATOL, rtol=RTOL,
+    ), "dK mismatch"
+    assert torch.allclose(
+        torch.nan_to_num(v_for_sparse.grad.float()),
+        torch.nan_to_num(v_ref.grad),
+        atol=ATOL, rtol=RTOL,
+    ), "dV mismatch"
 
     if use_bias:
         assert bias_blksprs.grad is not None, "Bias gradient should not be None"
-        assert torch.allclose(torch.nan_to_num(bias_blksprs.grad.to(bias_ref.grad.dtype)),
-                              torch.nan_to_num(bias_ref.grad),
-                              atol=ATOL, rtol=RTOL), "dBias mismatch"
+        assert torch.allclose(
+            torch.nan_to_num(bias_blksprs.grad.float()),
+            torch.nan_to_num(bias_ref.grad),
+            atol=ATOL, rtol=RTOL,
+        ), "dBias mismatch"
 
 
