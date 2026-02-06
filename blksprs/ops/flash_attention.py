@@ -137,7 +137,6 @@ class BlockSparseFlashAttention(torch.autograd.Function):
         
         o_flat = torch.empty_like(q_flat)
         lse = torch.empty(n_batches, seq_q, device=q.device, dtype=torch.float32)
-        l = torch.empty(n_batches, seq_q, device=q.device, dtype=torch.float32)
         
         if head_dim <= 64:
             BLOCK_M = min(128, sparsity_block_size)
@@ -178,7 +177,7 @@ class BlockSparseFlashAttention(torch.autograd.Function):
             q_flat, k_flat, v_flat, o_flat,
             additive,
             attn_lut, attn_offsets,
-            lse, l,
+            lse,
             q_flat.stride(0), q_flat.stride(1), q_flat.stride(2),
             k_flat.stride(0), k_flat.stride(1), k_flat.stride(2),
             additive_stride_batch, additive_stride_row, additive_stride_col,
@@ -317,7 +316,7 @@ def flash_attention_fwd_kernel(
     q_ptr, k_ptr, v_ptr, o_ptr,
     additive_ptr,
     attn_lut_ptr, attn_offsets_ptr,
-    m_ptr, l_ptr,
+    m_ptr,
     stride_q_batch, stride_q_seq, stride_q_dim,
     stride_kv_batch, stride_kv_seq, stride_kv_dim,
     stride_additive_batch, stride_additive_row, stride_additive_col,
@@ -411,7 +410,6 @@ def flash_attention_fwd_kernel(
     
     lse = tl.where(has_attention, m_i + tl.math.log2(l_safe), float("-inf"))
     tl.store(m_ptr + pid_batch * seq_q + offs_m, lse, mask=offs_m < seq_q)
-    tl.store(l_ptr + pid_batch * seq_q + offs_m, l_i, mask=offs_m < seq_q)
 
 
 @triton.jit
