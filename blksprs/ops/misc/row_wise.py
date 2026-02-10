@@ -98,7 +98,7 @@ def row_wise_sum_forward(x: Tensor, sparsity_lut: Tensor,
 
 # noinspection PyUnusedLocal
 @triton.autotune(
-    configs=get_autotune_configs(),
+    configs=get_autotune_configs("row_wise"),
     key=["sparsity_block_size"],
     prune_configs_by={"early_config_prune": prune_autotune_configs},
     reset_to_zero=["o"]
@@ -241,7 +241,7 @@ def row_wise_max_forward(x: Tensor, sparsity_lut: Tensor,
 
 # noinspection PyUnusedLocal
 @triton.autotune(
-    configs=get_autotune_configs(),
+    configs=get_autotune_configs("row_wise"),
     key=["sparsity_block_size"],
     prune_configs_by={"early_config_prune": prune_autotune_configs},
     restore_value=["o"]
@@ -379,7 +379,7 @@ def row_wise_add_forward(x: Tensor, sparsity_lut_x: Tensor,
 
 # noinspection PyUnusedLocal
 @triton.autotune(
-    configs=get_autotune_configs(),
+    configs=get_autotune_configs("row_wise"),
     key=["sparsity_block_size"],
     prune_configs_by={"early_config_prune": prune_autotune_configs},
     reset_to_zero=["o"]

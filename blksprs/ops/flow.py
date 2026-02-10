@@ -45,7 +45,7 @@ def flow_pull_forward(x: Tensor, sparsity_layout_o: Tensor,
 
 # noinspection PyUnusedLocal
 @triton.autotune(
-    configs=get_autotune_configs(),
+    configs=get_autotune_configs("flow"),
     key=["sparsity_block_size"],
     prune_configs_by={"early_config_prune": prune_autotune_configs},
     reset_to_zero=["o"]
@@ -133,7 +133,7 @@ def flow_push_forward(x: Tensor, sparsity_layout_x: Tensor, sparsity_lut: Tensor
 
 # noinspection PyUnusedLocal
 @triton.autotune(
-    configs=get_autotune_configs(),
+    configs=get_autotune_configs("flow"),
     key=["sparsity_block_size"],
     prune_configs_by={"early_config_prune": prune_autotune_configs},
     reset_to_zero=["o"]

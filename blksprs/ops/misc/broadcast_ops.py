@@ -88,7 +88,7 @@ def broadcast_add_forward(x: Tensor, y: Tensor,
 
 
 @triton.autotune(
-    configs=get_autotune_configs(),
+    configs=get_autotune_configs("broadcast"),
     key=["sparsity_block_size"],
     prune_configs_by={"early_config_prune": prune_autotune_configs},
     reset_to_zero=["o"]

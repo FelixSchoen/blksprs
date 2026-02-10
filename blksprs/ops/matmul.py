@@ -117,7 +117,7 @@ def matmul_wrapper_backward(ctx, grad_output):
 
 
 @triton.autotune(
-    configs=get_autotune_configs(),
+    configs=get_autotune_configs("matmul"),
     key=["sparsity_block_size"],
     prune_configs_by={"early_config_prune": prune_autotune_configs},
     reset_to_zero=["o"]

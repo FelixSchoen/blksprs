@@ -460,7 +460,7 @@ class BlockSparseFlashAttention(torch.autograd.Function):
 # ---------------------------------------------------------------------------
 
 @triton.autotune(
-    configs=get_autotune_configs(),
+    configs=get_autotune_configs("flash_attention"),
     key=["sparsity_block_size"],
     prune_configs_by={"early_config_prune": prune_autotune_configs_exact},
     reset_to_zero=["o_ptr"],
@@ -631,7 +631,7 @@ def flash_attention_fwd_kernel(
 # ---------------------------------------------------------------------------
 
 @triton.autotune(
-    configs=get_autotune_configs(),
+    configs=get_autotune_configs("flash_attention"),
     key=["sparsity_block_size"],
     prune_configs_by={"early_config_prune": prune_autotune_configs_exact},
     reset_to_zero=["delta_ptr"],
@@ -679,7 +679,7 @@ def flash_attention_bwd_preprocess_kernel(
 # ---------------------------------------------------------------------------
 
 @triton.autotune(
-    configs=get_autotune_configs(),
+    configs=get_autotune_configs("flash_attention"),
     key=["sparsity_block_size"],
     prune_configs_by={"early_config_prune": prune_autotune_configs_exact},
     reset_to_zero=["dk_ptr", "dv_ptr", "dbias_ptr"],
@@ -838,7 +838,7 @@ def flash_attention_bwd_dkdv_kernel(
 # ---------------------------------------------------------------------------
 
 @triton.autotune(
-    configs=get_autotune_configs(),
+    configs=get_autotune_configs("flash_attention"),
     key=["sparsity_block_size"],
     prune_configs_by={"early_config_prune": prune_autotune_configs_exact},
     reset_to_zero=["dq_ptr"],

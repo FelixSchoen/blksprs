@@ -153,7 +153,7 @@ def softmax_backward(grad_output: Tensor, o: Tensor, sparsity_lut: Tensor, spars
 
 # noinspection PyUnusedLocal
 @triton.autotune(
-    configs=get_autotune_configs(),
+    configs=get_autotune_configs("softmax"),
     key=["sparsity_block_size"],
     prune_configs_by={"early_config_prune": prune_autotune_configs},
     reset_to_zero=["o"]
@@ -214,7 +214,7 @@ def softmax_kernel(x,
 
 # noinspection PyUnusedLocal
 @triton.autotune(
-    configs=get_autotune_configs(),
+    configs=get_autotune_configs("softmax"),
     key=["sparsity_block_size"],
     prune_configs_by={"early_config_prune": prune_autotune_configs},
     reset_to_zero=["o"]
@@ -426,7 +426,7 @@ def softmax_fused_backward(grad_output: Tensor,
 
 # noinspection PyUnusedLocal
 @triton.autotune(
-    configs=get_autotune_configs(),
+    configs=get_autotune_configs("softmax"),
     key=["sparsity_block_size"],
     prune_configs_by={"early_config_prune": prune_autotune_configs},
     reset_to_zero=["o"]
@@ -479,7 +479,7 @@ def softmax_fused_kernel(x,
 
 # noinspection PyUnusedLocal
 @triton.autotune(
-    configs=get_autotune_configs(),
+    configs=get_autotune_configs("softmax"),
     key=["sparsity_block_size"],
     prune_configs_by={"early_config_prune": prune_autotune_configs},
     reset_to_zero=["o"]

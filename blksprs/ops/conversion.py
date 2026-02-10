@@ -87,7 +87,7 @@ def to_sparse_wrapper_backward(ctx, grad_output):
 
 
 @triton.autotune(
-    configs=get_autotune_configs(),
+    configs=get_autotune_configs("conversion"),
     key=["sparsity_block_size"],
     prune_configs_by={"early_config_prune": prune_autotune_configs},
     reset_to_zero=["o"]
@@ -244,7 +244,7 @@ def to_dense_wrapper_backward(ctx, grad_output):
 
 
 @triton.autotune(
-    configs=get_autotune_configs(),
+    configs=get_autotune_configs("conversion"),
     key=["sparsity_block_size"],
     prune_configs_by={"early_config_prune": prune_autotune_configs},
     restore_value=["o"]
@@ -421,7 +421,7 @@ def adapt_layout_wrapper_backward(ctx, grad_output):
 
 
 @triton.autotune(
-    configs=get_autotune_configs(),
+    configs=get_autotune_configs("conversion"),
     key=["sparsity_block_size_from", "sparsity_block_size_to"],
     prune_configs_by={"early_config_prune": prune_autotune_configs_conversion},
     reset_to_zero=["o"]
