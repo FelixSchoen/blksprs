@@ -4,7 +4,7 @@ import torch
 # Capture scalar outputs for JIT compilation
 torch._dynamo.config.capture_scalar_outputs = True
 # Set version
-__version__ = "2.2"
+__version__ = "2.3"
 
 # Imports
 

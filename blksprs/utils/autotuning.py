@@ -49,6 +49,20 @@ def prune_autotune_configs(autotune_configs, kernel_args, **kwargs):
     return pruned_configs
 
 
+def prune_autotune_configs_exact(autotune_configs, kernel_args, **kwargs):
+    sparsity_block_size = kernel_args["sparsity_block_size"]
+
+    pruned_configs = []
+
+    for config in autotune_configs:
+        if config.kwargs["TRITON_BLOCK_SIZE"] == sparsity_block_size:
+            pruned_configs.append(config)
+
+    assert len(pruned_configs) > 0, f"No valid autotune configs found for sparsity block size {sparsity_block_size}"
+
+    return pruned_configs
+
+
 def prune_autotune_configs_conversion(autotune_configs, kernel_args, **kwargs):
     sparsity_block_size_from = kernel_args["sparsity_block_size_from"]
     sparsity_block_size_to = kernel_args["sparsity_block_size_to"]

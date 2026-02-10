@@ -1534,3 +1534,119 @@ def test_blksprs_flash_attention(config: tuple, use_amp: bool, use_mask: bool, u
         ), "dBias mismatch"
 
 
+@pytest.mark.parametrize("use_amp", [True, False])
+def test_blksprs_flash_attention_mixed_model_dims(use_amp: bool):
+    batch = 2
+    n_heads = 2
+    seq = 128
+    sbs = 32
+    d_att = 128
+    d_model = 256
+
+    n_batches = batch * n_heads
+    n_seq_blocks = seq // sbs
+    n_head_blocks_qk = d_att // sbs
+    n_head_blocks_v = d_model // sbs
+
+    q_dense = torch.randn(n_batches, seq, d_att, device=DEVICE)
+    k_dense = torch.randn(n_batches, seq, d_att, device=DEVICE)
+    v_dense = torch.randn(n_batches, seq, d_model, device=DEVICE)
+
+    sparsity_layout_q = torch.ones(n_batches, n_seq_blocks, n_head_blocks_qk, dtype=torch.bool, device=DEVICE)
+    sparsity_layout_k = torch.ones(n_batches, n_seq_blocks, n_head_blocks_qk, dtype=torch.bool, device=DEVICE)
+    sparsity_layout_v = torch.ones(n_batches, n_seq_blocks, n_head_blocks_v, dtype=torch.bool, device=DEVICE)
+    sparsity_layout_o = torch.ones(n_batches, n_seq_blocks, n_head_blocks_v, dtype=torch.bool, device=DEVICE)
+    attention_layout = _get_flash_attention_layout(n_batches, n_seq_blocks, n_seq_blocks, 0.5)
+
+    for b_i in range(n_batches):
+        for i in range(n_seq_blocks):
+            if not attention_layout[b_i, i].any():
+                j = torch.randint(0, n_seq_blocks, (1,), device=DEVICE).item()
+                attention_layout[b_i, i, j] = True
+
+    q_ref = q_dense.clone().detach().float().requires_grad_(True)
+    k_ref = k_dense.clone().detach().float().requires_grad_(True)
+    v_ref = v_dense.clone().detach().float().requires_grad_(True)
+
+    ref_out = _reference_attention_blocksparse(
+        q_ref, k_ref, v_ref, attention_layout, sbs, n_heads
+    )
+
+    q_for_sparse = q_dense.clone().detach().requires_grad_(True)
+    k_for_sparse = k_dense.clone().detach().requires_grad_(True)
+    v_for_sparse = v_dense.clone().detach().requires_grad_(True)
+
+    with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+        q_sparse = bs.ops.to_sparse(q_for_sparse, sparsity_layout_q, sbs)
+        k_sparse = bs.ops.to_sparse(k_for_sparse, sparsity_layout_k, sbs)
+        v_sparse = bs.ops.to_sparse(v_for_sparse, sparsity_layout_v, sbs)
+
+        flash_out_sparse = bs.ops.flash_attention(
+            q_sparse, sparsity_layout_q,
+            k_sparse, sparsity_layout_k,
+            v_sparse, sparsity_layout_v,
+            attention_layout, sbs,
+            sparsity_layout_o=sparsity_layout_o,
+        )
+        flash_out_dense = bs.ops.to_dense(flash_out_sparse, sparsity_layout_o, sbs)
+
+    assert torch.allclose(
+        flash_out_dense.float(), ref_out, atol=ATOL, rtol=RTOL
+    ), "Forward output mismatch for mixed Q/K and V dimensions"
+
+    target = torch.randn_like(ref_out)
+    ref_loss = torch.nn.L1Loss()(ref_out, target)
+    blksprs_loss = torch.nn.L1Loss()(flash_out_dense.float(), target)
+
+    ref_loss.backward()
+    blksprs_loss.backward()
+
+    assert torch.allclose(
+        torch.nan_to_num(q_for_sparse.grad.float()),
+        torch.nan_to_num(q_ref.grad),
+        atol=ATOL, rtol=RTOL,
+    ), "dQ mismatch for mixed Q/K and V dimensions"
+    assert torch.allclose(
+        torch.nan_to_num(k_for_sparse.grad.float()),
+        torch.nan_to_num(k_ref.grad),
+        atol=ATOL, rtol=RTOL,
+    ), "dK mismatch for mixed Q/K and V dimensions"
+    assert torch.allclose(
+        torch.nan_to_num(v_for_sparse.grad.float()),
+        torch.nan_to_num(v_ref.grad),
+        atol=ATOL, rtol=RTOL,
+    ), "dV mismatch for mixed Q/K and V dimensions"
+
+
+def test_blksprs_flash_attention_requires_output_layout_for_mixed_dims():
+    n_batches = 2
+    seq = 128
+    sbs = 32
+    d_att = 128
+    d_model = 256
+
+    n_seq_blocks = seq // sbs
+    n_head_blocks_qk = d_att // sbs
+    n_head_blocks_v = d_model // sbs
+
+    q_dense = torch.randn(n_batches, seq, d_att, device=DEVICE)
+    k_dense = torch.randn(n_batches, seq, d_att, device=DEVICE)
+    v_dense = torch.randn(n_batches, seq, d_model, device=DEVICE)
+
+    sparsity_layout_q = torch.ones(n_batches, n_seq_blocks, n_head_blocks_qk, dtype=torch.bool, device=DEVICE)
+    sparsity_layout_k = torch.ones(n_batches, n_seq_blocks, n_head_blocks_qk, dtype=torch.bool, device=DEVICE)
+    sparsity_layout_v = torch.ones(n_batches, n_seq_blocks, n_head_blocks_v, dtype=torch.bool, device=DEVICE)
+    attention_layout = torch.ones(n_batches, n_seq_blocks, n_seq_blocks, dtype=torch.bool, device=DEVICE)
+
+    q_sparse = bs.ops.to_sparse(q_dense, sparsity_layout_q, sbs)
+    k_sparse = bs.ops.to_sparse(k_dense, sparsity_layout_k, sbs)
+    v_sparse = bs.ops.to_sparse(v_dense, sparsity_layout_v, sbs)
+
+    with pytest.raises(ValueError, match="sparsity_layout_o is required"):
+        bs.ops.flash_attention(
+            q_sparse, sparsity_layout_q,
+            k_sparse, sparsity_layout_k,
+            v_sparse, sparsity_layout_v,
+            attention_layout, sbs,
+        )
+
