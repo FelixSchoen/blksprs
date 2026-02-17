@@ -1,15 +1,3 @@
-"""Block-sparse Flash Attention implementation for blksprs.
-
-This module implements Flash Attention 2 algorithm with block-sparse support.
-All input tensors (Q, K, V, attention mask, attention bias) are expected in
-the compressed block-sparse format used throughout the blksprs library.
-
-Q, K, V sparsity layouts have shape (n_batches, seq // bs, head_dim // bs),
-and the attention_layout has shape (n_batches, seq_q // bs, seq_k // bs).
-
-Note: This implementation was developed with AI assistance.
-"""
-
 import math
 from typing import Tuple
 
@@ -21,11 +9,166 @@ from triton import language as tl
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs_exact
 from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import stride
-from blksprs.utils.validation import (
-    validate_contiguous, validate_device, validate_dtype_float,
-    validate_dimensions, validate_sparsity, validate_sparsity_block_size,
-    ensure_contiguous,
-)
+from blksprs.utils.validation import validate_contiguous, validate_device, validate_dtype_float, \
+    validate_dimensions, validate_sparsity, validate_sparsity_block_size, ensure_contiguous
+
+
+LOG2E = 1.4426950408889634
+
+
+def _validate_flash_attention_inputs(
+    q: Tensor,
+    sparsity_layout_q: Tensor,
+    k: Tensor,
+    sparsity_layout_k: Tensor,
+    v: Tensor,
+    sparsity_layout_v: Tensor,
+    attention_layout: Tensor,
+    sparsity_block_size: int,
+) -> tuple[int, int, int, int, int]:
+    validate_dimensions(q, k, v)
+    validate_contiguous(q, k, v)
+    validate_dtype_float(q, k, v)
+    validate_device(q, k, v)
+    validate_sparsity(sparsity_block_size, (q, sparsity_layout_q), (k, sparsity_layout_k), (v, sparsity_layout_v))
+    validate_sparsity_block_size(sparsity_block_size, q, k, v)
+
+    validate_dimensions(attention_layout)
+    validate_contiguous(attention_layout)
+    validate_device(attention_layout, q)
+
+    n_batches = sparsity_layout_q.size(0)
+    n_seq_blocks_q = sparsity_layout_q.size(1)
+    n_head_blocks_qk = sparsity_layout_q.size(2)
+    n_seq_blocks_k = sparsity_layout_k.size(1)
+    n_head_blocks_v = sparsity_layout_v.size(2)
+
+    if sparsity_layout_k.size(0) != n_batches or sparsity_layout_k.size(2) != n_head_blocks_qk:
+        raise ValueError("K sparsity layout must be compatible with Q")
+    if sparsity_layout_v.size(0) != n_batches or sparsity_layout_v.size(1) != n_seq_blocks_k:
+        raise ValueError("V sparsity layout must be compatible with K")
+
+    expected_attn_shape = (n_batches, n_seq_blocks_q, n_seq_blocks_k)
+    if attention_layout.shape != torch.Size(expected_attn_shape):
+        raise ValueError(
+            f"attention_layout shape {tuple(attention_layout.shape)} doesn't match "
+            f"expected {expected_attn_shape}"
+        )
+
+    return n_batches, n_seq_blocks_q, n_seq_blocks_k, n_head_blocks_qk, n_head_blocks_v
+
+
+def _resolve_output_layout(
+    q: Tensor,
+    sparsity_layout_q: Tensor,
+    sparsity_layout_o: Tensor,
+    n_batches: int,
+    n_seq_blocks_q: int,
+    n_head_blocks_qk: int,
+    n_head_blocks_v: int,
+) -> Tensor:
+    if sparsity_layout_o is None:
+        if n_head_blocks_v != n_head_blocks_qk:
+            raise ValueError("sparsity_layout_o is required when V head dimension differs from Q/K")
+        sparsity_layout_o = sparsity_layout_q
+    else:
+        sparsity_layout_o = ensure_contiguous(sparsity_layout_o)
+        validate_dimensions(sparsity_layout_o)
+        validate_contiguous(sparsity_layout_o)
+        validate_device(sparsity_layout_o, q)
+        if not torch.all(torch.logical_or(sparsity_layout_o == 0, sparsity_layout_o == 1)):
+            raise ValueError("Output sparsity layout values must be either 0 or 1")
+
+    expected_output_shape = (n_batches, n_seq_blocks_q, n_head_blocks_v)
+    if sparsity_layout_o.shape != torch.Size(expected_output_shape):
+        raise ValueError(
+            f"sparsity_layout_o shape {tuple(sparsity_layout_o.shape)} doesn't match "
+            f"expected {expected_output_shape}"
+        )
+
+    return sparsity_layout_o
+
+
+def _resolve_lut(
+    lut: dict,
+    attention_layout: Tensor,
+    sparsity_layout_q: Tensor,
+    sparsity_layout_k: Tensor,
+    sparsity_layout_v: Tensor,
+    sparsity_layout_o: Tensor,
+    n_seq_blocks_q: int,
+    n_seq_blocks_k: int,
+    n_head_blocks_qk: int,
+    n_head_blocks_v: int,
+) -> dict:
+    if lut is None:
+        lut = flash_attention_build_lut(
+            attention_layout,
+            sparsity_layout_q,
+            sparsity_layout_k,
+            sparsity_layout_v,
+            n_seq_blocks_q,
+            n_seq_blocks_k,
+            n_head_blocks_qk,
+            sparsity_layout_o=sparsity_layout_o,
+            n_head_blocks_v=n_head_blocks_v,
+        )
+
+    if "sparsity_reverse_lut_o" not in lut:
+        lut["sparsity_reverse_lut_o"] = _build_reverse_lut(sparsity_layout_o)
+    if "n_sparse_blocks_o" not in lut:
+        lut["n_sparse_blocks_o"] = int(sparsity_layout_o.sum().item())
+
+    required_keys = (
+        "sparsity_reverse_lut_q",
+        "sparsity_reverse_lut_k",
+        "sparsity_reverse_lut_v",
+        "sparsity_reverse_lut_o",
+        "attention_lut",
+        "attention_offsets",
+        "reverse_attention_lut",
+        "reverse_attention_offsets",
+        "max_kv_blocks",
+        "max_q_per_k",
+        "n_sparse_blocks_q",
+        "n_sparse_blocks_o",
+    )
+    missing_keys = [key for key in required_keys if key not in lut]
+    if missing_keys:
+        raise KeyError(f"Missing LUT entries: {missing_keys}")
+
+    return lut
+
+
+def _prepare_optional_attention_tensor(
+    attention_tensor: Tensor,
+    sparsity_layout: Tensor,
+    lut: dict,
+    lut_key: str,
+    q: Tensor,
+    sparsity_block_size: int,
+    name: str,
+) -> tuple[Tensor, Tensor | None]:
+    if attention_tensor is None:
+        return torch.empty(0, device=q.device, dtype=q.dtype), None
+
+    if sparsity_layout is None:
+        raise ValueError(f"sparsity_layout_{name} is required when {name} is provided")
+
+    attention_tensor = ensure_contiguous(attention_tensor)
+    sparsity_layout = ensure_contiguous(sparsity_layout)
+
+    validate_dimensions(attention_tensor, sparsity_layout)
+    validate_contiguous(attention_tensor, sparsity_layout)
+    validate_device(attention_tensor, sparsity_layout, q)
+    validate_sparsity(sparsity_block_size, (attention_tensor, sparsity_layout))
+
+    sparsity_reverse_lut = lut.get(lut_key)
+    if sparsity_reverse_lut is None:
+        sparsity_reverse_lut = _build_reverse_lut(sparsity_layout)
+        lut[lut_key] = sparsity_reverse_lut
+
+    return attention_tensor, sparsity_reverse_lut
 
 
 @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
@@ -46,151 +189,78 @@ def flash_attention(
     lut: dict = None,
     sparsity_layout_o: Tensor = None,
 ) -> BlksprsTensor:
-    """Block-sparse flash attention operating on compressed block-sparse tensors.
+    """Performs block-sparse flash attention on compressed tensors."""
+    q, k, v, attention_layout = ensure_contiguous(q, k, v, attention_layout)
 
-    All inputs use the standard blksprs compressed format: tensors have shape
-    ``(n_sparse_blocks, sparsity_block_size, sparsity_block_size)`` with an
-    accompanying sparsity layout.
+    n_batches, n_seq_blocks_q, n_seq_blocks_k, n_head_blocks_qk, n_head_blocks_v = _validate_flash_attention_inputs(
+        q,
+        sparsity_layout_q,
+        k,
+        sparsity_layout_k,
+        v,
+        sparsity_layout_v,
+        attention_layout,
+        sparsity_block_size,
+    )
 
-    Args:
-        q (BlksprsTensor): Query tensor in compressed form.
-            Sparsity layout shape: ``(n_batches, seq_q // bs, head_dim // bs)``.
-        sparsity_layout_q (Tensor): Sparsity layout for Q.
-        k (BlksprsTensor): Key tensor in compressed form.
-            Sparsity layout shape: ``(n_batches, seq_k // bs, head_dim // bs)``.
-        sparsity_layout_k (Tensor): Sparsity layout for K.
-        v (BlksprsTensor): Value tensor in compressed form (same layout as K).
-        sparsity_layout_v (Tensor): Sparsity layout for V.
-        attention_layout (Tensor): Block attention pattern
-            ``(n_batches, seq_q // bs, seq_k // bs)`` indicating which Q-K block
-            pairs participate in attention.
-        sparsity_block_size (int): Block size for the sparsity pattern.
-        scale (float, optional): Attention scale (default: ``1/sqrt(head_dim)``).
-        attention_mask (BlksprsTensor, optional): Boolean mask in compressed form
-            where ``True`` means *masked* (position ignored). Does not participate
-            in gradient computation.
-        sparsity_layout_mask (Tensor, optional): Sparsity layout for the mask.
-            Shape: ``(n_batches, seq_q // bs, seq_k // bs)``.
-        attention_bias (BlksprsTensor, optional): Additive bias in compressed form,
-            added to attention scores before softmax.  Supports gradient computation.
-        sparsity_layout_bias (Tensor, optional): Sparsity layout for the bias.
-            Shape: ``(n_batches, seq_q // bs, seq_k // bs)``.
-        lut (dict, optional): Pre-computed LUT dictionary.
-        sparsity_layout_o (Tensor, optional): Output sparsity layout.
-            Shape: ``(n_batches, seq_q // bs, d_v // bs)``.
-            Defaults to ``sparsity_layout_q`` if ``d_v == d_att``.
-
-    Returns:
-        BlksprsTensor: Output tensor in compressed form with layout
-        ``sparsity_layout_o``.
-    """
-    q, k, v = ensure_contiguous(q, k, v)
-
-    validate_dimensions(q, k, v)
-    validate_contiguous(q, k, v)
-    validate_dtype_float(q, k, v)
-    validate_device(q, k, v)
-    validate_sparsity(sparsity_block_size, (q, sparsity_layout_q), (k, sparsity_layout_k), (v, sparsity_layout_v))
-    validate_sparsity_block_size(sparsity_block_size, q, k, v)
-
-    n_batches = sparsity_layout_q.size(0)
-    n_seq_blocks_q = sparsity_layout_q.size(1)
-    n_head_blocks_qk = sparsity_layout_q.size(2)
-    n_seq_blocks_k = sparsity_layout_k.size(1)
-    n_head_blocks_v = sparsity_layout_v.size(2)
-    head_dim = n_head_blocks_qk * sparsity_block_size
-
-    if sparsity_layout_k.size(0) != n_batches or sparsity_layout_k.size(2) != n_head_blocks_qk:
-        raise ValueError("K sparsity layout must be compatible with Q")
-    if (sparsity_layout_v.size(0) != n_batches or
-            sparsity_layout_v.size(1) != n_seq_blocks_k):
-        raise ValueError("V sparsity layout must be compatible with K")
-
-    if sparsity_layout_o is None:
-        if n_head_blocks_v != n_head_blocks_qk:
-            raise ValueError(
-                "sparsity_layout_o is required when V head dimension differs from Q/K"
-            )
-        sparsity_layout_o = sparsity_layout_q
-    else:
-        sparsity_layout_o = ensure_contiguous(sparsity_layout_o)
-        validate_dimensions(sparsity_layout_o)
-        validate_contiguous(sparsity_layout_o)
-        validate_device(sparsity_layout_o, q)
-        if not torch.all(torch.logical_or(sparsity_layout_o == 0, sparsity_layout_o == 1)):
-            raise ValueError("Output sparsity layout values must be either 0 or 1")
-
-    expected_output_shape = (n_batches, n_seq_blocks_q, n_head_blocks_v)
-    if sparsity_layout_o.shape != torch.Size(expected_output_shape):
-        raise ValueError(
-            f"sparsity_layout_o shape {tuple(sparsity_layout_o.shape)} doesn't match "
-            f"expected {expected_output_shape}"
-        )
-
-    expected_attn_shape = (n_batches, n_seq_blocks_q, n_seq_blocks_k)
-    if attention_layout.shape != torch.Size(expected_attn_shape):
-        raise ValueError(
-            f"attention_layout shape {tuple(attention_layout.shape)} doesn't match "
-            f"expected {expected_attn_shape}"
-        )
+    sparsity_layout_o = _resolve_output_layout(
+        q,
+        sparsity_layout_q,
+        sparsity_layout_o,
+        n_batches,
+        n_seq_blocks_q,
+        n_head_blocks_qk,
+        n_head_blocks_v,
+    )
 
     if scale is None:
-        scale = 1.0 / math.sqrt(head_dim)
+        scale = 1.0 / math.sqrt(n_head_blocks_qk * sparsity_block_size)
 
-    # Build or reuse LUTs
-    if lut is None:
-        lut = flash_attention_build_lut(
-            attention_layout,
-            sparsity_layout_q, sparsity_layout_k, sparsity_layout_v,
-            n_seq_blocks_q, n_seq_blocks_k, n_head_blocks_qk,
-            sparsity_layout_o=sparsity_layout_o,
-            n_head_blocks_v=n_head_blocks_v,
-        )
-    if "reverse_lut_o" not in lut:
-        lut["reverse_lut_o"] = _build_reverse_lut(sparsity_layout_o)
-    if "n_sparse_blocks_o" not in lut:
-        lut["n_sparse_blocks_o"] = int(sparsity_layout_o.sum().item())
+    lut = _resolve_lut(
+        lut,
+        attention_layout,
+        sparsity_layout_q,
+        sparsity_layout_k,
+        sparsity_layout_v,
+        sparsity_layout_o,
+        n_seq_blocks_q,
+        n_seq_blocks_k,
+        n_head_blocks_qk,
+        n_head_blocks_v,
+    )
 
-    # Handle attention mask
-    has_mask = attention_mask is not None
-    if has_mask:
-        attention_mask = ensure_contiguous(attention_mask)
-        validate_dimensions(attention_mask)
-        validate_contiguous(attention_mask)
-        validate_sparsity(sparsity_block_size, (attention_mask, sparsity_layout_mask))
-        reverse_lut_mask = lut.get("reverse_lut_mask")
-        if reverse_lut_mask is None:
-            reverse_lut_mask = _build_reverse_lut(sparsity_layout_mask)
-            lut["reverse_lut_mask"] = reverse_lut_mask
-    else:
-        attention_mask = torch.empty(0, device=q.device, dtype=q.dtype)
-        reverse_lut_mask = None
+    attention_mask, sparsity_reverse_lut_mask = _prepare_optional_attention_tensor(
+        attention_mask,
+        sparsity_layout_mask,
+        lut,
+        "sparsity_reverse_lut_mask",
+        q,
+        sparsity_block_size,
+        "mask",
+    )
+    attention_bias, sparsity_reverse_lut_bias = _prepare_optional_attention_tensor(
+        attention_bias,
+        sparsity_layout_bias,
+        lut,
+        "sparsity_reverse_lut_bias",
+        q,
+        sparsity_block_size,
+        "bias",
+    )
 
-    # Handle attention bias
-    has_bias = attention_bias is not None
-    if has_bias:
-        attention_bias = ensure_contiguous(attention_bias)
-        validate_dimensions(attention_bias)
-        validate_contiguous(attention_bias)
-        validate_sparsity(sparsity_block_size, (attention_bias, sparsity_layout_bias))
-        reverse_lut_bias = lut.get("reverse_lut_bias")
-        if reverse_lut_bias is None:
-            reverse_lut_bias = _build_reverse_lut(sparsity_layout_bias)
-            lut["reverse_lut_bias"] = reverse_lut_bias
-    else:
-        attention_bias = torch.empty(0, device=q.device, dtype=q.dtype)
-        reverse_lut_bias = None
+    has_mask = sparsity_reverse_lut_mask is not None
+    has_bias = sparsity_reverse_lut_bias is not None
 
     return BlksprsTensor.wrap(
-        BlockSparseFlashAttention.apply(
+        _BlockSparseFlashAttention.apply(
             q, k, v,
             attention_mask, attention_bias,
             sparsity_layout_q, sparsity_layout_k, sparsity_layout_v, sparsity_layout_o,
-            lut["reverse_lut_q"], lut["reverse_lut_k"], lut["reverse_lut_v"], lut["reverse_lut_o"],
-            lut["attn_lut"], lut["attn_offsets"],
-            lut["rev_attn_lut"], lut["rev_attn_offsets"],
-            reverse_lut_mask,
-            reverse_lut_bias,
+            lut["sparsity_reverse_lut_q"], lut["sparsity_reverse_lut_k"], lut["sparsity_reverse_lut_v"], lut["sparsity_reverse_lut_o"],
+            lut["attention_lut"], lut["attention_offsets"],
+            lut["reverse_attention_lut"], lut["reverse_attention_offsets"],
+            sparsity_reverse_lut_mask,
+            sparsity_reverse_lut_bias,
             sparsity_block_size, n_seq_blocks_q, n_seq_blocks_k, n_head_blocks_qk, n_head_blocks_v,
             lut["max_kv_blocks"], lut["max_q_per_k"],
             lut["n_sparse_blocks_q"], lut["n_sparse_blocks_o"],
@@ -200,17 +270,17 @@ def flash_attention(
     )
 
 
-class BlockSparseFlashAttention(torch.autograd.Function):
+class _BlockSparseFlashAttention(torch.autograd.Function):
     """Block-sparse Flash Attention with autograd support."""
 
     @staticmethod
     def forward(
         ctx, q, k, v, attention_mask, attention_bias,
         sparsity_layout_q, sparsity_layout_k, sparsity_layout_v, sparsity_layout_o,
-        reverse_lut_q, reverse_lut_k, reverse_lut_v, reverse_lut_o,
-        attn_lut, attn_offsets,
-        rev_attn_lut, rev_attn_offsets,
-        reverse_lut_mask, reverse_lut_bias,
+        sparsity_reverse_lut_q, sparsity_reverse_lut_k, sparsity_reverse_lut_v, sparsity_reverse_lut_o,
+        attention_lut, attention_offsets,
+        reverse_attention_lut, reverse_attention_offsets,
+        sparsity_reverse_lut_mask, sparsity_reverse_lut_bias,
         sparsity_block_size, n_seq_blocks_q, n_seq_blocks_k, n_head_blocks_qk, n_head_blocks_v,
         max_kv_blocks, max_q_per_k,
         n_sparse_blocks_q, n_sparse_blocks_o,
@@ -271,13 +341,13 @@ class BlockSparseFlashAttention(torch.autograd.Function):
             o, o_b_s, o_r_s, o_c_s,
             attention_mask, mask_b_s, mask_r_s, mask_c_s,
             attention_bias, bias_b_s, bias_r_s, bias_c_s,
-            reverse_lut_q, s_l_q_b_s, s_l_q_r_s, s_l_q_c_s,
-            reverse_lut_k, s_l_k_b_s, s_l_k_r_s, s_l_k_c_s,
-            reverse_lut_v, s_l_v_b_s, s_l_v_r_s, s_l_v_c_s,
-            reverse_lut_o, s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
-            reverse_lut_mask if has_mask else dummy_lut,
-            reverse_lut_bias if has_bias else dummy_lut,
-            attn_lut, attn_offsets,
+            sparsity_reverse_lut_q, s_l_q_b_s, s_l_q_r_s, s_l_q_c_s,
+            sparsity_reverse_lut_k, s_l_k_b_s, s_l_k_r_s, s_l_k_c_s,
+            sparsity_reverse_lut_v, s_l_v_b_s, s_l_v_r_s, s_l_v_c_s,
+            sparsity_reverse_lut_o, s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
+            sparsity_reverse_lut_mask if has_mask else dummy_lut,
+            sparsity_reverse_lut_bias if has_bias else dummy_lut,
+            attention_lut, attention_offsets,
             lse,
             n_batches, n_seq_blocks_q, n_seq_blocks_k, n_head_blocks_qk, n_head_blocks_v, max_kv_blocks,
             q.size(0),  # total Q blocks for bounds checking
@@ -294,13 +364,13 @@ class BlockSparseFlashAttention(torch.autograd.Function):
         ctx.save_for_backward(
             q, k, v, o, lse,
             sparsity_layout_q, sparsity_layout_k, sparsity_layout_v, sparsity_layout_o,
-            reverse_lut_q, reverse_lut_k, reverse_lut_v, reverse_lut_o,
-            attn_lut, attn_offsets,
-            rev_attn_lut, rev_attn_offsets,
+            sparsity_reverse_lut_q, sparsity_reverse_lut_k, sparsity_reverse_lut_v, sparsity_reverse_lut_o,
+            attention_lut, attention_offsets,
+            reverse_attention_lut, reverse_attention_offsets,
             attention_mask if has_mask else torch.empty(0, device=q.device),
             attention_bias if has_bias else torch.empty(0, device=q.device),
-            reverse_lut_mask if has_mask else torch.empty(0, device=q.device, dtype=torch.long),
-            reverse_lut_bias if has_bias else torch.empty(0, device=q.device, dtype=torch.long),
+            sparsity_reverse_lut_mask if has_mask else torch.empty(0, device=q.device, dtype=torch.long),
+            sparsity_reverse_lut_bias if has_bias else torch.empty(0, device=q.device, dtype=torch.long),
         )
         ctx.sparsity_block_size = sparsity_block_size
         ctx.n_seq_blocks_q = n_seq_blocks_q
@@ -322,11 +392,11 @@ class BlockSparseFlashAttention(torch.autograd.Function):
     def backward(ctx, grad_output):
         (q, k, v, o, lse,
          sparsity_layout_q, sparsity_layout_k, sparsity_layout_v, sparsity_layout_o,
-         reverse_lut_q, reverse_lut_k, reverse_lut_v, reverse_lut_o,
-         attn_lut, attn_offsets,
-         rev_attn_lut, rev_attn_offsets,
+         sparsity_reverse_lut_q, sparsity_reverse_lut_k, sparsity_reverse_lut_v, sparsity_reverse_lut_o,
+         attention_lut, attention_offsets,
+         reverse_attention_lut, reverse_attention_offsets,
          attention_mask, attention_bias,
-         reverse_lut_mask, reverse_lut_bias,
+         sparsity_reverse_lut_mask, sparsity_reverse_lut_bias,
          ) = ctx.saved_tensors
 
         SBS = ctx.sparsity_block_size
@@ -368,7 +438,7 @@ class BlockSparseFlashAttention(torch.autograd.Function):
 
         flash_attention_bwd_preprocess_kernel[(n_batches, n_seq_blocks_q)](
             o, grad_output, delta,
-            reverse_lut_o,
+            sparsity_reverse_lut_o,
             o.size(0),
             do_b_s, do_r_s, do_c_s,
             s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
@@ -397,13 +467,13 @@ class BlockSparseFlashAttention(torch.autograd.Function):
             lse, delta,
             attention_mask, mask_b_s, mask_r_s, mask_c_s,
             attention_bias, bias_b_s, bias_r_s, bias_c_s,
-            reverse_lut_q, s_l_q_b_s, s_l_q_r_s, s_l_q_c_s,
-            reverse_lut_k, s_l_k_b_s, s_l_k_r_s, s_l_k_c_s,
-            reverse_lut_v, s_l_v_b_s, s_l_v_r_s, s_l_v_c_s,
-            reverse_lut_o, s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
-            reverse_lut_mask if has_mask else dummy_lut,
-            reverse_lut_bias if has_bias else dummy_lut,
-            rev_attn_lut, rev_attn_offsets,
+            sparsity_reverse_lut_q, s_l_q_b_s, s_l_q_r_s, s_l_q_c_s,
+            sparsity_reverse_lut_k, s_l_k_b_s, s_l_k_r_s, s_l_k_c_s,
+            sparsity_reverse_lut_v, s_l_v_b_s, s_l_v_r_s, s_l_v_c_s,
+            sparsity_reverse_lut_o, s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
+            sparsity_reverse_lut_mask if has_mask else dummy_lut,
+            sparsity_reverse_lut_bias if has_bias else dummy_lut,
+            reverse_attention_lut, reverse_attention_offsets,
             n_batches, n_seq_blocks_q, n_seq_blocks_k, n_head_blocks_qk, n_head_blocks_v, ctx.max_q_per_k,
             q.size(0), k.size(0), v.size(0), grad_output.size(0),
             attention_mask.size(0) if has_mask else 0,
@@ -423,13 +493,13 @@ class BlockSparseFlashAttention(torch.autograd.Function):
             lse, delta,
             attention_mask, mask_b_s, mask_r_s, mask_c_s,
             attention_bias, bias_b_s, bias_r_s, bias_c_s,
-            reverse_lut_q, s_l_q_b_s, s_l_q_r_s, s_l_q_c_s,
-            reverse_lut_k, s_l_k_b_s, s_l_k_r_s, s_l_k_c_s,
-            reverse_lut_v, s_l_v_b_s, s_l_v_r_s, s_l_v_c_s,
-            reverse_lut_o, s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
-            reverse_lut_mask if has_mask else dummy_lut,
-            reverse_lut_bias if has_bias else dummy_lut,
-            attn_lut, attn_offsets,
+            sparsity_reverse_lut_q, s_l_q_b_s, s_l_q_r_s, s_l_q_c_s,
+            sparsity_reverse_lut_k, s_l_k_b_s, s_l_k_r_s, s_l_k_c_s,
+            sparsity_reverse_lut_v, s_l_v_b_s, s_l_v_r_s, s_l_v_c_s,
+            sparsity_reverse_lut_o, s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
+            sparsity_reverse_lut_mask if has_mask else dummy_lut,
+            sparsity_reverse_lut_bias if has_bias else dummy_lut,
+            attention_lut, attention_offsets,
             n_batches, n_seq_blocks_q, n_seq_blocks_k, n_head_blocks_qk, n_head_blocks_v, ctx.max_kv_blocks,
             q.size(0), k.size(0), v.size(0), grad_output.size(0),
             attention_mask.size(0) if has_mask else 0,
@@ -455,10 +525,7 @@ class BlockSparseFlashAttention(torch.autograd.Function):
         )
 
 
-# ---------------------------------------------------------------------------
-# Forward kernel
-# ---------------------------------------------------------------------------
-
+# noinspection PyUnusedLocal
 @triton.autotune(
     configs=get_autotune_configs("flash_attention"),
     key=["sparsity_block_size"],
@@ -478,7 +545,7 @@ def flash_attention_fwd_kernel(
     r_lut_v, s_l_v_b_s, s_l_v_r_s, s_l_v_c_s,
     r_lut_o, s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
     r_lut_mask, r_lut_bias,
-    attn_lut_ptr, attn_offsets_ptr,
+    attention_lut_ptr, attention_offsets_ptr,
     lse_ptr,
     n_batches: tl.constexpr,
     n_seq_blocks_q: tl.constexpr,
@@ -498,14 +565,6 @@ def flash_attention_fwd_kernel(
     has_bias: tl.constexpr,
     TRITON_BLOCK_SIZE: tl.constexpr,
 ):
-    """Flash attention forward kernel operating on compressed block-sparse tensors.
-
-    Grid: (n_batches, n_seq_blocks_q)
-
-    For each (batch, q_seq_block), iterates over all K seq blocks in the
-    attention layout, reconstructs full Q and K vectors across head_dim blocks,
-    computes the dot product, applies online softmax, and accumulates output.
-    """
     pid_batch = tl.program_id(0)
     pid_q_seq = tl.program_id(1)
 
@@ -517,15 +576,15 @@ def flash_attention_fwd_kernel(
     l_i = tl.zeros([TRITON_BLOCK_SIZE], dtype=tl.float32)
 
     # Get attention LUT for this (batch, q_seq) pair
-    attn_offset_idx = pid_batch * n_seq_blocks_q + pid_q_seq
-    attn_start = tl.load(attn_offsets_ptr + attn_offset_idx)
-    attn_end = tl.load(attn_offsets_ptr + attn_offset_idx + 1)
-    n_kv_blocks = attn_end - attn_start
+    attention_offset_idx = pid_batch * n_seq_blocks_q + pid_q_seq
+    attention_start = tl.load(attention_offsets_ptr + attention_offset_idx)
+    attention_end = tl.load(attention_offsets_ptr + attention_offset_idx + 1)
+    n_kv_blocks = attention_end - attention_start
 
     # Iterate over K sequence blocks
     for kv_idx in range(max_kv_blocks):
         if kv_idx < n_kv_blocks:
-            k_seq_block = tl.load(attn_lut_ptr + attn_start + kv_idx)
+            k_seq_block = tl.load(attention_lut_ptr + attention_start + kv_idx)
 
             # Compute S = Q @ K^T by accumulating across head_dim blocks
             S = tl.zeros([TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE], dtype=tl.float32)
@@ -548,7 +607,7 @@ def flash_attention_fwd_kernel(
                     S += tl.dot(q_blk, tl.trans(k_blk))
 
             # Scale scores
-            qk_scale = scale * 1.44269504
+            qk_scale = scale * LOG2E
             S = S * qk_scale
 
             # Apply mask if present
@@ -559,7 +618,7 @@ def flash_attention_fwd_kernel(
                                     offs_m[:, None] * mask_r_s +
                                     offs_d[None, :] * mask_c_s)
                     mask_blk = tl.load(mask_ptr + mask_blk_idx)
-                    S = tl.where(mask_blk != 0, float("-inf") * 1.44269504, S)
+                    S = tl.where(mask_blk != 0, float("-inf") * LOG2E, S)
 
             # Apply bias if present
             if has_bias:
@@ -569,7 +628,7 @@ def flash_attention_fwd_kernel(
                                     offs_m[:, None] * bias_r_s +
                                     offs_d[None, :] * bias_c_s)
                     bias_blk = tl.load(bias_ptr + bias_blk_idx)
-                    S = S + bias_blk * 1.44269504
+                    S = S + bias_blk * LOG2E
 
             # Online softmax update
             m_ij = tl.maximum(m_i, tl.max(S, axis=1))
@@ -626,10 +685,7 @@ def flash_attention_fwd_kernel(
     )
 
 
-# ---------------------------------------------------------------------------
-# Backward preprocess kernel
-# ---------------------------------------------------------------------------
-
+# noinspection PyUnusedLocal
 @triton.autotune(
     configs=get_autotune_configs("flash_attention"),
     key=["sparsity_block_size"],
@@ -649,7 +705,6 @@ def flash_attention_bwd_preprocess_kernel(
     sparsity_block_size,
     TRITON_BLOCK_SIZE: tl.constexpr,
 ):
-    """Compute delta = sum_h (O_h * dO_h).sum(dim=-1) for each (batch, q_seq, row)."""
     pid_batch = tl.program_id(0)
     pid_q_seq = tl.program_id(1)
 
@@ -674,10 +729,7 @@ def flash_attention_bwd_preprocess_kernel(
     )
 
 
-# ---------------------------------------------------------------------------
-# Backward dK, dV kernel
-# ---------------------------------------------------------------------------
-
+# noinspection PyUnusedLocal
 @triton.autotune(
     configs=get_autotune_configs("flash_attention"),
     key=["sparsity_block_size"],
@@ -700,7 +752,7 @@ def flash_attention_bwd_dkdv_kernel(
     r_lut_v, s_l_v_b_s, s_l_v_r_s, s_l_v_c_s,
     r_lut_o, s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
     r_lut_mask, r_lut_bias,
-    rev_attn_lut_ptr, rev_attn_offsets_ptr,
+    reverse_attention_lut_ptr, reverse_attention_offsets_ptr,
     n_batches: tl.constexpr,
     n_seq_blocks_q: tl.constexpr,
     n_seq_blocks_k: tl.constexpr,
@@ -719,23 +771,22 @@ def flash_attention_bwd_dkdv_kernel(
     has_bias: tl.constexpr,
     TRITON_BLOCK_SIZE: tl.constexpr,
 ):
-    """Compute dK, dV, and optionally dBias gradients."""
     pid_batch = tl.program_id(0)
     pid_k_seq = tl.program_id(1)
 
     offs_m = tl.arange(0, TRITON_BLOCK_SIZE)
     offs_d = tl.arange(0, TRITON_BLOCK_SIZE)
-    qk_scale = scale * 1.44269504
+    qk_scale = scale * LOG2E
 
     # Get reverse attention LUT: which Q blocks attend to this K block
-    rev_offset_idx = pid_batch * n_seq_blocks_k + pid_k_seq
-    rev_start = tl.load(rev_attn_offsets_ptr + rev_offset_idx)
-    rev_end = tl.load(rev_attn_offsets_ptr + rev_offset_idx + 1)
-    n_q_blocks = rev_end - rev_start
+    reverse_offset_idx = pid_batch * n_seq_blocks_k + pid_k_seq
+    reverse_start = tl.load(reverse_attention_offsets_ptr + reverse_offset_idx)
+    reverse_end = tl.load(reverse_attention_offsets_ptr + reverse_offset_idx + 1)
+    n_q_blocks = reverse_end - reverse_start
 
     for q_idx in range(max_q_per_k):
         if q_idx < n_q_blocks:
-            q_seq_block = tl.load(rev_attn_lut_ptr + rev_start + q_idx)
+            q_seq_block = tl.load(reverse_attention_lut_ptr + reverse_start + q_idx)
 
             # Recompute S = Q @ K^T (across head blocks)
             S = tl.zeros([TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE], dtype=tl.float32)
@@ -757,7 +808,7 @@ def flash_attention_bwd_dkdv_kernel(
                 if rev_idx_mask >= 0:
                     mask_blk_idx = (rev_idx_mask * mask_b_s + offs_m[:, None] * mask_r_s + offs_d[None, :] * mask_c_s)
                     mask_blk = tl.load(mask_ptr + mask_blk_idx)
-                    S = tl.where(mask_blk != 0, float("-inf") * 1.44269504, S)
+                    S = tl.where(mask_blk != 0, float("-inf") * LOG2E, S)
 
             # Apply bias
             if has_bias:
@@ -765,7 +816,7 @@ def flash_attention_bwd_dkdv_kernel(
                 if rev_idx_bias >= 0:
                     bias_blk_idx = (rev_idx_bias * bias_b_s + offs_m[:, None] * bias_r_s + offs_d[None, :] * bias_c_s)
                     bias_blk = tl.load(bias_ptr + bias_blk_idx)
-                    S = S + bias_blk * 1.44269504
+                    S = S + bias_blk * LOG2E
 
             # Recompute P from S and saved LSE
             m = tl.load(
@@ -826,17 +877,14 @@ def flash_attention_bwd_dkdv_kernel(
             if has_bias:
                 rev_idx_bias = tl.load(r_lut_bias + (pid_batch * n_seq_blocks_q * n_seq_blocks_k + q_seq_block * n_seq_blocks_k + pid_k_seq)).to(tl.int32)
                 if rev_idx_bias >= 0:
-                    ds_bias = ds * 1.44269504
+                    ds_bias = ds * LOG2E
                     dbias_blk_idx = (rev_idx_bias * dbias_b_s + offs_m[:, None] * dbias_r_s + offs_d[None, :] * dbias_c_s)
                     dbias_blk = tl.load(dbias_ptr + dbias_blk_idx).to(tl.float32)
                     dbias_blk += ds_bias
                     tl.store(dbias_ptr + dbias_blk_idx, dbias_blk.to(dbias_ptr.dtype.element_ty))
 
 
-# ---------------------------------------------------------------------------
-# Backward dQ kernel
-# ---------------------------------------------------------------------------
-
+# noinspection PyUnusedLocal
 @triton.autotune(
     configs=get_autotune_configs("flash_attention"),
     key=["sparsity_block_size"],
@@ -858,7 +906,7 @@ def flash_attention_bwd_dq_kernel(
     r_lut_v, s_l_v_b_s, s_l_v_r_s, s_l_v_c_s,
     r_lut_o, s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
     r_lut_mask, r_lut_bias,
-    attn_lut_ptr, attn_offsets_ptr,
+    attention_lut_ptr, attention_offsets_ptr,
     n_batches: tl.constexpr,
     n_seq_blocks_q: tl.constexpr,
     n_seq_blocks_k: tl.constexpr,
@@ -877,25 +925,24 @@ def flash_attention_bwd_dq_kernel(
     has_bias: tl.constexpr,
     TRITON_BLOCK_SIZE: tl.constexpr,
 ):
-    """Compute dQ gradients."""
     pid_batch = tl.program_id(0)
     pid_q_seq = tl.program_id(1)
 
     offs_m = tl.arange(0, TRITON_BLOCK_SIZE)
     offs_d = tl.arange(0, TRITON_BLOCK_SIZE)
-    qk_scale = scale * 1.44269504
+    qk_scale = scale * LOG2E
 
     m = tl.load(lse_ptr + pid_batch * n_seq_blocks_q * TRITON_BLOCK_SIZE + pid_q_seq * TRITON_BLOCK_SIZE + offs_m)
     Di = tl.load(delta_ptr + pid_batch * n_seq_blocks_q * TRITON_BLOCK_SIZE + pid_q_seq * TRITON_BLOCK_SIZE + offs_m)
 
-    attn_offset_idx = pid_batch * n_seq_blocks_q + pid_q_seq
-    attn_start = tl.load(attn_offsets_ptr + attn_offset_idx)
-    attn_end = tl.load(attn_offsets_ptr + attn_offset_idx + 1)
-    n_kv_blocks = attn_end - attn_start
+    attention_offset_idx = pid_batch * n_seq_blocks_q + pid_q_seq
+    attention_start = tl.load(attention_offsets_ptr + attention_offset_idx)
+    attention_end = tl.load(attention_offsets_ptr + attention_offset_idx + 1)
+    n_kv_blocks = attention_end - attention_start
 
     for kv_idx in range(max_kv_blocks):
         if kv_idx < n_kv_blocks:
-            k_seq_block = tl.load(attn_lut_ptr + attn_start + kv_idx)
+            k_seq_block = tl.load(attention_lut_ptr + attention_start + kv_idx)
 
             # Recompute S = Q @ K^T across head blocks
             S = tl.zeros([TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE], dtype=tl.float32)
@@ -916,14 +963,14 @@ def flash_attention_bwd_dq_kernel(
                 if rev_idx_mask >= 0:
                     mask_blk_idx = (rev_idx_mask * mask_b_s + offs_m[:, None] * mask_r_s + offs_d[None, :] * mask_c_s)
                     mask_blk = tl.load(mask_ptr + mask_blk_idx)
-                    S = tl.where(mask_blk != 0, float("-inf") * 1.44269504, S)
+                    S = tl.where(mask_blk != 0, float("-inf") * LOG2E, S)
 
             if has_bias:
                 rev_idx_bias = tl.load(r_lut_bias + (pid_batch * n_seq_blocks_q * n_seq_blocks_k + pid_q_seq * n_seq_blocks_k + k_seq_block)).to(tl.int32)
                 if rev_idx_bias >= 0:
                     bias_blk_idx = (rev_idx_bias * bias_b_s + offs_m[:, None] * bias_r_s + offs_d[None, :] * bias_c_s)
                     bias_blk = tl.load(bias_ptr + bias_blk_idx)
-                    S = S + bias_blk * 1.44269504
+                    S = S + bias_blk * LOG2E
 
             valid_lse = m > float("-inf")
             safe_m = tl.where(valid_lse, m, 0.0)
@@ -957,10 +1004,6 @@ def flash_attention_bwd_dq_kernel(
                     dq_blk += tl.dot(ds.to(k_blk.dtype), k_blk).to(tl.float32) * scale
                     tl.store(dq_ptr + dq_blk_idx, dq_blk.to(dq_ptr.dtype.element_ty))
 
-
-# ---------------------------------------------------------------------------
-# LUT building
-# ---------------------------------------------------------------------------
 
 def flash_attention_build_lut(
     attention_layout: Tensor,
@@ -997,41 +1040,41 @@ def flash_attention_build_lut(
         n_seq_blocks_k = attention_layout.shape[2]
 
     # Forward attention LUT: for each (batch, q_seq), list of k_seq blocks
-    attn_lut, attn_offsets, max_kv_blocks = _build_attention_lut_fast(
+    attention_lut, attention_offsets, max_kv_blocks = _build_attention_lut_fast(
         attention_layout, n_batches, n_seq_blocks_q, n_seq_blocks_k
     )
 
     # Reverse attention LUT: for each (batch, k_seq), list of q_seq blocks
     attention_layout_t = attention_layout.transpose(1, 2).contiguous()
-    rev_attn_lut, rev_attn_offsets, max_q_per_k = _build_attention_lut_fast(
+    reverse_attention_lut, reverse_attention_offsets, max_q_per_k = _build_attention_lut_fast(
         attention_layout_t, n_batches, n_seq_blocks_k, n_seq_blocks_q
     )
 
     result = {
-        "attn_lut": attn_lut,
-        "attn_offsets": attn_offsets,
+        "attention_lut": attention_lut,
+        "attention_offsets": attention_offsets,
         "max_kv_blocks": max_kv_blocks,
-        "rev_attn_lut": rev_attn_lut,
-        "rev_attn_offsets": rev_attn_offsets,
+        "reverse_attention_lut": reverse_attention_lut,
+        "reverse_attention_offsets": reverse_attention_offsets,
         "max_q_per_k": max_q_per_k,
     }
 
     if sparsity_layout_q is not None:
-        result["reverse_lut_q"] = _build_reverse_lut(sparsity_layout_q)
+        result["sparsity_reverse_lut_q"] = _build_reverse_lut(sparsity_layout_q)
         result["n_sparse_blocks_q"] = int(sparsity_layout_q.sum().item())
 
     if sparsity_layout_k is not None:
-        result["reverse_lut_k"] = _build_reverse_lut(sparsity_layout_k)
+        result["sparsity_reverse_lut_k"] = _build_reverse_lut(sparsity_layout_k)
 
     if sparsity_layout_v is not None:
-        result["reverse_lut_v"] = _build_reverse_lut(sparsity_layout_v)
+        result["sparsity_reverse_lut_v"] = _build_reverse_lut(sparsity_layout_v)
 
     if sparsity_layout_o is not None:
-        result["reverse_lut_o"] = _build_reverse_lut(sparsity_layout_o)
+        result["sparsity_reverse_lut_o"] = _build_reverse_lut(sparsity_layout_o)
         result["n_sparse_blocks_o"] = int(sparsity_layout_o.sum().item())
     elif sparsity_layout_q is not None and (n_head_blocks_v is None or n_head_blocks_v == sparsity_layout_q.size(2)):
         # Backward-compatible path: output layout equals Q layout.
-        result["reverse_lut_o"] = result["reverse_lut_q"]
+        result["sparsity_reverse_lut_o"] = result["sparsity_reverse_lut_q"]
         result["n_sparse_blocks_o"] = result["n_sparse_blocks_q"]
 
     return result
