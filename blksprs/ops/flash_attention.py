@@ -13,9 +13,6 @@ from blksprs.utils.validation import validate_contiguous, validate_device, valid
     validate_dimensions, validate_sparsity, validate_sparsity_block_size, ensure_contiguous
 
 
-LOG2E = 1.4426950408889634
-
-
 def _validate_flash_attention_inputs(
     q: Tensor,
     sparsity_layout_q: Tensor,
@@ -607,7 +604,7 @@ def flash_attention_fwd_kernel(
                     S += tl.dot(q_blk, tl.trans(k_blk))
 
             # Scale scores
-            qk_scale = scale * LOG2E
+            qk_scale = scale * 1.4426950408889634
             S = S * qk_scale
 
             # Apply mask if present
@@ -618,7 +615,7 @@ def flash_attention_fwd_kernel(
                                     offs_m[:, None] * mask_r_s +
                                     offs_d[None, :] * mask_c_s)
                     mask_blk = tl.load(mask_ptr + mask_blk_idx)
-                    S = tl.where(mask_blk != 0, float("-inf") * LOG2E, S)
+                    S = tl.where(mask_blk != 0, float("-inf") * 1.4426950408889634, S)
 
             # Apply bias if present
             if has_bias:
@@ -628,7 +625,7 @@ def flash_attention_fwd_kernel(
                                     offs_m[:, None] * bias_r_s +
                                     offs_d[None, :] * bias_c_s)
                     bias_blk = tl.load(bias_ptr + bias_blk_idx)
-                    S = S + bias_blk * LOG2E
+                    S = S + bias_blk * 1.4426950408889634
 
             # Online softmax update
             m_ij = tl.maximum(m_i, tl.max(S, axis=1))
@@ -776,7 +773,7 @@ def flash_attention_bwd_dkdv_kernel(
 
     offs_m = tl.arange(0, TRITON_BLOCK_SIZE)
     offs_d = tl.arange(0, TRITON_BLOCK_SIZE)
-    qk_scale = scale * LOG2E
+    qk_scale = scale * 1.4426950408889634
 
     # Get reverse attention LUT: which Q blocks attend to this K block
     reverse_offset_idx = pid_batch * n_seq_blocks_k + pid_k_seq
@@ -808,7 +805,7 @@ def flash_attention_bwd_dkdv_kernel(
                 if rev_idx_mask >= 0:
                     mask_blk_idx = (rev_idx_mask * mask_b_s + offs_m[:, None] * mask_r_s + offs_d[None, :] * mask_c_s)
                     mask_blk = tl.load(mask_ptr + mask_blk_idx)
-                    S = tl.where(mask_blk != 0, float("-inf") * LOG2E, S)
+                    S = tl.where(mask_blk != 0, float("-inf") * 1.4426950408889634, S)
 
             # Apply bias
             if has_bias:
@@ -816,7 +813,7 @@ def flash_attention_bwd_dkdv_kernel(
                 if rev_idx_bias >= 0:
                     bias_blk_idx = (rev_idx_bias * bias_b_s + offs_m[:, None] * bias_r_s + offs_d[None, :] * bias_c_s)
                     bias_blk = tl.load(bias_ptr + bias_blk_idx)
-                    S = S + bias_blk * LOG2E
+                    S = S + bias_blk * 1.4426950408889634
 
             # Recompute P from S and saved LSE
             m = tl.load(
@@ -877,7 +874,7 @@ def flash_attention_bwd_dkdv_kernel(
             if has_bias:
                 rev_idx_bias = tl.load(r_lut_bias + (pid_batch * n_seq_blocks_q * n_seq_blocks_k + q_seq_block * n_seq_blocks_k + pid_k_seq)).to(tl.int32)
                 if rev_idx_bias >= 0:
-                    ds_bias = ds * LOG2E
+                    ds_bias = ds * 1.4426950408889634
                     dbias_blk_idx = (rev_idx_bias * dbias_b_s + offs_m[:, None] * dbias_r_s + offs_d[None, :] * dbias_c_s)
                     dbias_blk = tl.load(dbias_ptr + dbias_blk_idx).to(tl.float32)
                     dbias_blk += ds_bias
@@ -930,7 +927,7 @@ def flash_attention_bwd_dq_kernel(
 
     offs_m = tl.arange(0, TRITON_BLOCK_SIZE)
     offs_d = tl.arange(0, TRITON_BLOCK_SIZE)
-    qk_scale = scale * LOG2E
+    qk_scale = scale * 1.4426950408889634
 
     m = tl.load(lse_ptr + pid_batch * n_seq_blocks_q * TRITON_BLOCK_SIZE + pid_q_seq * TRITON_BLOCK_SIZE + offs_m)
     Di = tl.load(delta_ptr + pid_batch * n_seq_blocks_q * TRITON_BLOCK_SIZE + pid_q_seq * TRITON_BLOCK_SIZE + offs_m)
@@ -963,14 +960,14 @@ def flash_attention_bwd_dq_kernel(
                 if rev_idx_mask >= 0:
                     mask_blk_idx = (rev_idx_mask * mask_b_s + offs_m[:, None] * mask_r_s + offs_d[None, :] * mask_c_s)
                     mask_blk = tl.load(mask_ptr + mask_blk_idx)
-                    S = tl.where(mask_blk != 0, float("-inf") * LOG2E, S)
+                    S = tl.where(mask_blk != 0, float("-inf") * 1.4426950408889634, S)
 
             if has_bias:
                 rev_idx_bias = tl.load(r_lut_bias + (pid_batch * n_seq_blocks_q * n_seq_blocks_k + pid_q_seq * n_seq_blocks_k + k_seq_block)).to(tl.int32)
                 if rev_idx_bias >= 0:
                     bias_blk_idx = (rev_idx_bias * bias_b_s + offs_m[:, None] * bias_r_s + offs_d[None, :] * bias_c_s)
                     bias_blk = tl.load(bias_ptr + bias_blk_idx)
-                    S = S + bias_blk * LOG2E
+                    S = S + bias_blk * 1.4426950408889634
 
             valid_lse = m > float("-inf")
             safe_m = tl.where(valid_lse, m, 0.0)
