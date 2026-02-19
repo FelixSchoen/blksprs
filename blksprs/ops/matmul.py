@@ -23,8 +23,8 @@ def matmul(x: BlksprsTensor, sparsity_layout_x: Tensor,
 
     Args:
         x (BlksprsTensor): A block-sparse tensor in compressed form.
-        y (BlksprsTensor): A block-sparse tensor in compressed form.
         sparsity_layout_x (Tensor): The sparsity layout of the first block-sparse tensor.
+        y (BlksprsTensor): A block-sparse tensor in compressed form.
         sparsity_layout_y (Tensor): The sparsity layout of the second block-sparse tensor.
         sparsity_layout_output (Tensor): The sparsity layout of the output tensor.
         sparsity_block_size (int): The size of the sparsity blocks.

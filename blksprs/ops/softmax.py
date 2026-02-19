@@ -105,7 +105,7 @@ def softmax_backward_wrapper(ctx, grad_output):
     sparsity_block_size = ctx.sparsity_block_size
 
     return softmax_backward(grad_output, o, sparsity_lut, sparsity_layout,
-                            sparsity_block_size), None, None, None, None, None
+                            sparsity_block_size), None, None, None, None
 
 
 @triton_op("blksprs::softmax_backward", mutates_args={})

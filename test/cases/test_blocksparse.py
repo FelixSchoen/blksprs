@@ -86,8 +86,8 @@ TEST_CONFIGURATIONS = [
 ]
 
 # Tolerances
-ATOL = 3e-2
-RTOL = 2e-2
+ATOL = 2e-2
+RTOL = 1.5e-2
 
 # Seed
 SEED = 0
@@ -1496,114 +1496,68 @@ def test_blksprs_flash_attention(config: tuple, use_amp: bool, use_mask: bool, u
             atol=ATOL, rtol=RTOL,
         ), "dBias mismatch"
 
+    # --- Mixed Q/K vs V dimensions sub-case ---
+    # Only run for a representative subset to avoid excessive runtime
+    if not use_mask and not use_bias and not use_amp and sbs == 32 and seq >= 128:
+        d_att_mixed = head_dim
+        d_model_mixed = head_dim * 2
+        n_head_blocks_qk_mixed = d_att_mixed // sbs
+        n_head_blocks_v_mixed = d_model_mixed // sbs
 
-@pytest.mark.parametrize("use_amp", [True, False])
-def test_blksprs_flash_attention_mixed_model_dims(use_amp: bool):
-    batch = 2
-    n_heads = 2
-    seq = 128
-    sbs = 32
-    d_att = 128
-    d_model = 256
+        v_mixed = torch.randn(n_batches, seq, d_model_mixed, device=DEVICE)
+        sl_q_mixed = torch.ones(n_batches, n_seq_blocks, n_head_blocks_qk_mixed, dtype=torch.bool, device=DEVICE)
+        sl_k_mixed = torch.ones(n_batches, n_seq_blocks, n_head_blocks_qk_mixed, dtype=torch.bool, device=DEVICE)
+        sl_v_mixed = torch.ones(n_batches, n_seq_blocks, n_head_blocks_v_mixed, dtype=torch.bool, device=DEVICE)
+        sl_o_mixed = torch.ones(n_batches, n_seq_blocks, n_head_blocks_v_mixed, dtype=torch.bool, device=DEVICE)
 
-    n_batches = batch * n_heads
-    n_seq_blocks = seq // sbs
-    n_head_blocks_qk = d_att // sbs
-    n_head_blocks_v = d_model // sbs
+        q_stock_mixed = q.clone().detach().float().requires_grad_(True)
+        k_stock_mixed = k.clone().detach().float().requires_grad_(True)
+        v_stock_mixed = v_mixed.clone().detach().float().requires_grad_(True)
 
-    q = torch.randn(n_batches, seq, d_att, device=DEVICE)
-    k = torch.randn(n_batches, seq, d_att, device=DEVICE)
-    v = torch.randn(n_batches, seq, d_model, device=DEVICE)
-
-    sparsity_layout_q = torch.ones(n_batches, n_seq_blocks, n_head_blocks_qk, dtype=torch.bool, device=DEVICE)
-    sparsity_layout_k = torch.ones(n_batches, n_seq_blocks, n_head_blocks_qk, dtype=torch.bool, device=DEVICE)
-    sparsity_layout_v = torch.ones(n_batches, n_seq_blocks, n_head_blocks_v, dtype=torch.bool, device=DEVICE)
-    sparsity_layout_o = torch.ones(n_batches, n_seq_blocks, n_head_blocks_v, dtype=torch.bool, device=DEVICE)
-    attention_layout = _get_flash_attention_layout(n_batches, n_seq_blocks, n_seq_blocks, 0.5)
-    _ensure_flash_attention_rows(attention_layout)
-
-    q_stock = q.clone().detach().float().requires_grad_(True)
-    k_stock = k.clone().detach().float().requires_grad_(True)
-    v_stock = v.clone().detach().float().requires_grad_(True)
-
-    stock_flash_out = _reference_attention_blocksparse(
-        q_stock, k_stock, v_stock, attention_layout, sbs, n_heads
-    )
-
-    q_blksprs = q.clone().detach().requires_grad_(True)
-    k_blksprs = k.clone().detach().requires_grad_(True)
-    v_blksprs = v.clone().detach().requires_grad_(True)
-
-    with torch.amp.autocast(device_type="cuda", enabled=use_amp):
-        q_sparse = bs.ops.to_sparse(q_blksprs, sparsity_layout_q, sbs)
-        k_sparse = bs.ops.to_sparse(k_blksprs, sparsity_layout_k, sbs)
-        v_sparse = bs.ops.to_sparse(v_blksprs, sparsity_layout_v, sbs)
-
-        blksprs_flash_out = bs.ops.flash_attention(
-            q_sparse, sparsity_layout_q,
-            k_sparse, sparsity_layout_k,
-            v_sparse, sparsity_layout_v,
-            attention_layout, sbs,
-            sparsity_layout_o=sparsity_layout_o,
+        stock_mixed_out = _reference_attention_blocksparse(
+            q_stock_mixed, k_stock_mixed, v_stock_mixed, attention_layout, sbs, n_heads
         )
-        blksprs_flash_dense_out = bs.ops.to_dense(blksprs_flash_out, sparsity_layout_o, sbs)
 
-    assert torch.allclose(
-        blksprs_flash_dense_out.float(), stock_flash_out, atol=ATOL, rtol=RTOL
-    ), "Forward output mismatch for mixed Q/K and V dimensions"
+        q_bs_mixed = q.clone().detach().requires_grad_(True)
+        k_bs_mixed = k.clone().detach().requires_grad_(True)
+        v_bs_mixed = v_mixed.clone().detach().requires_grad_(True)
 
-    target = torch.randn_like(stock_flash_out)
-    stock_loss = torch.nn.L1Loss()(stock_flash_out, target)
-    blksprs_loss = torch.nn.L1Loss()(blksprs_flash_dense_out.float(), target)
+        q_s_mixed = bs.ops.to_sparse(q_bs_mixed, sl_q_mixed, sbs)
+        k_s_mixed = bs.ops.to_sparse(k_bs_mixed, sl_k_mixed, sbs)
+        v_s_mixed = bs.ops.to_sparse(v_bs_mixed, sl_v_mixed, sbs)
 
-    stock_loss.backward()
-    blksprs_loss.backward()
-
-    assert torch.allclose(
-        torch.nan_to_num(q_blksprs.grad.float()),
-        torch.nan_to_num(q_stock.grad),
-        atol=ATOL, rtol=RTOL,
-    ), "dQ mismatch for mixed Q/K and V dimensions"
-    assert torch.allclose(
-        torch.nan_to_num(k_blksprs.grad.float()),
-        torch.nan_to_num(k_stock.grad),
-        atol=ATOL, rtol=RTOL,
-    ), "dK mismatch for mixed Q/K and V dimensions"
-    assert torch.allclose(
-        torch.nan_to_num(v_blksprs.grad.float()),
-        torch.nan_to_num(v_stock.grad),
-        atol=ATOL, rtol=RTOL,
-    ), "dV mismatch for mixed Q/K and V dimensions"
-
-
-def test_blksprs_flash_attention_requires_output_layout_for_mixed_dims():
-    n_batches = 2
-    seq = 128
-    sbs = 32
-    d_att = 128
-    d_model = 256
-
-    n_seq_blocks = seq // sbs
-    n_head_blocks_qk = d_att // sbs
-    n_head_blocks_v = d_model // sbs
-
-    q = torch.randn(n_batches, seq, d_att, device=DEVICE)
-    k = torch.randn(n_batches, seq, d_att, device=DEVICE)
-    v = torch.randn(n_batches, seq, d_model, device=DEVICE)
-
-    sparsity_layout_q = torch.ones(n_batches, n_seq_blocks, n_head_blocks_qk, dtype=torch.bool, device=DEVICE)
-    sparsity_layout_k = torch.ones(n_batches, n_seq_blocks, n_head_blocks_qk, dtype=torch.bool, device=DEVICE)
-    sparsity_layout_v = torch.ones(n_batches, n_seq_blocks, n_head_blocks_v, dtype=torch.bool, device=DEVICE)
-    attention_layout = torch.ones(n_batches, n_seq_blocks, n_seq_blocks, dtype=torch.bool, device=DEVICE)
-
-    q_sparse = bs.ops.to_sparse(q, sparsity_layout_q, sbs)
-    k_sparse = bs.ops.to_sparse(k, sparsity_layout_k, sbs)
-    v_sparse = bs.ops.to_sparse(v, sparsity_layout_v, sbs)
-
-    with pytest.raises(ValueError, match="sparsity_layout_o is required"):
-        bs.ops.flash_attention(
-            q_sparse, sparsity_layout_q,
-            k_sparse, sparsity_layout_k,
-            v_sparse, sparsity_layout_v,
-            attention_layout, sbs,
+        blksprs_mixed_out = bs.ops.flash_attention(
+            q_s_mixed, sl_q_mixed, k_s_mixed, sl_k_mixed, v_s_mixed, sl_v_mixed,
+            attention_layout, sbs, sparsity_layout_o=sl_o_mixed,
         )
+        blksprs_mixed_dense = bs.ops.to_dense(blksprs_mixed_out, sl_o_mixed, sbs)
+
+        assert torch.allclose(
+            blksprs_mixed_dense.float(), stock_mixed_out, atol=ATOL, rtol=RTOL
+        ), "Forward output mismatch for mixed Q/K and V dimensions"
+
+        target_mixed = torch.randn_like(stock_mixed_out)
+        torch.nn.L1Loss()(stock_mixed_out, target_mixed).backward()
+        torch.nn.L1Loss()(blksprs_mixed_dense.float(), target_mixed).backward()
+
+        assert torch.allclose(
+            torch.nan_to_num(q_bs_mixed.grad.float()), torch.nan_to_num(q_stock_mixed.grad),
+            atol=ATOL, rtol=RTOL,
+        ), "dQ mismatch for mixed Q/K and V dimensions"
+        assert torch.allclose(
+            torch.nan_to_num(k_bs_mixed.grad.float()), torch.nan_to_num(k_stock_mixed.grad),
+            atol=ATOL, rtol=RTOL,
+        ), "dK mismatch for mixed Q/K and V dimensions"
+        assert torch.allclose(
+            torch.nan_to_num(v_bs_mixed.grad.float()), torch.nan_to_num(v_stock_mixed.grad),
+            atol=ATOL, rtol=RTOL,
+        ), "dV mismatch for mixed Q/K and V dimensions"
+
+        # Verify error when sparsity_layout_o is missing with mixed dims
+        with pytest.raises(ValueError, match="sparsity_layout_o is required"):
+            bs.ops.flash_attention(
+                q_s_mixed, sl_q_mixed, k_s_mixed, sl_k_mixed, v_s_mixed, sl_v_mixed,
+                attention_layout, sbs,
+            )
+
+

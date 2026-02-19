@@ -186,7 +186,51 @@ def flash_attention(
     lut: dict = None,
     sparsity_layout_o: Tensor = None,
 ) -> BlksprsTensor:
-    """Performs block-sparse flash attention on compressed tensors."""
+    """Performs block-sparse flash attention on compressed tensors.
+
+    All inputs use the standard blksprs compressed format: tensors have shape
+    ``(n_sparse_blocks, sparsity_block_size, sparsity_block_size)`` with an
+    accompanying sparsity layout.
+
+    Args:
+        q (BlksprsTensor): Query tensor in compressed form.
+            Sparsity layout shape: ``(n_batches, seq_q // bs, head_dim // bs)``.
+        sparsity_layout_q (Tensor): Sparsity layout for Q.
+        k (BlksprsTensor): Key tensor in compressed form.
+            Sparsity layout shape: ``(n_batches, seq_k // bs, head_dim // bs)``.
+        sparsity_layout_k (Tensor): Sparsity layout for K.
+        v (BlksprsTensor): Value tensor in compressed form.
+        sparsity_layout_v (Tensor): Sparsity layout for V.
+        attention_layout (Tensor): Block attention pattern
+            ``(n_batches, seq_q // bs, seq_k // bs)`` indicating which Q-K block
+            pairs participate in attention.
+        sparsity_block_size (int): Block size for the sparsity pattern.
+        scale (float, optional): Attention scale (default: ``1/sqrt(head_dim)``).
+        attention_mask (BlksprsTensor, optional): Boolean mask in compressed form
+            where ``True`` (non-zero) means *masked* (position ignored). Does not
+            participate in gradient computation.
+        sparsity_layout_mask (Tensor, optional): Sparsity layout for the mask.
+            Shape: ``(n_batches, seq_q // bs, seq_k // bs)``.
+        attention_bias (BlksprsTensor, optional): Additive bias in compressed form,
+            added to attention scores before softmax.  Supports gradient computation.
+        sparsity_layout_bias (Tensor, optional): Sparsity layout for the bias.
+            Shape: ``(n_batches, seq_q // bs, seq_k // bs)``.
+        lut (dict, optional): Pre-computed LUT dictionary from
+            :func:`flash_attention_build_lut`.
+        sparsity_layout_o (Tensor, optional): Output sparsity layout.
+            Shape: ``(n_batches, seq_q // bs, d_v // bs)``.
+            Defaults to ``sparsity_layout_q`` if ``d_v == d_att``.
+
+    Returns:
+        BlksprsTensor: Output tensor in compressed form with layout
+        ``sparsity_layout_o``.
+
+    .. note::
+        The ``attention_mask`` convention used here (``True`` = **masked/ignored**)
+        is the same as :meth:`torch.Tensor.masked_fill` but **opposite** to
+        :func:`torch.nn.functional.scaled_dot_product_attention`, where a boolean
+        ``attn_mask`` of ``True`` means the position **participates** in attention.
+    """
     q, k, v, attention_layout = ensure_contiguous(q, k, v, attention_layout)
 
     n_batches, n_seq_blocks_q, n_seq_blocks_k, n_head_blocks_qk, n_head_blocks_v = _validate_flash_attention_inputs(
@@ -874,7 +918,7 @@ def flash_attention_bwd_dkdv_kernel(
             if has_bias:
                 rev_idx_bias = tl.load(r_lut_bias + (pid_batch * n_seq_blocks_q * n_seq_blocks_k + q_seq_block * n_seq_blocks_k + pid_k_seq)).to(tl.int32)
                 if rev_idx_bias >= 0:
-                    ds_bias = ds * 1.4426950408889634
+                    ds_bias = ds
                     dbias_blk_idx = (rev_idx_bias * dbias_b_s + offs_m[:, None] * dbias_r_s + offs_d[None, :] * dbias_c_s)
                     dbias_blk = tl.load(dbias_ptr + dbias_blk_idx).to(tl.float32)
                     dbias_blk += ds_bias

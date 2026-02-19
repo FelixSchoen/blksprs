@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4] - 2026-02-19
+
+### Added
+
+- Expose `enable_contiguous()` and `enable_validation()` in `bs.utils` to re-enable checks after disabling
+
+### Changed
+
+- Expand `flash_attention()` API documentation with detailed argument and mask semantics
+- Update README dependency note for PyTorch (`built with v2.10.0`, requires `>= v2.8.0`)
+
+### Fixed
+
+- Fix additive bias gradient scaling in flash attention backward pass
+- Fix uninitialized output values in `flow_pull_forward()` by zero-initializing the output buffer
+- Fix `softmax` backward wrapper autograd return arity
+- Add missing dimension validation checks in `broadcast_add()`
+
 ## [2.3] - 2026-02-10
 
 ### Added

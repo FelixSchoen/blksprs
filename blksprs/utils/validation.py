@@ -147,6 +147,10 @@ def disable_contiguous():
     _set_skip_contiguous(True)
 
 
+def enable_contiguous():
+    _set_skip_contiguous(False)
+
+
 def _check_skip_validation():
     return not VALIDATION
 
@@ -158,3 +162,7 @@ def _set_skip_validation(skip_validation: bool):
 
 def disable_validation():
     _set_skip_validation(True)
+
+
+def enable_validation():
+    _set_skip_validation(False)

@@ -8,7 +8,7 @@ from triton import language as tl
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import stride
-from blksprs.utils.validation import validate_contiguous, validate_device, \
+from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity_block_size, ensure_contiguous
 
 
@@ -31,6 +31,9 @@ def broadcast_add(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
     """
     x, y = ensure_contiguous(x, y)
 
+    validate_dimensions(x, dims=2)
+    validate_dimensions(y, dims=2)
+    validate_dimensions(sparsity_layout_output)
     validate_device(x, y)
     validate_contiguous(x, y)
     if x.size(-1) != y.size(-1):
