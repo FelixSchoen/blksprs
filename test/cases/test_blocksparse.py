@@ -1121,6 +1121,249 @@ def test_version():
     assert bs.__version__ == _get_version()
 
 
+# Validation error-path tests
+
+def test_validate_dimensions_rejects_wrong_dims():
+    x = torch.randn(4, 4, device=DEVICE)
+    with pytest.raises(ValueError, match="dimensions"):
+        bs.utils.validation.validate_dimensions(x)
+
+
+def test_validate_contiguous_rejects_non_contiguous():
+    x = torch.randn(2, 4, 4, device=DEVICE).transpose(-1, -2)
+    assert not x.is_contiguous()
+    with pytest.raises(ValueError, match="contiguous"):
+        bs.utils.validation.validate_contiguous(x)
+
+
+def test_validate_device_rejects_cpu():
+    x = torch.randn(2, 4, 4)
+    with pytest.raises(ValueError, match="GPU"):
+        bs.utils.validation.validate_device(x)
+
+
+def test_validate_device_rejects_different_devices():
+    x = torch.randn(2, 4, 4, device=DEVICE)
+    y = torch.randn(2, 4, 4)
+    with pytest.raises(ValueError, match="same device"):
+        bs.utils.validation.validate_device(x, y)
+
+
+def test_validate_dtype_float_rejects_int():
+    x = torch.randint(0, 10, (2, 4, 4), device=DEVICE, dtype=torch.int32)
+    with pytest.raises(ValueError, match="float"):
+        bs.utils.validation.validate_dtype_float(x)
+
+
+def test_validate_dtype_float_rejects_mixed():
+    x = torch.randn(2, 4, 4, device=DEVICE, dtype=torch.float32)
+    y = torch.randn(2, 4, 4, device=DEVICE, dtype=torch.float16)
+    with pytest.raises(ValueError, match="same dtype"):
+        bs.utils.validation.validate_dtype_float(x, y)
+
+
+def test_validate_sparsity_block_size_rejects_small():
+    with pytest.raises(ValueError, match="at least 16"):
+        bs.utils.validation.validate_sparsity_block_size(8)
+
+
+def test_validate_sparsity_block_size_rejects_non_power_of_2():
+    with pytest.raises(ValueError, match="power of 2"):
+        bs.utils.validation.validate_sparsity_block_size(48)
+
+
+def test_validate_sparsity_layout_values_rejects_bad_values():
+    x = torch.randn(2, 16, 16, device=DEVICE)
+    sl = torch.tensor([[[2, 1], [0, 1]]], dtype=torch.float32, device=DEVICE)
+    with pytest.raises(ValueError, match="0 or 1"):
+        bs.utils.validation.validate_sparsity(16, (x, sl))
+
+
+def test_disable_enable_validation():
+    bs.utils.disable_validation()
+    try:
+        # Should not raise even with wrong dims
+        x = torch.randn(4, 4, device=DEVICE)
+        bs.utils.validation.validate_dimensions(x)
+    finally:
+        bs.utils.enable_validation()
+
+    # After re-enabling, should raise again
+    with pytest.raises(ValueError, match="dimensions"):
+        bs.utils.validation.validate_dimensions(x)
+
+
+def test_disable_enable_contiguous():
+    x = torch.randn(2, 4, 4, device=DEVICE).transpose(-1, -2)
+    assert not x.is_contiguous()
+
+    bs.utils.disable_contiguous()
+    try:
+        from blksprs.utils.validation import ensure_contiguous
+        result = ensure_contiguous(x)
+        # With contiguous disabled, should return original (non-contiguous) tensor
+        assert not result.is_contiguous()
+    finally:
+        bs.utils.enable_contiguous()
+
+    # After re-enabling, should make contiguous
+    from blksprs.utils.validation import ensure_contiguous
+    result = ensure_contiguous(x)
+    assert result.is_contiguous()
+
+
+# Scatter without reduce
+
+SCATTER_NONE_CONFIGURATIONS = [
+    # Only test non-overlapping indices to avoid non-determinism
+    # (b, m, n, k, sparsity_block_size, sparsity_percentage)
+    (2, 64, 64, 64, 32, 0),
+    (2, 128, 128, 128, 64, 0),
+    (2, 64, 64, 64, 32, 0.75),
+    (4, 128, 128, 128, 64, 0.75),
+]
+
+
+@pytest.mark.parametrize("config", SCATTER_NONE_CONFIGURATIONS)
+def test_blksprs_scatter_none(config: list):
+    b, m, n, k, sparsity_block_size, sparsity_percentage = config
+
+    dims = [-2, -1, 1, 2]
+    for dim in dims:
+        x_d = torch.randn(size=(b, m, k), device=DEVICE)
+        sparsity_layout_x_d = torch.ones(size=(b, m // sparsity_block_size, k // sparsity_block_size),
+                                         device=DEVICE)
+
+        # Build non-overlapping (unique) indices to avoid data races
+        if dim % 3 == 1:
+            # dim along rows: scatter each row to a unique destination
+            i_d = torch.arange(m, device=DEVICE).unsqueeze(0).unsqueeze(-1).expand(b, m, k).contiguous().to(torch.int)
+            dist_lim_r = m
+            dist_lim_c = k
+        elif dim % 3 == 2:
+            # dim along cols: scatter each col to a unique destination
+            i_d = torch.arange(k, device=DEVICE).unsqueeze(0).unsqueeze(0).expand(b, m, k).contiguous().to(torch.int)
+            dist_lim_r = m
+            dist_lim_c = k
+        else:
+            continue  # Skip batch dim for simplicity
+
+        sparsity_layout_o_d = torch.ones(
+            size=(b, dist_lim_r // sparsity_block_size, dist_lim_c // sparsity_block_size),
+            device=DEVICE)
+
+        x_stock = x_d.clone()
+        stock_out = torch.zeros(size=(b, dist_lim_r, dist_lim_c), dtype=x_stock.dtype, device=DEVICE)
+        stock_out.scatter_(dim=dim, index=i_d.to(torch.int64), src=x_stock)
+        stock_out = _blocksparse_roundtrip(stock_out, sparsity_layout_o_d, sparsity_block_size)
+
+        x_sparse = bs.ops.to_sparse(x_d, sparsity_layout_x_d, sparsity_block_size)
+        i_sparse = bs.ops.to_sparse(i_d, sparsity_layout_x_d, sparsity_block_size)
+
+        blksprs_scatter_out = bs.ops.scatter(x_sparse, sparsity_layout_x_d, dim, i_sparse,
+                                             sparsity_layout_o_d, sparsity_block_size)
+        blksprs_dense_out = bs.ops.to_dense(blksprs_scatter_out, sparsity_layout_o_d, sparsity_block_size)
+
+        assert torch.allclose(blksprs_dense_out, stock_out, atol=ATOL, rtol=RTOL)
+
+
+# Flash attention performance benchmark
+
+@pytest.mark.parametrize("seq_len", [512, 1024, 2048])
+def test_flash_attention_performance(seq_len: int):
+    """Tests that flash attention is faster than regular attention for larger sequence lengths."""
+    n_batches = 2
+    n_heads = 4
+    head_dim = 64
+    sbs = 32
+    sparsity_percentage = 0.5
+
+    n_seq_blocks = seq_len // sbs
+    n_head_blocks = head_dim // sbs
+    total_batches = n_batches * n_heads
+
+    q = torch.randn(total_batches, seq_len, head_dim, device=DEVICE)
+    k = torch.randn(total_batches, seq_len, head_dim, device=DEVICE)
+    v = torch.randn(total_batches, seq_len, head_dim, device=DEVICE)
+
+    sparsity_layout_qkv = torch.ones(total_batches, n_seq_blocks, n_head_blocks, dtype=torch.bool, device=DEVICE)
+
+    attention_layout = _get_flash_attention_layout(total_batches, n_seq_blocks, n_seq_blocks, sparsity_percentage)
+    _ensure_flash_attention_rows(attention_layout)
+
+    q_sparse = bs.ops.to_sparse(q, sparsity_layout_qkv, sbs)
+    k_sparse = bs.ops.to_sparse(k, sparsity_layout_qkv, sbs)
+    v_sparse = bs.ops.to_sparse(v, sparsity_layout_qkv, sbs)
+
+    # Pre-compute transpose and layouts for regular attention
+    k_t, sparsity_layout_kt = bs.ops.transpose(k_sparse, sparsity_layout_qkv, sbs)
+    sparsity_layout_attn = bs.layouting.build_sparsity_layout_matmul(sparsity_layout_qkv, sparsity_layout_kt)
+    sparsity_layout_o = bs.layouting.build_sparsity_layout_matmul(sparsity_layout_attn, sparsity_layout_qkv)
+
+    # --- Regular (matmul-based) attention ---
+    def regular_attention():
+        attn_scores = bs.ops.matmul(q_sparse, sparsity_layout_qkv,
+                                    k_t, sparsity_layout_kt,
+                                    sparsity_layout_attn, sbs)
+        attn_probs = bs.ops.softmax(attn_scores, sparsity_layout_attn, sbs)
+        output = bs.ops.matmul(attn_probs, sparsity_layout_attn,
+                               v_sparse, sparsity_layout_qkv,
+                               sparsity_layout_o, sbs)
+        return output
+
+    # --- Flash attention ---
+    def flash_attention():
+        output = bs.ops.flash_attention(
+            q_sparse, sparsity_layout_qkv,
+            k_sparse, sparsity_layout_qkv,
+            v_sparse, sparsity_layout_qkv,
+            attention_layout, sbs,
+        )
+        return output
+
+    # Warmup
+    n_warmup = 3
+    n_runs = 10
+
+    for _ in range(n_warmup):
+        regular_attention()
+        flash_attention()
+    torch.cuda.synchronize()
+
+    # Time regular attention
+    start_events_reg = [torch.cuda.Event(enable_timing=True) for _ in range(n_runs)]
+    end_events_reg = [torch.cuda.Event(enable_timing=True) for _ in range(n_runs)]
+    for i in range(n_runs):
+        start_events_reg[i].record()
+        regular_attention()
+        end_events_reg[i].record()
+    torch.cuda.synchronize()
+    regular_times = [s.elapsed_time(e) for s, e in zip(start_events_reg, end_events_reg)]
+    median_regular = sorted(regular_times)[n_runs // 2]
+
+    # Time flash attention
+    start_events_flash = [torch.cuda.Event(enable_timing=True) for _ in range(n_runs)]
+    end_events_flash = [torch.cuda.Event(enable_timing=True) for _ in range(n_runs)]
+    for i in range(n_runs):
+        start_events_flash[i].record()
+        flash_attention()
+        end_events_flash[i].record()
+    torch.cuda.synchronize()
+    flash_times = [s.elapsed_time(e) for s, e in zip(start_events_flash, end_events_flash)]
+    median_flash = sorted(flash_times)[n_runs // 2]
+
+    speedup = median_regular / median_flash if median_flash > 0 else float("inf")
+
+    print(f"\n[seq_len={seq_len}] Regular: {median_regular:.3f}ms, Flash: {median_flash:.3f}ms, "
+          f"Speedup: {speedup:.2f}x")
+
+    # Flash should be faster at seq_len >= 512 (conservative threshold)
+    if seq_len >= 512:
+        assert speedup > 1.0, (
+            f"Flash attention should be faster than regular attention at seq_len={seq_len}, "
+            f"but got speedup={speedup:.2f}x (regular={median_regular:.3f}ms, flash={median_flash:.3f}ms)"
+        )
+
 # Utility
 
 def _get_blocksparse_layout(b, m, n, sparsity_block_size, sparsity_percentage):

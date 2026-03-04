@@ -7,7 +7,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE.md"]
-dependencies = ["torch >= 2.8.0", "numpy"]
+dependencies = ["torch >= 2.8.0"]
 
 [project.urls]
 "Homepage" = "https://github.com/FelixSchoen/blksprs"
@@ -21,6 +21,7 @@ test = [
     "coverage",
     "build",
     "matplotlib",
+    "numpy",
 ]
 
 [build-system]

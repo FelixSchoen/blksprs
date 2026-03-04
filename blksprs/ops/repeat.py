@@ -4,6 +4,7 @@ from torch._library import triton_op
 
 from blksprs.ops.flow import flow_pull_forward, flow_push_forward
 from blksprs.utils.blksprs_tensor import BlksprsTensor
+from blksprs.utils.tools import build_reverse_lut
 from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_device, \
     validate_sparsity, validate_sparsity_block_size, ensure_contiguous
 
@@ -129,10 +130,7 @@ def repeat_build_lut(lut: dict, sparsity_layout_x: Tensor, repeats: tuple[int, i
         lut["sparsity_lut"] = sparsity_lut
 
     if "sparsity_reverse_lut" not in lut:
-        sparsity_layout_flat = sparsity_layout_x.reshape(-1)
-        sparsity_reverse_lut = (((torch.cumsum(sparsity_layout_flat, dim=-1) - 1) *
-                                 (sparsity_layout_flat == 1) -
-                                 (1 * (sparsity_layout_flat == 0)))
+        sparsity_reverse_lut = (build_reverse_lut(sparsity_layout_x)
                                 .reshape(sparsity_layout_x.size())
                                 .repeat(repeats[0], repeats[1], repeats[2])
                                 .reshape(-1).contiguous())
@@ -165,10 +163,7 @@ def repeat_interleave_build_lut(lut: dict, sparsity_layout_x: Tensor, repeats: i
         lut["sparsity_lut"] = sparsity_lut
 
     if "sparsity_reverse_lut" not in lut:
-        sparsity_layout_flat = sparsity_layout_x.reshape(-1)
-        sparsity_reverse_lut = (((torch.cumsum(sparsity_layout_flat, dim=-1) - 1) *
-                                 (sparsity_layout_flat == 1) -
-                                 (1 * (sparsity_layout_flat == 0)))
+        sparsity_reverse_lut = (build_reverse_lut(sparsity_layout_x)
                                 .reshape(sparsity_layout_x.size())
                                 .repeat_interleave(repeats, dim=0)
                                 .reshape(-1).contiguous())

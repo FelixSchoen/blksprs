@@ -1,11 +1,23 @@
+import threading
+
 import torch
 from torch import Tensor
 
-CONTIGUOUS = True
-VALIDATION = True
+_thread_local = threading.local()
+
+_CONTIGUOUS_DEFAULT = True
+_VALIDATION_DEFAULT = True
 
 
-def ensure_contiguous(*tensors: Tensor) -> tuple[Tensor, ...]:
+def _get_contiguous():
+    return getattr(_thread_local, "contiguous", _CONTIGUOUS_DEFAULT)
+
+
+def _get_validation():
+    return getattr(_thread_local, "validation", _VALIDATION_DEFAULT)
+
+
+def ensure_contiguous(*tensors: Tensor) -> tuple[Tensor, ...] | Tensor:
     transformed = tensors
 
     if _check_contiguous():
@@ -135,34 +147,28 @@ def validate_sparsity_block_size(sparsity_block_size: int, *tensors):
 
 
 def _check_contiguous():
-    return CONTIGUOUS
-
-
-def _set_skip_contiguous(skip_contiguous: bool):
-    global CONTIGUOUS
-    CONTIGUOUS = not skip_contiguous
+    return _get_contiguous()
 
 
 def disable_contiguous():
-    _set_skip_contiguous(True)
+    """Disables automatic contiguous conversion for the current thread."""
+    _thread_local.contiguous = False
 
 
 def enable_contiguous():
-    _set_skip_contiguous(False)
+    """Enables automatic contiguous conversion for the current thread."""
+    _thread_local.contiguous = True
 
 
 def _check_skip_validation():
-    return not VALIDATION
-
-
-def _set_skip_validation(skip_validation: bool):
-    global VALIDATION
-    VALIDATION = not skip_validation
+    return not _get_validation()
 
 
 def disable_validation():
-    _set_skip_validation(True)
+    """Disables input validation for the current thread."""
+    _thread_local.validation = False
 
 
 def enable_validation():
-    _set_skip_validation(False)
+    """Enables input validation for the current thread."""
+    _thread_local.validation = True

@@ -6,9 +6,9 @@ from triton import language as tl
 
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import stride
+from blksprs.utils.tools import stride, build_reverse_lut
 from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_device, validate_sparsity, \
-    validate_sparsity_block_size, ensure_contiguous
+    validate_sparsity_block_size, validate_dtype_float, ensure_contiguous
 
 
 @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float32)
@@ -21,6 +21,9 @@ def row_wise_sum(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size:
 
     Note:
         If ``flag_slice_only`` is set the output will be of shape ``[x.size(0), x.size(1), 1]``.
+
+    Note:
+        This operation does not support gradient computation.
 
     Args:
         x (BlksprsTensor): A block-sparse tensor in compressed form.
@@ -38,6 +41,7 @@ def row_wise_sum(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size:
 
     validate_dimensions(x)
     validate_contiguous(x)
+    validate_dtype_float(x)
     validate_device(x)
     validate_sparsity(sparsity_block_size, (x, sparsity_layout))
     validate_sparsity_block_size(sparsity_block_size, x)
@@ -45,10 +49,7 @@ def row_wise_sum(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size:
     sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
 
     sparsity_layout_output, _ = torch.max(sparsity_layout, dim=-1, keepdim=True)
-    sparsity_layout_output_flat = sparsity_layout_output.reshape(-1)
-    sparsity_reverse_lut_output = ((torch.cumsum(sparsity_layout_output_flat, dim=-1) - 1) *
-                                   (sparsity_layout_output_flat == 1) -
-                                   (1 * (sparsity_layout_output_flat == 0)))
+    sparsity_reverse_lut_output = build_reverse_lut(sparsity_layout_output)
 
     n_sparse_blocks_output = torch.sum(sparsity_layout_output.to(torch.int)).item()
 
@@ -152,7 +153,7 @@ def row_wise_sum_kernel(x,
         tl.atomic_add(o + o_idx, buf, o_msk)
 
 
-@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
+@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float32)
 def row_wise_max(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
                  flag_slice_only: bool = False) -> (BlksprsTensor, Tensor):
     """Computes the row-wise max of a block-sparse tensor.
@@ -162,6 +163,9 @@ def row_wise_max(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size:
 
     Note:
         If ``flag_slice_only`` is set the output will be of shape ``[x.size(0), x.size(1), 1]``.
+
+    Note:
+        This operation does not support gradient computation.
 
     Args:
         x (BlksprsTensor): A block-sparse tensor in compressed form.
@@ -186,10 +190,7 @@ def row_wise_max(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size:
     sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
 
     sparsity_layout_output, _ = torch.max(sparsity_layout, dim=-1, keepdim=True)
-    sparsity_layout_output_flat = sparsity_layout_output.reshape(-1)
-    sparsity_reverse_lut_output = ((torch.cumsum(sparsity_layout_output_flat, dim=-1) - 1) *
-                                   (sparsity_layout_output_flat == 1) -
-                                   (1 * (sparsity_layout_output_flat == 0)))
+    sparsity_reverse_lut_output = build_reverse_lut(sparsity_layout_output)
 
     n_sparse_blocks_output = torch.sum(sparsity_layout_output.to(torch.int)).item()
 
@@ -295,10 +296,13 @@ def row_wise_max_kernel(x,
         tl.atomic_max(o + o_idx, buf, o_msk)
 
 
-@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
+@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float32)
 def row_wise_add(x: BlksprsTensor, sparsity_layout_x: Tensor, y: Tensor,
                  sparsity_block_size: int) -> BlksprsTensor:
     """For each row in ``y`` adds the value to each value in the corresponding row of the block-sparse tensor ``x``.
+
+    Note:
+        This operation does not support gradient computation.
 
     Args:
         x (BlksprsTensor): A block-sparse tensor in compressed form.
@@ -322,10 +326,7 @@ def row_wise_add(x: BlksprsTensor, sparsity_layout_x: Tensor, y: Tensor,
     sparsity_lut_x = torch.nonzero(sparsity_layout_x).contiguous()
 
     sparsity_layout_rwm, _ = torch.max(sparsity_layout_x, dim=-1, keepdim=True)
-    sparsity_layout_rwm_flat = sparsity_layout_rwm.reshape(-1)
-    sparsity_reverse_lut_rwm = ((torch.cumsum(sparsity_layout_rwm_flat, dim=-1) - 1) *
-                                (sparsity_layout_rwm_flat == 1) -
-                                (1 * (sparsity_layout_rwm_flat == 0)))
+    sparsity_reverse_lut_rwm = build_reverse_lut(sparsity_layout_rwm)
 
     validate_contiguous(sparsity_layout_x, sparsity_lut_x, sparsity_reverse_lut_rwm)
 

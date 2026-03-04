@@ -18,6 +18,9 @@ def broadcast_add(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
     """Performs a broadcast and subsequent addition of two dense tensors x and y. Returns a block-sparse tensor in
         compressed form.
 
+    Note:
+        This operation does not support gradient computation.
+
     Args:
         x (Tensor): A dense input tensor.
         y (Tensor): A dense input tensor.

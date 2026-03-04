@@ -7,7 +7,7 @@ from triton import language as tl
 from blksprs.layouting.sparsity_layout import build_sparsity_layout_adaption
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs, prune_autotune_configs_conversion
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import stride
+from blksprs.utils.tools import stride, build_reverse_lut
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity, validate_sparsity_block_size, validate_sparsity_dense, ensure_contiguous
 
@@ -297,11 +297,7 @@ def to_dense_build_lut(lut: dict, sparsity_layout: Tensor):
         lut = dict()
 
     if "sparsity_reverse_lut" not in lut:
-        sparsity_layout_flat = sparsity_layout.reshape(-1)
-        sparsity_reverse_lut = ((torch.cumsum(sparsity_layout_flat, dim=-1) - 1) *
-                                (sparsity_layout_flat == 1) -
-                                (1 * (sparsity_layout_flat == 0)))
-        lut["sparsity_reverse_lut"] = sparsity_reverse_lut
+        lut["sparsity_reverse_lut"] = build_reverse_lut(sparsity_layout)
 
     validate_contiguous(lut["sparsity_reverse_lut"])
 
@@ -346,10 +342,7 @@ def adapt_layout(x: BlksprsTensor, sparsity_layout_from: Tensor, sparsity_block_
     validate_sparsity_block_size(sparsity_block_size_from, x)
     validate_sparsity_block_size(sparsity_block_size_to)
 
-    sparsity_layout_from_flat = sparsity_layout_from.reshape(-1)
-    sparsity_reverse_lut_from = ((torch.cumsum(sparsity_layout_from_flat, dim=-1) - 1) *
-                                 (sparsity_layout_from_flat == 1) -
-                                 (1 * (sparsity_layout_from_flat == 0)))
+    sparsity_reverse_lut_from = build_reverse_lut(sparsity_layout_from)
 
     if sparsity_layout_to is None:
         sparsity_layout_to = build_sparsity_layout_adaption(x, sparsity_layout_from,

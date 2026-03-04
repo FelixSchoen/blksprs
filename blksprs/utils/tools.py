@@ -1,4 +1,25 @@
+import torch
 from torch import Tensor, Size
+
+
+def build_reverse_lut(sparsity_layout: Tensor) -> Tensor:
+    """Builds a reverse look-up table from a sparsity layout.
+
+    Maps each position in the flattened sparsity layout to its index among the non-zero elements. Positions
+    corresponding to zero entries are mapped to ``-1``.
+
+    Args:
+        sparsity_layout (Tensor): A sparsity layout tensor containing only ``0`` and ``1`` values.
+
+    Returns:
+        Tensor: A 1D tensor of the same length as the flattened input, where each position holds the cumulative
+            index of the non-zero entry, or ``-1`` if the entry is zero.
+
+    """
+    sparsity_layout_flat = sparsity_layout.reshape(-1)
+    return ((torch.cumsum(sparsity_layout_flat, dim=-1) - 1) *
+            (sparsity_layout_flat == 1) -
+            (1 * (sparsity_layout_flat == 0)))
 
 
 def do_shape_blocksparse(x: Tensor) -> tuple[Tensor, Size]:

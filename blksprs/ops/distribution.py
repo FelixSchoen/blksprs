@@ -7,7 +7,7 @@ from triton import language as tl
 
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import stride
+from blksprs.utils.tools import stride, build_reverse_lut
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity, validate_dtype_int, validate_sparsity_block_size, ensure_contiguous
 
@@ -192,11 +192,7 @@ def gather_build_lut(lut: dict, sparsity_layout_src: Tensor, sparsity_layout_idx
         lut = dict()
 
     if "sparsity_reverse_lut_x" not in lut:
-        sparsity_layout_x_flat = sparsity_layout_src.reshape(-1)
-        sparsity_reverse_lut_x = ((torch.cumsum(sparsity_layout_x_flat, dim=-1) - 1) *
-                                  (sparsity_layout_x_flat == 1) -
-                                  (1 * (sparsity_layout_x_flat == 0)))
-        lut["sparsity_reverse_lut_x"] = sparsity_reverse_lut_x
+        lut["sparsity_reverse_lut_x"] = build_reverse_lut(sparsity_layout_src)
 
     if "sparsity_lut_i" not in lut:
         sparsity_lut_i = torch.nonzero(sparsity_layout_idx).contiguous()
@@ -226,6 +222,11 @@ def scatter(src: BlksprsTensor, sparsity_layout_src: Tensor,
             sparsity_layout_tgt: Tensor,
             sparsity_block_size: int, lut: dict = None) -> BlksprsTensor:
     """Wrapper for ``scatter_reduce`` with ``reduce_op="none"``.
+
+    Warning:
+        When multiple source elements map to the same output position, the result is non-deterministic due
+        to concurrent writes. Use :func:`scatter_reduce` with ``reduce_op="sum"`` for deterministic behaviour
+        with overlapping indices.
 
     """
     return scatter_reduce(src, sparsity_layout_src,
@@ -443,11 +444,7 @@ def scatter_reduce_build_lut(lut: dict, sparsity_layout_src: Tensor, sparsity_la
         lut["sparsity_lut_x"] = sparsity_lut_x
 
     if "sparsity_reverse_lut_o" not in lut:
-        sparsity_layout_o_flat = sparsity_layout_tgt.reshape(-1)
-        sparsity_reverse_lut_o = ((torch.cumsum(sparsity_layout_o_flat, dim=-1) - 1) *
-                                  (sparsity_layout_o_flat == 1) -
-                                  (1 * (sparsity_layout_o_flat == 0)))
-        lut["sparsity_reverse_lut_o"] = sparsity_reverse_lut_o
+        lut["sparsity_reverse_lut_o"] = build_reverse_lut(sparsity_layout_tgt)
 
     if "n_sparse_blocks" not in lut:
         n_sparse_blocks = torch.sum(sparsity_layout_tgt.to(torch.int)).item()

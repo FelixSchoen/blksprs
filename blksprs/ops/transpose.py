@@ -4,6 +4,7 @@ from torch._library import triton_op
 
 from blksprs.ops.flow import flow_pull_forward
 from blksprs.utils.blksprs_tensor import BlksprsTensor
+from blksprs.utils.tools import build_reverse_lut
 from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_device, \
     validate_sparsity, validate_sparsity_block_size, ensure_contiguous
 
@@ -73,10 +74,7 @@ def transpose_build_lut(lut: dict, sparsity_layout: Tensor):
         lut["sparsity_lut"] = sparsity_lut
 
     if "sparsity_reverse_lut" not in lut:
-        sparsity_layout_flat = sparsity_layout.reshape(-1)
-        sparsity_reverse_lut = (((torch.cumsum(sparsity_layout_flat, dim=-1) - 1) *
-                                 (sparsity_layout_flat == 1) -
-                                 (1 * (sparsity_layout_flat == 0)))
+        sparsity_reverse_lut = (build_reverse_lut(sparsity_layout)
                                 .reshape(sparsity_layout.size()).transpose(-1, -2).contiguous().reshape(-1))
         lut["sparsity_reverse_lut"] = sparsity_reverse_lut
 

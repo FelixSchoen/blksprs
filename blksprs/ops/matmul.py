@@ -7,7 +7,7 @@ from triton import language as tl
 from blksprs.ops.transpose import transpose
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import stride
+from blksprs.utils.tools import stride, build_reverse_lut
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity, validate_sparsity_block_size, validate_dtype_float, ensure_contiguous
 
@@ -217,18 +217,10 @@ def matmul_build_lut(lut: dict, sparsity_layout_x: Tensor, sparsity_layout_y: Te
         lut = dict()
 
     if "sparsity_reverse_lut_x" not in lut:
-        sparsity_layout_x_flat = sparsity_layout_x.reshape(-1)
-        sparsity_reverse_lut_x = ((torch.cumsum(sparsity_layout_x_flat, dim=-1) - 1) *
-                                  (sparsity_layout_x_flat == 1) -
-                                  (1 * (sparsity_layout_x_flat == 0)))
-        lut["sparsity_reverse_lut_x"] = sparsity_reverse_lut_x
+        lut["sparsity_reverse_lut_x"] = build_reverse_lut(sparsity_layout_x)
 
     if "sparsity_reverse_lut_y" not in lut:
-        sparsity_layout_y_flat = sparsity_layout_y.reshape(-1)
-        sparsity_reverse_lut_y = ((torch.cumsum(sparsity_layout_y_flat, dim=-1) - 1) *
-                                  (sparsity_layout_y_flat == 1) -
-                                  (1 * (sparsity_layout_y_flat == 0)))
-        lut["sparsity_reverse_lut_y"] = sparsity_reverse_lut_y
+        lut["sparsity_reverse_lut_y"] = build_reverse_lut(sparsity_layout_y)
 
     if "sparsity_lut_o" not in lut:
         sparsity_lut_o = torch.nonzero(sparsity_layout_output).contiguous()

@@ -8,7 +8,7 @@ from triton import language as tl
 from blksprs.ops.misc.row_wise import row_wise_sum, row_wise_max, row_wise_sub
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import stride, ceil_pow2
+from blksprs.utils.tools import stride, ceil_pow2, build_reverse_lut
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity, validate_sparsity_block_size, validate_dtype_float_32, ensure_contiguous
 
@@ -27,7 +27,10 @@ def softmax(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
 @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float32)
 def softmax_regular(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
                     lut: dict = None) -> BlksprsTensor:
-    """Computes the softmax of a block-sparse tensor in compressed form.
+    """Computes the row-wise softmax of a block-sparse tensor in compressed form.
+
+    Operates across all blocks within each row to compute the softmax, correctly handling the row-wise
+    maximum and sum across block boundaries.
 
     Note:
         Sparse blocks are not considered for the calculation of the softmax, i.e., all values are assumed to be ``-inf``.
@@ -116,10 +119,7 @@ def softmax_backward(grad_output: Tensor, o: Tensor, sparsity_lut: Tensor, spars
 
         s, sparsity_layout_s = row_wise_sum(grad_output * o, sparsity_layout, sparsity_block_size, flag_slice_only=True)
 
-        sparsity_layout_s_flat = sparsity_layout_s.reshape(-1)
-        sparsity_reverse_lut_s = ((torch.cumsum(sparsity_layout_s_flat, dim=-1) - 1) *
-                                  (sparsity_layout_s_flat == 1) -
-                                  (1 * (sparsity_layout_s_flat == 0)))
+        sparsity_reverse_lut_s = build_reverse_lut(sparsity_layout_s)
 
         o_b, o_r, o_c = o.size()
         o_b_s, o_r_s, o_c_s = stride(o)
@@ -294,11 +294,7 @@ def softmax_build_lut(lut: dict, sparsity_layout: Tensor):
 
     if "sparsity_reverse_lut_rws" not in lut:
         sparsity_layout_rws, _ = torch.max(sparsity_layout, dim=-1, keepdim=True)
-        sparsity_layout_rws_flat = sparsity_layout_rws.reshape(-1)
-        sparsity_reverse_lut_rws = ((torch.cumsum(sparsity_layout_rws_flat, dim=-1) - 1) *
-                                    (sparsity_layout_rws_flat == 1) -
-                                    (1 * (sparsity_layout_rws_flat == 0)))
-        lut["sparsity_reverse_lut_rws"] = sparsity_reverse_lut_rws
+        lut["sparsity_reverse_lut_rws"] = build_reverse_lut(sparsity_layout_rws)
 
     validate_contiguous(sparsity_layout, lut["sparsity_lut"], lut["sparsity_reverse_lut_rws"])
 
@@ -319,11 +315,10 @@ softmax_forward.register_autograd(softmax_backward_wrapper, setup_context=softma
 @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float32)
 def softmax_fused(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
                   lut: dict = None) -> BlksprsTensor:
-    """Computes the softmax fused for each row of a block-sparse tensor in compressed form.
+    """Computes the row-wise softmax of a block-sparse tensor in compressed form using a fused kernel.
 
-    Note:
-        This softmax implementation is a fused version that loads the entire row of a block-sparse tensor into memory.
-        See :func:`softmax` for a true block-wise softmax implementation.
+    This implementation loads all blocks of each row into memory simultaneously, enabling a single-pass
+    softmax computation. Faster than :func:`softmax_regular` but requires that each row fits in GPU shared memory.
 
     Args:
         x (BlksprsTensor): A block-sparse tensor in compressed form.
@@ -542,14 +537,17 @@ def softmax_fused_kernel_grad(g,
 
 
 def softmax_fused_build_lut(lut: dict, sparsity_layout: Tensor):
+    """Builds look-up tables for the fused softmax operation.
+
+    Note:
+        The ``max_blocks_line`` value is rounded up to the nearest power of 2, as required by the Triton kernel.
+
+    """
     if lut is None:
         lut = dict()
 
     if "sparsity_reverse_lut_sorted" not in lut:
-        sparsity_layout_flat = sparsity_layout.reshape(-1)
-        sparsity_reverse_lut_sorted = (((torch.cumsum(sparsity_layout_flat, dim=-1) - 1) *
-                                        (sparsity_layout_flat == 1) -
-                                        (1 * (sparsity_layout_flat == 0)))
+        sparsity_reverse_lut_sorted = (build_reverse_lut(sparsity_layout)
                                        .reshape(sparsity_layout.size())
                                        .sort(descending=True, dim=-1)[0]
                                        .reshape(-1).contiguous())
