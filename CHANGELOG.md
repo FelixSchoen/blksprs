@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.2] - 2026-04-08
+
+### Added
+
+- Add shaped conversion convenience wrappers `to_sparse_shaped()` and `to_dense_shaped()`
+- Add row-striped conversion helpers `is_row_striped_layout()`, `to_sparse_row_striped()`, and `to_dense_row_striped()`
+- Add `apply_torch_linear_cached()` utility for repeated sparse linear projections with cached packed weights
+
+### Changed
+
+- Expose the new conversion helpers via `bs.ops`
+- Expose `apply_torch_linear_cached()` via `bs.utils`
+- Optimize dense-to-sparse and sparse-to-dense conversion for row-striped sequence-feature layouts
+
 ## [2.3.1] - 2026-02-19
 
 ### Added
