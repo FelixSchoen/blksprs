@@ -19,6 +19,120 @@ def to_blksprs(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int) -> 
     return to_sparse(x, sparsity_layout, sparsity_block_size)
 
 
+def to_sparse_shaped(x: Tensor,
+                     sparsity_layout: Tensor,
+                     sparsity_block_size: int,
+                     lut: dict = None) -> BlksprsTensor:
+    """Converts an already block-shaped dense tensor to compressed form.
+
+    This is a named convenience wrapper around :func:`to_sparse` for call sites
+    that already operate on ``(B, rows, cols)`` tensors and therefore do not
+    need a preceding ``do_shape_blocksparse`` step.
+
+    Args:
+        x (Tensor): Dense tensor in block-shaped form.
+        sparsity_layout (Tensor): Sparsity layout for ``x``.
+        sparsity_block_size (int): Size of the sparsity blocks.
+        lut (dict, optional): Optional conversion LUT cache.
+
+    Returns:
+        BlksprsTensor: ``x`` converted to compressed block-sparse form.
+    """
+    return to_sparse(x, sparsity_layout, sparsity_block_size, lut=lut)
+
+
+def is_row_striped_layout(sparsity_layout: Tensor, lut: dict = None) -> bool:
+    """Check whether a sparsity layout is dense along columns for active rows.
+
+    A row-striped layout marks either all blocks or no blocks in a given row.
+    This pattern appears in sequence-feature tensors where only selected
+    sequence rows are active while the feature dimension stays dense.
+
+    Args:
+        sparsity_layout (Tensor): Layout to inspect.
+        lut (dict, optional): Optional mutable cache for derived row metadata.
+
+    Returns:
+        bool: ``True`` if the layout is row-striped, ``False`` otherwise.
+    """
+    if lut is None:
+        lut = dict()
+
+    row_striped_build_lut(lut, sparsity_layout)
+    return lut["is_row_striped"]
+
+
+def to_sparse_row_striped(x: Tensor,
+                          sparsity_layout: Tensor,
+                          sparsity_block_size: int,
+                          lut: dict = None) -> BlksprsTensor:
+    """Convert a block-shaped dense tensor with row-striped sparsity to compressed form.
+
+    This specialised path is faster than :func:`to_sparse` when the sparsity
+    layout activates complete feature rows, because it can gather contiguous
+    row blocks directly instead of running the generic sparse conversion
+    kernel.
+
+    Args:
+        x (Tensor): Dense tensor in block-shaped form.
+        sparsity_layout (Tensor): Row-striped sparsity layout for ``x``.
+        sparsity_block_size (int): Size of the sparsity blocks.
+        lut (dict, optional): Optional conversion LUT cache.
+
+    Returns:
+        BlksprsTensor: ``x`` converted to compressed block-sparse form.
+    """
+    x = ensure_contiguous(x)
+
+    validate_dimensions(x)
+    validate_contiguous(x)
+    validate_device(x)
+    validate_sparsity_dense(sparsity_block_size, (x, sparsity_layout))
+    validate_sparsity_block_size(sparsity_block_size, x)
+
+    lut = row_striped_build_lut(lut, sparsity_layout)
+
+    if not lut["is_row_striped"]:
+        raise ValueError("to_sparse_row_striped requires a row-striped sparsity layout.")
+
+    if lut["n_sparse_blocks"] == 0:
+        return BlksprsTensor.wrap(torch.empty(
+            (0, sparsity_block_size, sparsity_block_size),
+            dtype=x.dtype,
+            device=x.device,
+        ))
+
+    if lut["n_active_row_blocks"] == lut["n_total_row_blocks"]:
+        x_blocks = (
+            x.reshape(
+                x.size(0),
+                sparsity_layout.size(1),
+                sparsity_block_size,
+                sparsity_layout.size(2),
+                sparsity_block_size,
+            )
+            .permute(0, 1, 3, 2, 4)
+            .contiguous()
+        )
+        return BlksprsTensor.wrap(x_blocks.reshape(-1, sparsity_block_size, sparsity_block_size))
+
+    x_blocks_flat = (
+        x.reshape(
+            x.size(0),
+            sparsity_layout.size(1),
+            sparsity_block_size,
+            sparsity_layout.size(2),
+            sparsity_block_size,
+        )
+        .permute(0, 1, 3, 2, 4)
+        .reshape(-1, sparsity_layout.size(2), sparsity_block_size, sparsity_block_size)
+        .contiguous()
+    )
+    selected_rows = x_blocks_flat.index_select(0, lut["active_row_flat_indices"])
+
+    return BlksprsTensor.wrap(selected_rows.reshape(-1, sparsity_block_size, sparsity_block_size))
+
+
 @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
 def to_sparse(x: Tensor, sparsity_layout: Tensor,
               sparsity_block_size: int, lut: dict = None) -> BlksprsTensor:
@@ -169,6 +283,101 @@ def from_blksprs(x: BlksprsTensor, sparsity_layout: Tensor,
     return to_dense(x, sparsity_layout, sparsity_block_size, fill_value=fill_value, lut=lut)
 
 
+def to_dense_shaped(x: BlksprsTensor,
+                    sparsity_layout: Tensor,
+                    sparsity_block_size: int,
+                    fill_value: float = 0,
+                    lut: dict = None) -> Tensor:
+    """Converts a compressed tensor back to an already block-shaped dense tensor.
+
+    This is a named convenience wrapper around :func:`to_dense` for call sites
+    that want the dense ``(B, rows, cols)`` tensor directly and do not need an
+    ``undo_shape_blocksparse`` step afterwards.
+
+    Args:
+        x (BlksprsTensor): Tensor in compressed block-sparse form.
+        sparsity_layout (Tensor): Sparsity layout for ``x``.
+        sparsity_block_size (int): Size of the sparsity blocks.
+        fill_value (float): Fill value for sparse regions.
+        lut (dict, optional): Optional conversion LUT cache.
+
+    Returns:
+        Tensor: Dense tensor in block-shaped form.
+    """
+    return to_dense(x, sparsity_layout, sparsity_block_size, fill_value=fill_value, lut=lut)
+
+
+def to_dense_row_striped(x: BlksprsTensor,
+                         sparsity_layout: Tensor,
+                         sparsity_block_size: int,
+                         fill_value: float = 0,
+                         lut: dict = None) -> Tensor:
+    """Convert a compressed row-striped tensor back to block-shaped dense form.
+
+    This is the inverse of :func:`to_sparse_row_striped`.
+
+    Args:
+        x (BlksprsTensor): Tensor in compressed block-sparse form.
+        sparsity_layout (Tensor): Row-striped sparsity layout for ``x``.
+        sparsity_block_size (int): Size of the sparsity blocks.
+        fill_value (float): Fill value for sparse regions.
+        lut (dict, optional): Optional conversion LUT cache.
+
+    Returns:
+        Tensor: Dense tensor in block-shaped form.
+    """
+    x = ensure_contiguous(x)
+
+    validate_dimensions(x)
+    validate_contiguous(x, sparsity_layout)
+    validate_device(x)
+    validate_sparsity(sparsity_block_size, (x, sparsity_layout))
+    validate_sparsity_block_size(sparsity_block_size, x)
+
+    lut = row_striped_build_lut(lut, sparsity_layout)
+
+    if not lut["is_row_striped"]:
+        raise ValueError("to_dense_row_striped requires a row-striped sparsity layout.")
+
+    output_blocks_flat = torch.full(
+        (
+            sparsity_layout.size(0) * sparsity_layout.size(1),
+            sparsity_layout.size(2),
+            sparsity_block_size,
+            sparsity_block_size,
+        ),
+        fill_value=fill_value,
+        dtype=x.dtype,
+        device=x.device,
+    )
+
+    if lut["n_sparse_blocks"] > 0:
+        source_rows = x.reshape(
+            lut["n_active_row_blocks"],
+            sparsity_layout.size(2),
+            sparsity_block_size,
+            sparsity_block_size,
+        )
+        output_blocks_flat.index_copy_(0, lut["active_row_flat_indices"], source_rows)
+
+    return (
+        output_blocks_flat.reshape(
+            sparsity_layout.size(0),
+            sparsity_layout.size(1),
+            sparsity_layout.size(2),
+            sparsity_block_size,
+            sparsity_block_size,
+        )
+        .permute(0, 1, 3, 2, 4)
+        .reshape(
+            sparsity_layout.size(0),
+            sparsity_layout.size(1) * sparsity_block_size,
+            sparsity_layout.size(2) * sparsity_block_size,
+        )
+        .contiguous()
+    )
+
+
 @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
 def to_dense(x: BlksprsTensor, sparsity_layout: Tensor,
              sparsity_block_size: int, fill_value: float = 0, lut: dict = None) -> Tensor:
@@ -300,6 +509,43 @@ def to_dense_build_lut(lut: dict, sparsity_layout: Tensor):
         lut["sparsity_reverse_lut"] = build_reverse_lut(sparsity_layout)
 
     validate_contiguous(lut["sparsity_reverse_lut"])
+
+    return lut
+
+
+def row_striped_build_lut(lut: dict, sparsity_layout: Tensor):
+    if lut is None:
+        lut = dict()
+
+    if "active_row_mask" not in lut:
+        active_row_mask = torch.all(sparsity_layout, dim=-1).contiguous()
+        lut["active_row_mask"] = active_row_mask
+
+    if "is_row_striped" not in lut:
+        dense_rows = lut["active_row_mask"].unsqueeze(-1).expand_as(sparsity_layout)
+        lut["is_row_striped"] = bool(torch.equal(sparsity_layout, dense_rows))
+
+    if not lut["is_row_striped"]:
+        return lut
+
+    if "active_row_flat_indices" not in lut:
+        active_row_flat_indices = torch.nonzero(
+            lut["active_row_mask"].reshape(-1), as_tuple=False
+        ).squeeze(-1).contiguous()
+        lut["active_row_flat_indices"] = active_row_flat_indices
+
+    if "n_active_row_blocks" not in lut:
+        lut["n_active_row_blocks"] = int(lut["active_row_flat_indices"].numel())
+
+    if "n_total_row_blocks" not in lut:
+        lut["n_total_row_blocks"] = int(sparsity_layout.size(0) * sparsity_layout.size(1))
+
+    if "n_sparse_blocks" not in lut:
+        lut["n_sparse_blocks"] = int(lut["n_active_row_blocks"] * sparsity_layout.size(2))
+
+    validate_contiguous(lut["active_row_mask"])
+    if lut["n_active_row_blocks"] > 0:
+        validate_contiguous(lut["active_row_flat_indices"])
 
     return lut
 

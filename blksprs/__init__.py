@@ -12,7 +12,9 @@ from blksprs.utils.blksprs_tensor import BlksprsTensor
 
 
 class ops:
-    from blksprs.ops.conversion import to_dense, to_sparse, from_blksprs, to_blksprs, adapt_layout
+    from blksprs.ops.conversion import to_dense, to_sparse, to_dense_shaped, to_sparse_shaped, \
+        to_dense_row_striped, to_sparse_row_striped, is_row_striped_layout, \
+        from_blksprs, to_blksprs, adapt_layout
     from blksprs.ops.distribution import gather, scatter, scatter_reduce
     from blksprs.ops.flash_attention import flash_attention, flash_attention_build_lut
     from blksprs.ops.matmul import matmul
@@ -34,8 +36,8 @@ class layouting:
 
 
 class utils:
-    from blksprs.utils.processing import apply_torch_linear, apply_torch_normalisation, apply_torch_dropout, \
-        apply_function_applicable_row_wise
+    from blksprs.utils.processing import apply_torch_linear, apply_torch_linear_cached, \
+        apply_torch_normalisation, apply_torch_dropout, apply_function_applicable_row_wise
     from blksprs.utils.tools import do_shape_blocksparse, undo_shape_blocksparse
     from blksprs.utils.validation import disable_contiguous, disable_validation, \
         enable_contiguous, enable_validation
