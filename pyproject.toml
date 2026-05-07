@@ -33,3 +33,8 @@ include = ["blksprs*"]
 
 [tool.setuptools.package-data]
 "*" = ["*.json", "*.conf"]
+
+[tool.pytest.ini_options]
+markers = [
+    "benchmark: high-memory or high-runtime regression tests",
+]

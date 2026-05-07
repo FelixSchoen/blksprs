@@ -1,6 +1,8 @@
 import torch
 from torch import Tensor, Size
 
+INT32_INDEX_MAX = 2_147_483_647
+
 
 def build_reverse_lut(sparsity_layout: Tensor) -> Tensor:
     """Builds a reverse look-up table from a sparsity layout.
@@ -52,3 +54,34 @@ def ceil_pow2(x: int) -> int:
     if x <= 0:
         raise ValueError("Input must be a positive integer.")
     return 1 << (x - 1).bit_length()
+
+
+def can_use_int32_indexing(*values: Tensor | int | None) -> bool:
+    """Return whether all indexed tensors fit within signed int32 address space.
+
+    The Triton kernels in this package operate on contiguous tensors and derive
+    flat element offsets from block indices and contiguous strides. Under that
+    constraint, the largest reachable flat index is bounded by ``numel() - 1``
+    for tensors and by the raw element count for explicit integer sizes.
+
+    Args:
+        *values: Tensors or integer element counts participating in flat index
+            computations. ``None`` values are ignored.
+
+    Returns:
+        bool: ``True`` if all participating buffers fit within the signed
+            ``int32`` range, ``False`` otherwise.
+    """
+    for value in values:
+        if value is None:
+            continue
+
+        if isinstance(value, Tensor):
+            count = value.numel()
+        else:
+            count = int(value)
+
+        if count > INT32_INDEX_MAX:
+            return False
+
+    return True
