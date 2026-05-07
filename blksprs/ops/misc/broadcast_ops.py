@@ -12,7 +12,7 @@ from blksprs.utils.validation import validate_contiguous, validate_dimensions, v
     validate_sparsity_block_size, ensure_contiguous
 
 
-@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
+@torch.amp.custom_fwd(device_type="cuda")
 def broadcast_add(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
                   sparsity_block_size: int) -> BlksprsTensor:
     """Performs a broadcast and subsequent addition of two dense tensors x and y. Returns a block-sparse tensor in

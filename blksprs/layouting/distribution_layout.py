@@ -9,12 +9,12 @@ from triton import language as tl
 
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import stride
+from blksprs.utils.tools import stride, can_use_int32_indexing
 from blksprs.utils.validation import validate_dimensions, validate_device, \
     validate_contiguous
 
 
-@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
+@torch.amp.custom_fwd(device_type="cuda")
 def build_distribution_layout(indices: BlksprsTensor, sparsity_layout_indices: Tensor,
                               dim: int, size_target: torch.Size,
                               sparsity_block_size: int) -> Tensor:
@@ -62,6 +62,8 @@ def build_distribution_layout_operation(indices: Tensor, sparsity_lut_i: Tensor,
                                     triton.cdiv(i_r, meta["TRITON_BLOCK_SIZE"]),
                                     triton.cdiv(i_c, meta["TRITON_BLOCK_SIZE"])]
 
+        use_int64 = not can_use_int32_indexing(indices, sparsity_lut_i, output)
+
         (wrap_triton(build_distribution_layout_kernel)[triton_grid]
          (indices,
           i_b, i_b_s, i_r_s, i_c_s,
@@ -70,7 +72,8 @@ def build_distribution_layout_operation(indices: Tensor, sparsity_lut_i: Tensor,
           adjusted_dim,
           output,
           o_b, o_b_s, o_r_s, o_c_s,
-          sparsity_block_size))
+          sparsity_block_size,
+          USE_INT64=use_int64))
 
         return output
 
@@ -90,38 +93,40 @@ def build_distribution_layout_kernel(i,
                                      o,
                                      o_b, o_b_s, o_r_s, o_c_s,
                                      sparsity_block_size,
+                                     USE_INT64: tl.constexpr,
                                      TRITON_BLOCK_SIZE: tl.constexpr) -> None:
+    index_dtype = tl.int64 if USE_INT64 else tl.int32
     # Get triton block indices
-    pid_blk = tl.program_id(axis=0)
-    pid_row = tl.program_id(axis=1)
-    pid_col = tl.program_id(axis=2)
+    pid_blk = tl.cast(tl.program_id(axis=0), index_dtype)
+    pid_row = tl.cast(tl.program_id(axis=1), index_dtype)
+    pid_col = tl.cast(tl.program_id(axis=2), index_dtype)
 
     # Get position of current sparsity block consisting of its batch, row, and column index
     spa_bat_i_idx = (pid_blk * s_lut_i_r_s + 0 * s_lut_i_c_s)
     spa_bat_i_msk = ((spa_bat_i_idx >= 0) &
-                     (spa_bat_i_idx < s_lut_i_r * s_lut_i_r_s))
-    spa_bat_i = tl.load(s_lut_i + spa_bat_i_idx, mask=spa_bat_i_msk)
+                     (spa_bat_i_idx < tl.cast(s_lut_i_r, index_dtype) * s_lut_i_r_s))
+    spa_bat_i = tl.cast(tl.load(s_lut_i + spa_bat_i_idx, mask=spa_bat_i_msk), index_dtype)
 
     spa_row_i_idx = (pid_blk * s_lut_i_r_s + 1 * s_lut_i_c_s)
     spa_row_i_msk = ((spa_row_i_idx >= 0) &
-                     (spa_row_i_idx < s_lut_i_r * s_lut_i_r_s))
-    spa_row_i = tl.load(s_lut_i + spa_row_i_idx, mask=spa_row_i_msk)
+                     (spa_row_i_idx < tl.cast(s_lut_i_r, index_dtype) * s_lut_i_r_s))
+    spa_row_i = tl.cast(tl.load(s_lut_i + spa_row_i_idx, mask=spa_row_i_msk), index_dtype)
 
     spa_col_i_idx = (pid_blk * s_lut_i_r_s + 2 * s_lut_i_c_s)
     spa_col_i_msk = ((spa_col_i_idx >= 0) &
-                     (spa_col_i_idx < s_lut_i_r * s_lut_i_r_s))
-    spa_col_i = tl.load(s_lut_i + spa_col_i_idx, mask=spa_col_i_msk)
+                     (spa_col_i_idx < tl.cast(s_lut_i_r, index_dtype) * s_lut_i_r_s))
+    spa_col_i = tl.cast(tl.load(s_lut_i + spa_col_i_idx, mask=spa_col_i_msk), index_dtype)
 
     blk_i_idx = (pid_blk * i_b_s +
-                 ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * i_r_s)[:, None] +
-                 ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * i_c_s)[None, :])
+                 ((pid_row * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * i_r_s)[:, None] +
+                 ((pid_col * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * i_c_s)[None, :])
     blk_i_msk = ((blk_i_idx >= 0) &
-                 (blk_i_idx < i_b * i_b_s))
-    blk_i = tl.load(i + blk_i_idx, mask=blk_i_msk)
+                 (blk_i_idx < tl.cast(i_b, index_dtype) * i_b_s))
+    blk_i = tl.cast(tl.load(i + blk_i_idx, mask=blk_i_msk), index_dtype)
 
-    dst_bat_idx = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), spa_bat_i, dtype=tl.int32)
-    dst_row_idx = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), spa_row_i, dtype=tl.int32)
-    dst_col_idx = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), spa_col_i, dtype=tl.int32)
+    dst_bat_idx = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), spa_bat_i, dtype=index_dtype)
+    dst_row_idx = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), spa_row_i, dtype=index_dtype)
+    dst_col_idx = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), spa_col_i, dtype=index_dtype)
     if dim == 0:
         dst_bat_idx = blk_i
     elif dim == 1:
@@ -135,5 +140,5 @@ def build_distribution_layout_kernel(i,
                  (dst_row_idx * o_r_s) +
                  (dst_col_idx * o_c_s))
     blk_o_msk = ((blk_o_idx >= 0) &
-                 (blk_o_idx < o_b * o_b_s))
+                 (blk_o_idx < tl.cast(o_b, index_dtype) * o_b_s))
     tl.store(o + blk_o_idx, blk_v, mask=blk_o_msk)

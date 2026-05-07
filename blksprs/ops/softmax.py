@@ -24,7 +24,7 @@ def softmax(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
         return softmax_regular(x, sparsity_layout, sparsity_block_size, lut)
 
 
-@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float32)
+@torch.amp.custom_fwd(device_type="cuda")
 def softmax_regular(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
                     lut: dict = None) -> BlksprsTensor:
     """Computes the row-wise softmax of a block-sparse tensor in compressed form.
@@ -346,7 +346,7 @@ softmax_forward.register_autograd(
     softmax_backward_wrapper, setup_context=softmax_setup_context)
 
 
-@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float32)
+@torch.amp.custom_fwd(device_type="cuda")
 def softmax_fused(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
                   lut: dict = None) -> BlksprsTensor:
     """Computes the row-wise softmax of a block-sparse tensor in compressed form using a fused kernel.

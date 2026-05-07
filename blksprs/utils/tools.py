@@ -85,3 +85,23 @@ def can_use_int32_indexing(*values: Tensor | int | None) -> bool:
             return False
 
     return True
+
+
+def cast_for_autocast(*values: Tensor):
+    """Cast floating CUDA tensors to the active autocast dtype when autocast is enabled."""
+    if not torch.is_autocast_enabled():
+        if len(values) == 1:
+            return values[0]
+        return values
+
+    autocast_dtype = torch.get_autocast_dtype("cuda")
+    casted = tuple(
+        value.to(autocast_dtype)
+        if value.is_cuda and value.is_floating_point()
+        else value
+        for value in values
+    )
+
+    if len(casted) == 1:
+        return casted[0]
+    return casted

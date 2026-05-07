@@ -135,7 +135,7 @@ def to_sparse_row_striped(x: Tensor,
     return BlksprsTensor.wrap(selected_rows.reshape(-1, sparsity_block_size, sparsity_block_size))
 
 
-@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
+@torch.amp.custom_fwd(device_type="cuda")
 def to_sparse(x: Tensor, sparsity_layout: Tensor,
               sparsity_block_size: int, lut: dict = None) -> BlksprsTensor:
     """Converts a block-sparse tensor in regular form to a block-sparse tensor in compressed form based on the given
@@ -389,7 +389,7 @@ def to_dense_row_striped(x: BlksprsTensor,
     )
 
 
-@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
+@torch.amp.custom_fwd(device_type="cuda")
 def to_dense(x: BlksprsTensor, sparsity_layout: Tensor,
              sparsity_block_size: int, fill_value: float = 0, lut: dict = None) -> Tensor:
     """Converts a block-sparse tensor in compressed form to a block-sparse tensor in regular form based on the given
@@ -585,7 +585,7 @@ to_dense_forward.register_autograd(
     to_dense_wrapper_backward, setup_context=to_dense_setup_context)
 
 
-@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
+@torch.amp.custom_fwd(device_type="cuda")
 def adapt_layout(x: BlksprsTensor, sparsity_layout_from: Tensor, sparsity_block_size_from: int,
                  sparsity_block_size_to: int, sparsity_layout_to: Tensor = None) -> (BlksprsTensor, Tensor):
     """Adapts the sparsity layout of a block-sparse tensor, resulting in a new block-sparse tensor in compressed form

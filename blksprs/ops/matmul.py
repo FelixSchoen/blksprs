@@ -7,12 +7,12 @@ from triton import language as tl
 from blksprs.ops.transpose import transpose
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import stride, build_reverse_lut, can_use_int32_indexing
+from blksprs.utils.tools import stride, build_reverse_lut, can_use_int32_indexing, cast_for_autocast
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity, validate_sparsity_block_size, validate_dtype_float, ensure_contiguous
 
 
-@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
+@torch.amp.custom_fwd(device_type="cuda")
 def matmul(x: BlksprsTensor, sparsity_layout_x: Tensor,
            y: BlksprsTensor, sparsity_layout_y: Tensor,
            sparsity_layout_output: Tensor,
@@ -35,6 +35,7 @@ def matmul(x: BlksprsTensor, sparsity_layout_x: Tensor,
 
     """
     x, y = ensure_contiguous(x, y)
+    x, y = cast_for_autocast(x, y)
 
     validate_dimensions(x, y)
     validate_contiguous(x, y)

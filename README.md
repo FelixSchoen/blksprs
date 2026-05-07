@@ -131,7 +131,7 @@ def test_readme():
     x_sparse = bs.ops.to_sparse(x_dense, sparsity_layout_x, sparsity_block_size)
     y_sparse = bs.ops.to_sparse(y_dense, sparsity_layout_y, sparsity_block_size)
 
-    # As of version 2.0, blksprs supports JIT compilation
+    # blksprs works with torch.compile
     matmul_compiled = torch.compile(bs.ops.matmul)
 
     # Perform matrix multiplication

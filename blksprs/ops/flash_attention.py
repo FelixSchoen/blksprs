@@ -7,12 +7,12 @@ from triton import language as tl
 
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs_exact
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import stride, build_reverse_lut, can_use_int32_indexing
+from blksprs.utils.tools import stride, build_reverse_lut, can_use_int32_indexing, cast_for_autocast
 from blksprs.utils.validation import validate_contiguous, validate_device, validate_dtype_float, \
     validate_dimensions, validate_sparsity, validate_sparsity_block_size, ensure_contiguous
 
 
-@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
+@torch.amp.custom_fwd(device_type="cuda")
 def flash_attention(q: BlksprsTensor, sparsity_layout_q: Tensor,
                     k: BlksprsTensor, sparsity_layout_k: Tensor,
                     v: BlksprsTensor, sparsity_layout_v: Tensor,
@@ -65,6 +65,7 @@ def flash_attention(q: BlksprsTensor, sparsity_layout_q: Tensor,
 
     """
     q, k, v, attention_layout = ensure_contiguous(q, k, v, attention_layout)
+    q, k, v = cast_for_autocast(q, k, v)
 
     validate_dimensions(q, k, v)
     validate_contiguous(q, k, v)
