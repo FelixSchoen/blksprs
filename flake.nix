@@ -6,7 +6,7 @@
   };
 
   outputs =
-    { self, nixpkgs, ... }:
+    { nixpkgs, ... }:
     let
       system = "x86_64-linux";
       pkgs = import nixpkgs {
@@ -113,8 +113,8 @@
                 export TRITON_NVDISASM_PATH="${cudaToolkit}/bin/nvdisasm"
 
                 # Triton cache and compatibility
-                export TRITON_CACHE_DIR="/tmp/triton-cache-$UID"
-                mkdir -p $TRITON_CACHE_DIR
+                export TRITON_CACHE_DIR="/var/tmp/triton-cache-$UID"
+                mkdir -p "$TRITON_CACHE_DIR"
                 export TRITON_IGNORE_UNKNOWN_PARAMETERS=1
                 export TRITON_PRINT_AUTOTUNING=0  # Set to 1 for debugging
               ''
@@ -154,8 +154,15 @@
             ${gpuShellHook}
 
             # Auto-activate venv if it exists
-            if [ -d ".venv" ]; then
-              source .venv/bin/activate
+            venv_path="$PWD/.venv"
+            if [ -d "$venv_path" ]; then
+              # The shared zsh prompt already renders the active venv name.
+              # Keep Python's activate script from prepending its own prompt
+              # fragment and avoid re-sourcing when direnv reloads the same venv.
+              export VIRTUAL_ENV_DISABLE_PROMPT=1
+              if [ "''${VIRTUAL_ENV:-}" != "$venv_path" ]; then
+                source "$venv_path/bin/activate"
+              fi
             fi
 
             # Environment info

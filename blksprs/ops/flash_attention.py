@@ -470,12 +470,11 @@ def flash_attention_kernel(q,
                            has_mask, has_bias,
                            sparsity_block_size,
                            TRITON_BLOCK_SIZE: tl.constexpr) -> None:
-    pid_bat = tl.program_id(axis=0)
-    pid_q_seq = tl.program_id(axis=1)
+    pid_bat = tl.cast(tl.program_id(axis=0), tl.int64)
+    pid_q_seq = tl.cast(tl.program_id(axis=1), tl.int64)
 
-    offs_m = tl.arange(0, TRITON_BLOCK_SIZE)
-    offs_d = tl.arange(0, TRITON_BLOCK_SIZE)
-
+    offs_m = tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), tl.int64)
+    offs_d = tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), tl.int64)
     # Online softmax accumulators
     m_i = tl.full([TRITON_BLOCK_SIZE], float("-inf"), dtype=tl.float32)
     l_i = tl.zeros([TRITON_BLOCK_SIZE], dtype=tl.float32)
@@ -497,27 +496,27 @@ def flash_attention_kernel(q,
             for h in range(n_head_blocks_qk):
                 rev_idx_spa_q_idx = (pid_bat * s_l_q_b_s + pid_q_seq * s_l_q_r_s + h * s_l_q_c_s)
                 rev_idx_spa_q_msk = ((rev_idx_spa_q_idx >= 0) &
-                                     (rev_idx_spa_q_idx < s_l_q_b * s_l_q_b_s))
-                rev_idx_spa_q = tl.load(r_lut_q + rev_idx_spa_q_idx, mask=rev_idx_spa_q_msk).to(tl.int32)
+                                     (rev_idx_spa_q_idx < tl.cast(s_l_q_b, tl.int64) * s_l_q_b_s))
+                rev_idx_spa_q = tl.cast(tl.load(r_lut_q + rev_idx_spa_q_idx, mask=rev_idx_spa_q_msk), tl.int32)
 
-                rev_idx_spa_k_idx = (pid_bat * s_l_k_b_s + k_seq_block * s_l_k_r_s + h * s_l_k_c_s)
+                rev_idx_spa_k_idx = (pid_bat * s_l_k_b_s + tl.cast(k_seq_block, tl.int64) * s_l_k_r_s + h * s_l_k_c_s)
                 rev_idx_spa_k_msk = ((rev_idx_spa_k_idx >= 0) &
-                                     (rev_idx_spa_k_idx < s_l_k_b * s_l_k_b_s))
-                rev_idx_spa_k = tl.load(r_lut_k + rev_idx_spa_k_idx, mask=rev_idx_spa_k_msk).to(tl.int32)
+                                     (rev_idx_spa_k_idx < tl.cast(s_l_k_b, tl.int64) * s_l_k_b_s))
+                rev_idx_spa_k = tl.cast(tl.load(r_lut_k + rev_idx_spa_k_idx, mask=rev_idx_spa_k_msk), tl.int32)
 
                 if rev_idx_spa_q >= 0 and rev_idx_spa_k >= 0:
-                    blk_q_idx = ((rev_idx_spa_q * q_b_s) +
+                    blk_q_idx = ((tl.cast(rev_idx_spa_q, tl.int64) * q_b_s) +
                                  (offs_m[:, None] * q_r_s) +
                                  (offs_d[None, :] * q_c_s))
                     blk_q_msk = ((blk_q_idx >= 0) &
-                                 (blk_q_idx < q_b * q_b_s))
+                                 (blk_q_idx < tl.cast(q_b, tl.int64) * q_b_s))
                     blk_q = tl.load(q + blk_q_idx, mask=blk_q_msk)
 
-                    blk_k_idx = ((rev_idx_spa_k * k_b_s) +
+                    blk_k_idx = ((tl.cast(rev_idx_spa_k, tl.int64) * k_b_s) +
                                  (offs_m[:, None] * k_r_s) +
                                  (offs_d[None, :] * k_c_s))
                     blk_k_msk = ((blk_k_idx >= 0) &
-                                 (blk_k_idx < k_b * k_b_s))
+                                 (blk_k_idx < tl.cast(k_b, tl.int64) * k_b_s))
                     blk_k = tl.load(k + blk_k_idx, mask=blk_k_msk)
 
                     buf_s += tl.dot(blk_q, tl.trans(blk_k))
@@ -529,10 +528,10 @@ def flash_attention_kernel(q,
             # Apply mask if present
             if has_mask:
                 rev_idx_spa_mask_idx = (pid_bat * n_seq_blocks_q * n_seq_blocks_k +
-                                        pid_q_seq * n_seq_blocks_k + k_seq_block)
-                rev_idx_spa_mask = tl.load(r_lut_mask + rev_idx_spa_mask_idx).to(tl.int32)
+                                        pid_q_seq * n_seq_blocks_k + tl.cast(k_seq_block, tl.int64))
+                rev_idx_spa_mask = tl.cast(tl.load(r_lut_mask + rev_idx_spa_mask_idx), tl.int32)
                 if rev_idx_spa_mask >= 0:
-                    blk_mask_idx = ((rev_idx_spa_mask * mask_b_s) +
+                    blk_mask_idx = ((tl.cast(rev_idx_spa_mask, tl.int64) * mask_b_s) +
                                     (offs_m[:, None] * mask_r_s) +
                                     (offs_d[None, :] * mask_c_s))
                     blk_mask = tl.load(attention_mask + blk_mask_idx)
@@ -541,10 +540,10 @@ def flash_attention_kernel(q,
             # Apply bias if present
             if has_bias:
                 rev_idx_spa_bias_idx = (pid_bat * n_seq_blocks_q * n_seq_blocks_k +
-                                        pid_q_seq * n_seq_blocks_k + k_seq_block)
-                rev_idx_spa_bias = tl.load(r_lut_bias + rev_idx_spa_bias_idx).to(tl.int32)
+                                        pid_q_seq * n_seq_blocks_k + tl.cast(k_seq_block, tl.int64))
+                rev_idx_spa_bias = tl.cast(tl.load(r_lut_bias + rev_idx_spa_bias_idx), tl.int32)
                 if rev_idx_spa_bias >= 0:
-                    blk_bias_idx = ((rev_idx_spa_bias * bias_b_s) +
+                    blk_bias_idx = ((tl.cast(rev_idx_spa_bias, tl.int64) * bias_b_s) +
                                     (offs_m[:, None] * bias_r_s) +
                                     (offs_d[None, :] * bias_c_s))
                     blk_bias = tl.load(attention_bias + blk_bias_idx)
@@ -562,33 +561,33 @@ def flash_attention_kernel(q,
             for h in range(n_head_blocks_v):
                 rev_idx_spa_o_idx = (pid_bat * s_l_o_b_s + pid_q_seq * s_l_o_r_s + h * s_l_o_c_s)
                 rev_idx_spa_o_msk = ((rev_idx_spa_o_idx >= 0) &
-                                     (rev_idx_spa_o_idx < s_l_o_b * s_l_o_b_s))
-                rev_idx_spa_o = tl.load(r_lut_o + rev_idx_spa_o_idx, mask=rev_idx_spa_o_msk).to(tl.int32)
+                                     (rev_idx_spa_o_idx < tl.cast(s_l_o_b, tl.int64) * s_l_o_b_s))
+                rev_idx_spa_o = tl.cast(tl.load(r_lut_o + rev_idx_spa_o_idx, mask=rev_idx_spa_o_msk), tl.int32)
 
-                rev_idx_spa_v_idx = (pid_bat * s_l_v_b_s + k_seq_block * s_l_v_r_s + h * s_l_v_c_s)
+                rev_idx_spa_v_idx = (pid_bat * s_l_v_b_s + tl.cast(k_seq_block, tl.int64) * s_l_v_r_s + h * s_l_v_c_s)
                 rev_idx_spa_v_msk = ((rev_idx_spa_v_idx >= 0) &
-                                     (rev_idx_spa_v_idx < s_l_v_b * s_l_v_b_s))
-                rev_idx_spa_v = tl.load(r_lut_v + rev_idx_spa_v_idx, mask=rev_idx_spa_v_msk).to(tl.int32)
+                                     (rev_idx_spa_v_idx < tl.cast(s_l_v_b, tl.int64) * s_l_v_b_s))
+                rev_idx_spa_v = tl.cast(tl.load(r_lut_v + rev_idx_spa_v_idx, mask=rev_idx_spa_v_msk), tl.int32)
 
                 if rev_idx_spa_o >= 0:
-                    blk_o_idx = ((rev_idx_spa_o * o_b_s) +
+                    blk_o_idx = ((tl.cast(rev_idx_spa_o, tl.int64) * o_b_s) +
                                  (offs_m[:, None] * o_r_s) +
                                  (offs_d[None, :] * o_c_s))
                     blk_o_msk = ((blk_o_idx >= 0) &
-                                 (blk_o_idx < o_b * o_b_s))
-                    blk_o = tl.load(o + blk_o_idx, mask=blk_o_msk).to(tl.float32)
+                                 (blk_o_idx < tl.cast(o_b, tl.int64) * o_b_s))
+                    blk_o = tl.cast(tl.load(o + blk_o_idx, mask=blk_o_msk), tl.float32)
                     blk_o = blk_o * alpha[:, None]
 
                     if rev_idx_spa_v >= 0:
-                        blk_v_idx = ((rev_idx_spa_v * v_b_s) +
+                        blk_v_idx = ((tl.cast(rev_idx_spa_v, tl.int64) * v_b_s) +
                                      (offs_m[:, None] * v_r_s) +
                                      (offs_d[None, :] * v_c_s))
                         blk_v_msk = ((blk_v_idx >= 0) &
-                                     (blk_v_idx < v_b * v_b_s))
+                                     (blk_v_idx < tl.cast(v_b, tl.int64) * v_b_s))
                         blk_v = tl.load(v + blk_v_idx, mask=blk_v_msk)
-                        blk_o = blk_o + tl.dot(p.to(blk_v.dtype), blk_v).to(tl.float32)
+                        blk_o = blk_o + tl.cast(tl.dot(tl.cast(p, blk_v.dtype), blk_v), tl.float32)
 
-                    tl.store(o + blk_o_idx, blk_o.to(o.dtype.element_ty), mask=blk_o_msk)
+                    tl.store(o + blk_o_idx, tl.cast(blk_o, o.dtype.element_ty), mask=blk_o_msk)
 
             m_i = m_ij
 
@@ -599,18 +598,18 @@ def flash_attention_kernel(q,
     for h in range(n_head_blocks_v):
         rev_idx_spa_o_idx = (pid_bat * s_l_o_b_s + pid_q_seq * s_l_o_r_s + h * s_l_o_c_s)
         rev_idx_spa_o_msk = ((rev_idx_spa_o_idx >= 0) &
-                             (rev_idx_spa_o_idx < s_l_o_b * s_l_o_b_s))
-        rev_idx_spa_o = tl.load(r_lut_o + rev_idx_spa_o_idx, mask=rev_idx_spa_o_msk).to(tl.int32)
+                             (rev_idx_spa_o_idx < tl.cast(s_l_o_b, tl.int64) * s_l_o_b_s))
+        rev_idx_spa_o = tl.cast(tl.load(r_lut_o + rev_idx_spa_o_idx, mask=rev_idx_spa_o_msk), tl.int32)
         if rev_idx_spa_o >= 0:
-            blk_o_idx = ((rev_idx_spa_o * o_b_s) +
+            blk_o_idx = ((tl.cast(rev_idx_spa_o, tl.int64) * o_b_s) +
                          (offs_m[:, None] * o_r_s) +
                          (offs_d[None, :] * o_c_s))
             blk_o_msk = ((blk_o_idx >= 0) &
-                         (blk_o_idx < o_b * o_b_s))
-            blk_o = tl.load(o + blk_o_idx, mask=blk_o_msk).to(tl.float32)
+                         (blk_o_idx < tl.cast(o_b, tl.int64) * o_b_s))
+            blk_o = tl.cast(tl.load(o + blk_o_idx, mask=blk_o_msk), tl.float32)
             blk_o = blk_o / l_safe[:, None]
             blk_o = tl.where(has_attention[:, None], blk_o, 0.0)
-            tl.store(o + blk_o_idx, blk_o.to(o.dtype.element_ty), mask=blk_o_msk)
+            tl.store(o + blk_o_idx, tl.cast(blk_o, o.dtype.element_ty), mask=blk_o_msk)
 
     # Store LSE
     lse_val = tl.where(has_attention, m_i + tl.math.log2(l_safe), float("-inf"))
@@ -636,23 +635,23 @@ def flash_attention_kernel_bwd_preprocess(o, do, delta,
                                           n_batches, n_seq_blocks_q, n_head_blocks,
                                           sparsity_block_size,
                                           TRITON_BLOCK_SIZE: tl.constexpr) -> None:
-    pid_bat = tl.program_id(axis=0)
-    pid_q_seq = tl.program_id(axis=1)
+    pid_bat = tl.cast(tl.program_id(axis=0), tl.int64)
+    pid_q_seq = tl.cast(tl.program_id(axis=1), tl.int64)
 
-    offs_m = tl.arange(0, TRITON_BLOCK_SIZE)
-    offs_d = tl.arange(0, TRITON_BLOCK_SIZE)
-
+    offs_m = tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), tl.int64)
+    offs_d = tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), tl.int64)
     delta_acc = tl.zeros([TRITON_BLOCK_SIZE], dtype=tl.float32)
 
     for h in range(n_head_blocks):
         rev_idx_spa_o_idx = (pid_bat * s_l_o_b_s + pid_q_seq * s_l_o_r_s + h * s_l_o_c_s)
-        rev_idx_spa_o = tl.load(r_lut_o + rev_idx_spa_o_idx).to(tl.int32)
+        rev_idx_spa_o = tl.cast(tl.load(r_lut_o + rev_idx_spa_o_idx), tl.int32)
         if rev_idx_spa_o >= 0:
-            blk_idx = ((rev_idx_spa_o * o_b_s) +
+            blk_idx = ((tl.cast(rev_idx_spa_o, tl.int64) * o_b_s) +
                        (offs_m[:, None] * o_r_s) +
                        (offs_d[None, :] * o_c_s))
-            blk_o = tl.load(o + blk_idx).to(tl.float32)
-            blk_do = tl.load(do + blk_idx).to(tl.float32)
+            blk_msk = ((blk_idx >= 0) & (blk_idx < tl.cast(total_o_blocks, tl.int64) * o_b_s))
+            blk_o = tl.cast(tl.load(o + blk_idx, mask=blk_msk), tl.float32)
+            blk_do = tl.cast(tl.load(do + blk_idx, mask=blk_msk), tl.float32)
             delta_acc += tl.sum(blk_o * blk_do, axis=1)
 
     tl.store(
@@ -696,11 +695,11 @@ def flash_attention_kernel_bwd_dkdv(q, q_b_s, q_r_s, q_c_s,
                                     has_mask, has_bias,
                                     sparsity_block_size,
                                     TRITON_BLOCK_SIZE: tl.constexpr) -> None:
-    pid_bat = tl.program_id(axis=0)
-    pid_k_seq = tl.program_id(axis=1)
+    pid_bat = tl.cast(tl.program_id(axis=0), tl.int64)
+    pid_k_seq = tl.cast(tl.program_id(axis=1), tl.int64)
 
-    offs_m = tl.arange(0, TRITON_BLOCK_SIZE)
-    offs_d = tl.arange(0, TRITON_BLOCK_SIZE)
+    offs_m = tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), tl.int64)
+    offs_d = tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), tl.int64)
     qk_scale = scale * 1.4426950408889634
 
     # Get reverse attention LUT: which Q blocks attend to this K block
@@ -716,26 +715,26 @@ def flash_attention_kernel_bwd_dkdv(q, q_b_s, q_r_s, q_c_s,
             # Recompute S = Q @ K^T across head blocks
             buf_s = tl.zeros([TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE], dtype=tl.float32)
             for h in range(n_head_blocks_qk):
-                rev_idx_spa_q = tl.load(r_lut_q + (pid_bat * s_l_q_b_s + q_seq_block * s_l_q_r_s + h * s_l_q_c_s)).to(tl.int32)
-                rev_idx_spa_k = tl.load(r_lut_k + (pid_bat * s_l_k_b_s + pid_k_seq * s_l_k_r_s + h * s_l_k_c_s)).to(tl.int32)
+                rev_idx_spa_q = tl.cast(tl.load(r_lut_q + (pid_bat * s_l_q_b_s + tl.cast(q_seq_block, tl.int64) * s_l_q_r_s + h * s_l_q_c_s)), tl.int32)
+                rev_idx_spa_k = tl.cast(tl.load(r_lut_k + (pid_bat * s_l_k_b_s + pid_k_seq * s_l_k_r_s + h * s_l_k_c_s)), tl.int32)
                 if rev_idx_spa_q >= 0 and rev_idx_spa_k >= 0:
-                    blk_q_idx = ((rev_idx_spa_q * q_b_s) +
+                    blk_q_idx = ((tl.cast(rev_idx_spa_q, tl.int64) * q_b_s) +
                                  (offs_m[:, None] * q_r_s) +
                                  (offs_d[None, :] * q_c_s))
-                    blk_q = tl.load(q + blk_q_idx)
-                    blk_k_idx = ((rev_idx_spa_k * k_b_s) +
+                    blk_q = tl.load(q + blk_q_idx, mask=((blk_q_idx >= 0) & (blk_q_idx < tl.cast(total_q_blocks, tl.int64) * q_b_s)))
+                    blk_k_idx = ((tl.cast(rev_idx_spa_k, tl.int64) * k_b_s) +
                                  (offs_m[:, None] * k_r_s) +
                                  (offs_d[None, :] * k_c_s))
-                    blk_k = tl.load(k + blk_k_idx)
+                    blk_k = tl.load(k + blk_k_idx, mask=((blk_k_idx >= 0) & (blk_k_idx < tl.cast(total_k_blocks, tl.int64) * k_b_s)))
                     buf_s += tl.dot(blk_q, tl.trans(blk_k))
 
             buf_s = buf_s * qk_scale
 
             # Apply mask
             if has_mask:
-                rev_idx_spa_mask = tl.load(r_lut_mask + (pid_bat * n_seq_blocks_q * n_seq_blocks_k + q_seq_block * n_seq_blocks_k + pid_k_seq)).to(tl.int32)
+                rev_idx_spa_mask = tl.cast(tl.load(r_lut_mask + (pid_bat * n_seq_blocks_q * n_seq_blocks_k + tl.cast(q_seq_block, tl.int64) * n_seq_blocks_k + pid_k_seq)), tl.int32)
                 if rev_idx_spa_mask >= 0:
-                    blk_mask_idx = ((rev_idx_spa_mask * mask_b_s) +
+                    blk_mask_idx = ((tl.cast(rev_idx_spa_mask, tl.int64) * mask_b_s) +
                                     (offs_m[:, None] * mask_r_s) +
                                     (offs_d[None, :] * mask_c_s))
                     blk_mask = tl.load(attention_mask + blk_mask_idx)
@@ -743,9 +742,9 @@ def flash_attention_kernel_bwd_dkdv(q, q_b_s, q_r_s, q_c_s,
 
             # Apply bias
             if has_bias:
-                rev_idx_spa_bias = tl.load(r_lut_bias + (pid_bat * n_seq_blocks_q * n_seq_blocks_k + q_seq_block * n_seq_blocks_k + pid_k_seq)).to(tl.int32)
+                rev_idx_spa_bias = tl.cast(tl.load(r_lut_bias + (pid_bat * n_seq_blocks_q * n_seq_blocks_k + tl.cast(q_seq_block, tl.int64) * n_seq_blocks_k + pid_k_seq)), tl.int32)
                 if rev_idx_spa_bias >= 0:
-                    blk_bias_idx = ((rev_idx_spa_bias * bias_b_s) +
+                    blk_bias_idx = ((tl.cast(rev_idx_spa_bias, tl.int64) * bias_b_s) +
                                     (offs_m[:, None] * bias_r_s) +
                                     (offs_d[None, :] * bias_c_s))
                     blk_bias = tl.load(attention_bias + blk_bias_idx)
@@ -753,9 +752,9 @@ def flash_attention_kernel_bwd_dkdv(q, q_b_s, q_r_s, q_c_s,
 
             # Recompute P from S and saved LSE
             m = tl.load(
-                lse + pid_bat * n_seq_blocks_q * TRITON_BLOCK_SIZE + q_seq_block * TRITON_BLOCK_SIZE + offs_m)
+                lse + pid_bat * n_seq_blocks_q * TRITON_BLOCK_SIZE + tl.cast(q_seq_block, tl.int64) * TRITON_BLOCK_SIZE + offs_m)
             Di = tl.load(
-                delta + pid_bat * n_seq_blocks_q * TRITON_BLOCK_SIZE + q_seq_block * TRITON_BLOCK_SIZE + offs_m)
+                delta + pid_bat * n_seq_blocks_q * TRITON_BLOCK_SIZE + tl.cast(q_seq_block, tl.int64) * TRITON_BLOCK_SIZE + offs_m)
 
             valid_lse = m > float("-inf")
             safe_m = tl.where(valid_lse, m, 0.0)
@@ -765,65 +764,65 @@ def flash_attention_kernel_bwd_dkdv(q, q_b_s, q_r_s, q_c_s,
             # Compute dp = sum_h dO_h @ V_h^T
             dp = tl.zeros([TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE], dtype=tl.float32)
             for h in range(n_head_blocks_v):
-                rev_idx_spa_o_h = tl.load(r_lut_o + (pid_bat * s_l_o_b_s + q_seq_block * s_l_o_r_s + h * s_l_o_c_s)).to(tl.int32)
-                rev_idx_spa_v_h = tl.load(r_lut_v + (pid_bat * s_l_v_b_s + pid_k_seq * s_l_v_r_s + h * s_l_v_c_s)).to(tl.int32)
+                rev_idx_spa_o_h = tl.cast(tl.load(r_lut_o + (pid_bat * s_l_o_b_s + tl.cast(q_seq_block, tl.int64) * s_l_o_r_s + h * s_l_o_c_s)), tl.int32)
+                rev_idx_spa_v_h = tl.cast(tl.load(r_lut_v + (pid_bat * s_l_v_b_s + pid_k_seq * s_l_v_r_s + h * s_l_v_c_s)), tl.int32)
                 if rev_idx_spa_o_h >= 0 and rev_idx_spa_v_h >= 0:
-                    blk_do_idx = ((rev_idx_spa_o_h * do_b_s) +
+                    blk_do_idx = ((tl.cast(rev_idx_spa_o_h, tl.int64) * do_b_s) +
                                   (offs_m[:, None] * do_r_s) +
                                   (offs_d[None, :] * do_c_s))
-                    blk_do = tl.load(do + blk_do_idx)
-                    blk_v_idx = ((rev_idx_spa_v_h * v_b_s) +
+                    blk_do = tl.load(do + blk_do_idx, mask=((blk_do_idx >= 0) & (blk_do_idx < tl.cast(total_o_blocks, tl.int64) * do_b_s)))
+                    blk_v_idx = ((tl.cast(rev_idx_spa_v_h, tl.int64) * v_b_s) +
                                  (offs_m[:, None] * v_r_s) +
                                  (offs_d[None, :] * v_c_s))
-                    blk_v = tl.load(v + blk_v_idx)
-                    dp += tl.dot(blk_do, tl.trans(blk_v)).to(tl.float32)
+                    blk_v = tl.load(v + blk_v_idx, mask=((blk_v_idx >= 0) & (blk_v_idx < tl.cast(total_v_blocks, tl.int64) * v_b_s)))
+                    dp += tl.cast(tl.dot(blk_do, tl.trans(blk_v)), tl.float32)
 
             # ds = P * (dp - Di)
             ds = p * (dp - Di[:, None])
 
             # Accumulate dK across Q/K head blocks
             for h in range(n_head_blocks_qk):
-                rev_idx_spa_q_h = tl.load(r_lut_q + (pid_bat * s_l_q_b_s + q_seq_block * s_l_q_r_s + h * s_l_q_c_s)).to(tl.int32)
-                rev_idx_spa_k_h = tl.load(r_lut_k + (pid_bat * s_l_k_b_s + pid_k_seq * s_l_k_r_s + h * s_l_k_c_s)).to(tl.int32)
+                rev_idx_spa_q_h = tl.cast(tl.load(r_lut_q + (pid_bat * s_l_q_b_s + tl.cast(q_seq_block, tl.int64) * s_l_q_r_s + h * s_l_q_c_s)), tl.int32)
+                rev_idx_spa_k_h = tl.cast(tl.load(r_lut_k + (pid_bat * s_l_k_b_s + pid_k_seq * s_l_k_r_s + h * s_l_k_c_s)), tl.int32)
 
                 if rev_idx_spa_q_h >= 0 and rev_idx_spa_k_h >= 0:
-                    blk_q_idx = ((rev_idx_spa_q_h * q_b_s) +
+                    blk_q_idx = ((tl.cast(rev_idx_spa_q_h, tl.int64) * q_b_s) +
                                  (offs_m[:, None] * q_r_s) +
                                  (offs_d[None, :] * q_c_s))
-                    blk_q = tl.load(q + blk_q_idx)
-                    blk_dk_idx = ((rev_idx_spa_k_h * k_b_s) +
+                    blk_q = tl.load(q + blk_q_idx, mask=((blk_q_idx >= 0) & (blk_q_idx < tl.cast(total_q_blocks, tl.int64) * q_b_s)))
+                    blk_dk_idx = ((tl.cast(rev_idx_spa_k_h, tl.int64) * k_b_s) +
                                   (offs_m[:, None] * k_r_s) +
                                   (offs_d[None, :] * k_c_s))
-                    blk_dk = tl.load(dk + blk_dk_idx).to(tl.float32)
-                    blk_dk += tl.dot(tl.trans(ds.to(blk_q.dtype)), blk_q).to(tl.float32) * scale
-                    tl.store(dk + blk_dk_idx, blk_dk.to(dk.dtype.element_ty))
+                    blk_dk = tl.cast(tl.load(dk + blk_dk_idx, mask=((blk_dk_idx >= 0) & (blk_dk_idx < tl.cast(total_k_blocks, tl.int64) * k_b_s))), tl.float32)
+                    blk_dk += tl.cast(tl.dot(tl.trans(tl.cast(ds, blk_q.dtype)), blk_q), tl.float32) * scale
+                    tl.store(dk + blk_dk_idx, tl.cast(blk_dk, dk.dtype.element_ty))
 
             # Accumulate dV across V/output head blocks
             for h in range(n_head_blocks_v):
-                rev_idx_spa_o_h = tl.load(r_lut_o + (pid_bat * s_l_o_b_s + q_seq_block * s_l_o_r_s + h * s_l_o_c_s)).to(tl.int32)
-                rev_idx_spa_v_h = tl.load(r_lut_v + (pid_bat * s_l_v_b_s + pid_k_seq * s_l_v_r_s + h * s_l_v_c_s)).to(tl.int32)
+                rev_idx_spa_o_h = tl.cast(tl.load(r_lut_o + (pid_bat * s_l_o_b_s + tl.cast(q_seq_block, tl.int64) * s_l_o_r_s + h * s_l_o_c_s)), tl.int32)
+                rev_idx_spa_v_h = tl.cast(tl.load(r_lut_v + (pid_bat * s_l_v_b_s + pid_k_seq * s_l_v_r_s + h * s_l_v_c_s)), tl.int32)
                 if rev_idx_spa_o_h >= 0 and rev_idx_spa_v_h >= 0:
-                    blk_do_idx = ((rev_idx_spa_o_h * do_b_s) +
+                    blk_do_idx = ((tl.cast(rev_idx_spa_o_h, tl.int64) * do_b_s) +
                                   (offs_m[:, None] * do_r_s) +
                                   (offs_d[None, :] * do_c_s))
-                    blk_do = tl.load(do + blk_do_idx)
-                    blk_dv_idx = ((rev_idx_spa_v_h * v_b_s) +
+                    blk_do = tl.load(do + blk_do_idx, mask=((blk_do_idx >= 0) & (blk_do_idx < tl.cast(total_o_blocks, tl.int64) * do_b_s)))
+                    blk_dv_idx = ((tl.cast(rev_idx_spa_v_h, tl.int64) * v_b_s) +
                                   (offs_m[:, None] * v_r_s) +
                                   (offs_d[None, :] * v_c_s))
-                    blk_dv = tl.load(dv + blk_dv_idx).to(tl.float32)
-                    blk_dv += tl.dot(tl.trans(p.to(blk_do.dtype)), blk_do).to(tl.float32)
-                    tl.store(dv + blk_dv_idx, blk_dv.to(dv.dtype.element_ty))
+                    blk_dv = tl.cast(tl.load(dv + blk_dv_idx, mask=((blk_dv_idx >= 0) & (blk_dv_idx < tl.cast(total_v_blocks, tl.int64) * v_b_s))), tl.float32)
+                    blk_dv += tl.cast(tl.dot(tl.trans(tl.cast(p, blk_do.dtype)), blk_do), tl.float32)
+                    tl.store(dv + blk_dv_idx, tl.cast(blk_dv, dv.dtype.element_ty))
 
             # dBias
             if has_bias:
-                rev_idx_spa_bias = tl.load(r_lut_bias + (pid_bat * n_seq_blocks_q * n_seq_blocks_k + q_seq_block * n_seq_blocks_k + pid_k_seq)).to(tl.int32)
+                rev_idx_spa_bias = tl.cast(tl.load(r_lut_bias + (pid_bat * n_seq_blocks_q * n_seq_blocks_k + tl.cast(q_seq_block, tl.int64) * n_seq_blocks_k + pid_k_seq)), tl.int32)
                 if rev_idx_spa_bias >= 0:
-                    blk_dbias_idx = ((rev_idx_spa_bias * dbias_b_s) +
+                    blk_dbias_idx = ((tl.cast(rev_idx_spa_bias, tl.int64) * dbias_b_s) +
                                      (offs_m[:, None] * dbias_r_s) +
                                      (offs_d[None, :] * dbias_c_s))
-                    blk_dbias = tl.load(dbias + blk_dbias_idx).to(tl.float32)
+                    blk_dbias = tl.cast(tl.load(dbias + blk_dbias_idx, mask=((blk_dbias_idx >= 0) & (blk_dbias_idx < tl.cast(total_bias_blocks, tl.int64) * dbias_b_s))), tl.float32)
                     blk_dbias += ds
-                    tl.store(dbias + blk_dbias_idx, blk_dbias.to(dbias.dtype.element_ty))
+                    tl.store(dbias + blk_dbias_idx, tl.cast(blk_dbias, dbias.dtype.element_ty))
 
 
 # noinspection PyUnusedLocal
@@ -861,11 +860,11 @@ def flash_attention_kernel_bwd_dq(q, q_b_s, q_r_s, q_c_s,
                                   has_mask, has_bias,
                                   sparsity_block_size,
                                   TRITON_BLOCK_SIZE: tl.constexpr) -> None:
-    pid_bat = tl.program_id(axis=0)
-    pid_q_seq = tl.program_id(axis=1)
+    pid_bat = tl.cast(tl.program_id(axis=0), tl.int64)
+    pid_q_seq = tl.cast(tl.program_id(axis=1), tl.int64)
 
-    offs_m = tl.arange(0, TRITON_BLOCK_SIZE)
-    offs_d = tl.arange(0, TRITON_BLOCK_SIZE)
+    offs_m = tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), tl.int64)
+    offs_d = tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), tl.int64)
     qk_scale = scale * 1.4426950408889634
 
     m = tl.load(lse + pid_bat * n_seq_blocks_q * TRITON_BLOCK_SIZE + pid_q_seq * TRITON_BLOCK_SIZE + offs_m)
@@ -883,34 +882,34 @@ def flash_attention_kernel_bwd_dq(q, q_b_s, q_r_s, q_c_s,
             # Recompute S = Q @ K^T across head blocks
             buf_s = tl.zeros([TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE], dtype=tl.float32)
             for h in range(n_head_blocks_qk):
-                rev_idx_spa_q = tl.load(r_lut_q + (pid_bat * s_l_q_b_s + pid_q_seq * s_l_q_r_s + h * s_l_q_c_s)).to(tl.int32)
-                rev_idx_spa_k = tl.load(r_lut_k + (pid_bat * s_l_k_b_s + k_seq_block * s_l_k_r_s + h * s_l_k_c_s)).to(tl.int32)
+                rev_idx_spa_q = tl.cast(tl.load(r_lut_q + (pid_bat * s_l_q_b_s + pid_q_seq * s_l_q_r_s + h * s_l_q_c_s)), tl.int32)
+                rev_idx_spa_k = tl.cast(tl.load(r_lut_k + (pid_bat * s_l_k_b_s + tl.cast(k_seq_block, tl.int64) * s_l_k_r_s + h * s_l_k_c_s)), tl.int32)
                 if rev_idx_spa_q >= 0 and rev_idx_spa_k >= 0:
-                    blk_q_idx = ((rev_idx_spa_q * q_b_s) +
+                    blk_q_idx = ((tl.cast(rev_idx_spa_q, tl.int64) * q_b_s) +
                                  (offs_m[:, None] * q_r_s) +
                                  (offs_d[None, :] * q_c_s))
-                    blk_q = tl.load(q + blk_q_idx)
-                    blk_k_idx = ((rev_idx_spa_k * k_b_s) +
+                    blk_q = tl.load(q + blk_q_idx, mask=((blk_q_idx >= 0) & (blk_q_idx < tl.cast(total_q_blocks, tl.int64) * q_b_s)))
+                    blk_k_idx = ((tl.cast(rev_idx_spa_k, tl.int64) * k_b_s) +
                                  (offs_m[:, None] * k_r_s) +
                                  (offs_d[None, :] * k_c_s))
-                    blk_k = tl.load(k + blk_k_idx)
+                    blk_k = tl.load(k + blk_k_idx, mask=((blk_k_idx >= 0) & (blk_k_idx < tl.cast(total_k_blocks, tl.int64) * k_b_s)))
                     buf_s += tl.dot(blk_q, tl.trans(blk_k))
 
             buf_s = buf_s * qk_scale
 
             if has_mask:
-                rev_idx_spa_mask = tl.load(r_lut_mask + (pid_bat * n_seq_blocks_q * n_seq_blocks_k + pid_q_seq * n_seq_blocks_k + k_seq_block)).to(tl.int32)
+                rev_idx_spa_mask = tl.cast(tl.load(r_lut_mask + (pid_bat * n_seq_blocks_q * n_seq_blocks_k + pid_q_seq * n_seq_blocks_k + tl.cast(k_seq_block, tl.int64))), tl.int32)
                 if rev_idx_spa_mask >= 0:
-                    blk_mask_idx = ((rev_idx_spa_mask * mask_b_s) +
+                    blk_mask_idx = ((tl.cast(rev_idx_spa_mask, tl.int64) * mask_b_s) +
                                     (offs_m[:, None] * mask_r_s) +
                                     (offs_d[None, :] * mask_c_s))
                     blk_mask = tl.load(attention_mask + blk_mask_idx)
                     buf_s = tl.where(blk_mask != 0, float("-inf") * 1.4426950408889634, buf_s)
 
             if has_bias:
-                rev_idx_spa_bias = tl.load(r_lut_bias + (pid_bat * n_seq_blocks_q * n_seq_blocks_k + pid_q_seq * n_seq_blocks_k + k_seq_block)).to(tl.int32)
+                rev_idx_spa_bias = tl.cast(tl.load(r_lut_bias + (pid_bat * n_seq_blocks_q * n_seq_blocks_k + pid_q_seq * n_seq_blocks_k + tl.cast(k_seq_block, tl.int64))), tl.int32)
                 if rev_idx_spa_bias >= 0:
-                    blk_bias_idx = ((rev_idx_spa_bias * bias_b_s) +
+                    blk_bias_idx = ((tl.cast(rev_idx_spa_bias, tl.int64) * bias_b_s) +
                                     (offs_m[:, None] * bias_r_s) +
                                     (offs_d[None, :] * bias_c_s))
                     blk_bias = tl.load(attention_bias + blk_bias_idx)
@@ -924,37 +923,37 @@ def flash_attention_kernel_bwd_dq(q, q_b_s, q_r_s, q_c_s,
             # dp = sum_h dO_h @ V_h^T
             dp = tl.zeros([TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE], dtype=tl.float32)
             for h in range(n_head_blocks_v):
-                rev_idx_spa_o_h = tl.load(r_lut_o + (pid_bat * s_l_o_b_s + pid_q_seq * s_l_o_r_s + h * s_l_o_c_s)).to(tl.int32)
-                rev_idx_spa_v_h = tl.load(r_lut_v + (pid_bat * s_l_v_b_s + k_seq_block * s_l_v_r_s + h * s_l_v_c_s)).to(tl.int32)
+                rev_idx_spa_o_h = tl.cast(tl.load(r_lut_o + (pid_bat * s_l_o_b_s + pid_q_seq * s_l_o_r_s + h * s_l_o_c_s)), tl.int32)
+                rev_idx_spa_v_h = tl.cast(tl.load(r_lut_v + (pid_bat * s_l_v_b_s + tl.cast(k_seq_block, tl.int64) * s_l_v_r_s + h * s_l_v_c_s)), tl.int32)
                 if rev_idx_spa_o_h >= 0 and rev_idx_spa_v_h >= 0:
-                    blk_do_idx = ((rev_idx_spa_o_h * do_b_s) +
+                    blk_do_idx = ((tl.cast(rev_idx_spa_o_h, tl.int64) * do_b_s) +
                                   (offs_m[:, None] * do_r_s) +
                                   (offs_d[None, :] * do_c_s))
-                    blk_do = tl.load(do + blk_do_idx)
-                    blk_v_idx = ((rev_idx_spa_v_h * v_b_s) +
+                    blk_do = tl.load(do + blk_do_idx, mask=((blk_do_idx >= 0) & (blk_do_idx < tl.cast(total_o_blocks, tl.int64) * do_b_s)))
+                    blk_v_idx = ((tl.cast(rev_idx_spa_v_h, tl.int64) * v_b_s) +
                                  (offs_m[:, None] * v_r_s) +
                                  (offs_d[None, :] * v_c_s))
-                    blk_v = tl.load(v + blk_v_idx)
-                    dp += tl.dot(blk_do, tl.trans(blk_v)).to(tl.float32)
+                    blk_v = tl.load(v + blk_v_idx, mask=((blk_v_idx >= 0) & (blk_v_idx < tl.cast(total_v_blocks, tl.int64) * v_b_s)))
+                    dp += tl.cast(tl.dot(blk_do, tl.trans(blk_v)), tl.float32)
 
             # ds = P * (dp - Di)
             ds = p * (dp - Di[:, None])
 
             # dQ += ds @ K * scale
             for h in range(n_head_blocks_qk):
-                rev_idx_spa_q_h = tl.load(r_lut_q + (pid_bat * s_l_q_b_s + pid_q_seq * s_l_q_r_s + h * s_l_q_c_s)).to(tl.int32)
-                rev_idx_spa_k_h = tl.load(r_lut_k + (pid_bat * s_l_k_b_s + k_seq_block * s_l_k_r_s + h * s_l_k_c_s)).to(tl.int32)
+                rev_idx_spa_q_h = tl.cast(tl.load(r_lut_q + (pid_bat * s_l_q_b_s + pid_q_seq * s_l_q_r_s + h * s_l_q_c_s)), tl.int32)
+                rev_idx_spa_k_h = tl.cast(tl.load(r_lut_k + (pid_bat * s_l_k_b_s + tl.cast(k_seq_block, tl.int64) * s_l_k_r_s + h * s_l_k_c_s)), tl.int32)
                 if rev_idx_spa_q_h >= 0 and rev_idx_spa_k_h >= 0:
-                    blk_k_idx = ((rev_idx_spa_k_h * k_b_s) +
+                    blk_k_idx = ((tl.cast(rev_idx_spa_k_h, tl.int64) * k_b_s) +
                                  (offs_m[:, None] * k_r_s) +
                                  (offs_d[None, :] * k_c_s))
-                    blk_k = tl.load(k + blk_k_idx)
-                    blk_dq_idx = ((rev_idx_spa_q_h * q_b_s) +
+                    blk_k = tl.load(k + blk_k_idx, mask=((blk_k_idx >= 0) & (blk_k_idx < tl.cast(total_k_blocks, tl.int64) * k_b_s)))
+                    blk_dq_idx = ((tl.cast(rev_idx_spa_q_h, tl.int64) * q_b_s) +
                                   (offs_m[:, None] * q_r_s) +
                                   (offs_d[None, :] * q_c_s))
-                    blk_dq = tl.load(dq + blk_dq_idx).to(tl.float32)
-                    blk_dq += tl.dot(ds.to(blk_k.dtype), blk_k).to(tl.float32) * scale
-                    tl.store(dq + blk_dq_idx, blk_dq.to(dq.dtype.element_ty))
+                    blk_dq = tl.cast(tl.load(dq + blk_dq_idx, mask=((blk_dq_idx >= 0) & (blk_dq_idx < tl.cast(total_q_blocks, tl.int64) * q_b_s))), tl.float32)
+                    blk_dq += tl.cast(tl.dot(tl.cast(ds, blk_k.dtype), blk_k), tl.float32) * scale
+                    tl.store(dq + blk_dq_idx, tl.cast(blk_dq, dq.dtype.element_ty))
 
 
 def flash_attention_build_lut(attention_layout: Tensor,

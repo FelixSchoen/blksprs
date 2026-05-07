@@ -26,9 +26,10 @@ def flow_pull_forward(x: Tensor, sparsity_layout_o: Tensor,
         s_lut_r, s_lut_c = sparsity_lut.size()
         s_lut_r_s, s_lut_c_s = stride(sparsity_lut)
 
-        triton_grid = lambda meta: [o_b,
-                                    triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),
-                                    triton.cdiv(o_c, meta["TRITON_BLOCK_SIZE"])]
+        def triton_grid(meta): return [o_b,
+                                       triton.cdiv(
+                                           o_r, meta["TRITON_BLOCK_SIZE"]),
+                                       triton.cdiv(o_c, meta["TRITON_BLOCK_SIZE"])]
 
         (wrap_triton(flow_pull_kernel)[triton_grid]
          (x,
@@ -61,40 +62,42 @@ def flow_pull_kernel(x,
                      sparsity_block_size,
                      TRITON_BLOCK_SIZE: tl.constexpr) -> None:
     # Get triton block indices
-    pid_blk = tl.program_id(axis=0)
-    pid_row = tl.program_id(axis=1)
-    pid_col = tl.program_id(axis=2)
+    pid_blk = tl.cast(tl.program_id(axis=0), tl.int64)
+    pid_row = tl.cast(tl.program_id(axis=1), tl.int64)
+    pid_col = tl.cast(tl.program_id(axis=2), tl.int64)
 
     # Get sparsity index of current output block consisting of its batch, row, and column index
-    spa_val_idx = pid_blk * s_lut_r_s + tl.arange(0, 4) * s_lut_c_s
+    spa_val_idx = pid_blk * s_lut_r_s + \
+        tl.cast(tl.arange(0, 4), tl.int64) * s_lut_c_s
     spa_val_msk = (tl.arange(0, 4) < 3)
-    spa_val = tl.load(s_lut + spa_val_idx, mask=spa_val_msk)
+    spa_val = tl.load(s_lut + spa_val_idx, mask=spa_val_msk, other=0)
 
-    spa_bat = tl.sum(spa_val * (tl.arange(0, 4) == 0))
-    spa_row = tl.sum(spa_val * (tl.arange(0, 4) == 1))
-    spa_col = tl.sum(spa_val * (tl.arange(0, 4) == 2))
+    spa_bat = tl.cast(tl.sum(spa_val * (tl.arange(0, 4) == 0)), tl.int64)
+    spa_row = tl.cast(tl.sum(spa_val * (tl.arange(0, 4) == 1)), tl.int64)
+    spa_col = tl.cast(tl.sum(spa_val * (tl.arange(0, 4) == 2)), tl.int64)
 
     # Load reverse sparsity index
     rev_idx_spa_idx = (spa_bat * s_l_o_b_s +
                        spa_row * s_l_o_r_s +
                        spa_col * s_l_o_c_s)
     rev_idx_spa_msk = ((rev_idx_spa_idx >= 0) &
-                       (rev_idx_spa_idx < s_l_o_b * s_l_o_b_s))
-    rev_idx_spa = tl.load(r_lut + rev_idx_spa_idx, mask=rev_idx_spa_msk).to(tl.int32)
+                       (rev_idx_spa_idx < tl.cast(s_l_o_b, tl.int64) * s_l_o_b_s))
+    rev_idx_spa = tl.cast(tl.load(r_lut + rev_idx_spa_idx,
+                          mask=rev_idx_spa_msk), tl.int32)
 
     if rev_idx_spa >= 0:
-        blk_x_idx = (rev_idx_spa * x_b_s +
-                     ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
-                     ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
+        blk_x_idx = (tl.cast(rev_idx_spa, tl.int64) * x_b_s +
+                     ((pid_row * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), tl.int64)) * x_r_s)[:, None] +
+                     ((pid_col * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), tl.int64)) * x_c_s)[None, :])
         blk_x_msk = ((blk_x_idx >= 0) &
-                     (blk_x_idx < x_b * x_b_s))
+                     (blk_x_idx < tl.cast(x_b, tl.int64) * x_b_s))
         blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
 
         blk_o_idx = (pid_blk * o_b_s +
-                     ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
-                     ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
+                     ((pid_row * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), tl.int64)) * o_r_s)[:, None] +
+                     ((pid_col * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), tl.int64)) * o_c_s)[None, :])
         blk_o_msk = ((blk_o_idx >= 0) &
-                     (blk_o_idx < o_b * o_b_s))
+                     (blk_o_idx < tl.cast(o_b, tl.int64) * o_b_s))
         tl.store(o + blk_o_idx, blk_x, mask=blk_o_msk)
 
 
@@ -114,9 +117,10 @@ def flow_push_forward(x: Tensor, sparsity_layout_x: Tensor, sparsity_lut: Tensor
         o_b, o_r, o_c = output.size()
         o_b_s, o_r_s, o_c_s = stride(output)
 
-        triton_grid = lambda meta: [x_b,
-                                    triton.cdiv(x_r, meta["TRITON_BLOCK_SIZE"]),
-                                    triton.cdiv(x_c, meta["TRITON_BLOCK_SIZE"])]
+        def triton_grid(meta): return [x_b,
+                                       triton.cdiv(
+                                           x_r, meta["TRITON_BLOCK_SIZE"]),
+                                       triton.cdiv(x_c, meta["TRITON_BLOCK_SIZE"])]
 
         (wrap_triton(flow_push_kernel)[triton_grid]
          (x,
@@ -149,38 +153,40 @@ def flow_push_kernel(x,
                      sparsity_block_size,
                      TRITON_BLOCK_SIZE: tl.constexpr) -> None:
     # Get triton block indices
-    pid_blk = tl.program_id(axis=0)
-    pid_row = tl.program_id(axis=1)
-    pid_col = tl.program_id(axis=2)
+    pid_blk = tl.cast(tl.program_id(axis=0), tl.int64)
+    pid_row = tl.cast(tl.program_id(axis=1), tl.int64)
+    pid_col = tl.cast(tl.program_id(axis=2), tl.int64)
 
     # Get sparsity index of current input block consisting of its batch, row, and column index
-    spa_val_idx = pid_blk * s_lut_r_s + tl.arange(0, 4) * s_lut_c_s
+    spa_val_idx = pid_blk * s_lut_r_s + \
+        tl.cast(tl.arange(0, 4), tl.int64) * s_lut_c_s
     spa_val_msk = (tl.arange(0, 4) < 3)
-    spa_val = tl.load(s_lut + spa_val_idx, mask=spa_val_msk)
+    spa_val = tl.load(s_lut + spa_val_idx, mask=spa_val_msk, other=0)
 
-    spa_bat = tl.sum(spa_val * (tl.arange(0, 4) == 0))
-    spa_row = tl.sum(spa_val * (tl.arange(0, 4) == 1))
-    spa_col = tl.sum(spa_val * (tl.arange(0, 4) == 2))
+    spa_bat = tl.cast(tl.sum(spa_val * (tl.arange(0, 4) == 0)), tl.int64)
+    spa_row = tl.cast(tl.sum(spa_val * (tl.arange(0, 4) == 1)), tl.int64)
+    spa_col = tl.cast(tl.sum(spa_val * (tl.arange(0, 4) == 2)), tl.int64)
 
     # Get reverse sparsity index
     rev_idx_spa_idx = (spa_bat * s_l_x_b_s +
                        spa_row * s_l_x_r_s +
                        spa_col * s_l_x_c_s)
     rev_idx_spa_msk = ((rev_idx_spa_idx >= 0) &
-                       (rev_idx_spa_idx < s_l_x_b * s_l_x_b_s))
-    rev_idx_spa = tl.load(r_lut + rev_idx_spa_idx, mask=rev_idx_spa_msk).to(tl.int32)
+                       (rev_idx_spa_idx < tl.cast(s_l_x_b, tl.int64) * s_l_x_b_s))
+    rev_idx_spa = tl.cast(tl.load(r_lut + rev_idx_spa_idx,
+                          mask=rev_idx_spa_msk), tl.int32)
 
     if rev_idx_spa >= 0:
         blk_x_idx = (pid_blk * x_b_s +
-                     ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_r_s)[:, None] +
-                     ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * x_c_s)[None, :])
+                     ((pid_row * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), tl.int64)) * x_r_s)[:, None] +
+                     ((pid_col * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), tl.int64)) * x_c_s)[None, :])
         blk_x_msk = ((blk_x_idx >= 0) &
-                     (blk_x_idx < x_b * x_b_s))
+                     (blk_x_idx < tl.cast(x_b, tl.int64) * x_b_s))
         blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
 
-        blk_o_idx = (rev_idx_spa * o_b_s +
-                     ((pid_row * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_r_s)[:, None] +
-                     ((pid_col * TRITON_BLOCK_SIZE + tl.arange(0, TRITON_BLOCK_SIZE)) * o_c_s)[None, :])
+        blk_o_idx = (tl.cast(rev_idx_spa, tl.int64) * o_b_s +
+                     ((pid_row * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), tl.int64)) * o_r_s)[:, None] +
+                     ((pid_col * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), tl.int64)) * o_c_s)[None, :])
         blk_o_msk = ((blk_o_idx >= 0) &
-                     (blk_o_idx < o_b * o_b_s))
+                     (blk_o_idx < tl.cast(o_b, tl.int64) * o_b_s))
         tl.atomic_add(o + blk_o_idx, blk_x, mask=blk_o_msk)
