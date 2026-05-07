@@ -9,7 +9,7 @@ from blksprs.utils.validation import validate_dimensions, validate_contiguous, v
     validate_sparsity, validate_sparsity_block_size, ensure_contiguous
 
 
-@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
+@torch.amp.custom_fwd(device_type="cuda")
 def transpose(x: BlksprsTensor, sparsity_layout: Tensor,
               sparsity_block_size: int, lut: dict = None) -> (BlksprsTensor, Tensor):
     """Transposes a block-sparse tensor in compressed form.

@@ -31,7 +31,7 @@ def test_readme():
     x_sparse = bs.ops.to_sparse(x_dense, sparsity_layout_x, sparsity_block_size)
     y_sparse = bs.ops.to_sparse(y_dense, sparsity_layout_y, sparsity_block_size)
 
-    # As of version 2.0, blksprs supports JIT compilation
+    # blksprs works with torch.compile
     matmul_compiled = torch.compile(bs.ops.matmul)
 
     # Perform matrix multiplication
@@ -71,51 +71,50 @@ def test_readme():
     bs.ops.misc.row_wise_sum(o_sparse, sparsity_layout_o, sparsity_block_size)
     bs.ops.misc.row_wise_max(o_sparse, sparsity_layout_o, sparsity_block_size)
 
-    seq, head_dim = 512, 64
-    sbs_attn = 64
+    # Flash Attention
+    seq_len, head_dim = 512, 64
+    sparsity_block_size_attn = 64
 
-    q = torch.randn(b, seq, h, head_dim, device="cuda")
-    k = torch.randn(b, seq, h, head_dim, device="cuda")
-    v = torch.randn(b, seq, h, head_dim, device="cuda")
+    q = torch.randn(b, seq_len, h, head_dim, device="cuda")
+    k = torch.randn(b, seq_len, h, head_dim, device="cuda")
+    v = torch.randn(b, seq_len, h, head_dim, device="cuda")
 
-    q_blksprs = q.transpose(1, 2).reshape(-1, seq, head_dim).contiguous()
-    k_blksprs = k.transpose(1, 2).reshape(-1, seq, head_dim).contiguous()
-    v_blksprs = v.transpose(1, 2).reshape(-1, seq, head_dim).contiguous()
+    # Flash attention expects (batch * heads, seq_len, head_dim)
+    q_dense = q.transpose(1, 2).reshape(-1, seq_len, head_dim).contiguous()
+    k_dense = k.transpose(1, 2).reshape(-1, seq_len, head_dim).contiguous()
+    v_dense = v.transpose(1, 2).reshape(-1, seq_len, head_dim).contiguous()
 
     n_batches_attn = b * h
-    n_seq_blocks_attn = seq // sbs_attn
-    n_head_blocks_attn = head_dim // sbs_attn
+    n_seq_blocks = seq_len // sparsity_block_size_attn
+    n_head_blocks = head_dim // sparsity_block_size_attn
 
     sparsity_layout_qkv = torch.ones(
-        n_batches_attn, n_seq_blocks_attn, n_head_blocks_attn,
+        n_batches_attn, n_seq_blocks, n_head_blocks,
         device="cuda", dtype=torch.bool,
     )
-    attention_layout = torch.tril(torch.ones(
-        n_batches_attn, n_seq_blocks_attn, n_seq_blocks_attn,
-        device="cuda", dtype=torch.bool,
-    ))
+    attention_layout = torch.tril(torch.ones(n_batches_attn, n_seq_blocks, n_seq_blocks, device="cuda", dtype=torch.bool))
 
-    q_sparse = bs.ops.to_sparse(q_blksprs, sparsity_layout_qkv, sbs_attn)
-    k_sparse = bs.ops.to_sparse(k_blksprs, sparsity_layout_qkv, sbs_attn)
-    v_sparse = bs.ops.to_sparse(v_blksprs, sparsity_layout_qkv, sbs_attn)
+    q_sparse = bs.ops.to_sparse(q_dense, sparsity_layout_qkv, sparsity_block_size_attn)
+    k_sparse = bs.ops.to_sparse(k_dense, sparsity_layout_qkv, sparsity_block_size_attn)
+    v_sparse = bs.ops.to_sparse(v_dense, sparsity_layout_qkv, sparsity_block_size_attn)
 
     lut = bs.ops.flash_attention_build_lut(
         attention_layout,
         sparsity_layout_qkv, sparsity_layout_qkv, sparsity_layout_qkv,
-        n_seq_blocks_attn, n_seq_blocks_attn, n_head_blocks_attn,
+        n_seq_blocks, n_seq_blocks, n_head_blocks,
     )
 
-    flash_out_sparse = bs.ops.flash_attention(
+    attn_out_sparse = bs.ops.flash_attention(
         q_sparse, sparsity_layout_qkv,
         k_sparse, sparsity_layout_qkv,
         v_sparse, sparsity_layout_qkv,
-        attention_layout, sbs_attn,
+        attention_layout, sparsity_block_size_attn,
         lut=lut,
     )
-    flash_out_dense = bs.ops.to_dense(flash_out_sparse, sparsity_layout_qkv, sbs_attn)
-    flash_out = flash_out_dense.reshape(b, h, seq, head_dim).transpose(1, 2).contiguous()
+    attn_out_dense = bs.ops.to_dense(attn_out_sparse, sparsity_layout_qkv, sparsity_block_size_attn)
+    attn_out = attn_out_dense.reshape(b, h, seq_len, head_dim).transpose(1, 2).contiguous()
 
-    assert flash_out.shape == (b, seq, h, head_dim)
+    assert attn_out.shape == (b, seq_len, h, head_dim)
 
 
 

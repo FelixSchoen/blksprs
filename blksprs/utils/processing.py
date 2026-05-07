@@ -11,7 +11,7 @@ from blksprs.ops.repeat import repeat
 from blksprs.utils.blksprs_tensor import BlksprsTensor
 
 
-@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
+@torch.amp.custom_fwd(device_type="cuda")
 def apply_torch_linear(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
                        linear: nn.Linear, bias: nn.Parameter = None) -> (BlksprsTensor, Tensor):
     # Extract weight; bias uses the explicit override if provided, otherwise falls back to linear.bias
@@ -53,7 +53,7 @@ def apply_torch_linear(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block
     return interim, sparsity_layout_output
 
 
-@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
+@torch.amp.custom_fwd(device_type="cuda")
 def apply_torch_linear_cached(x: BlksprsTensor,
                               sparsity_layout: Tensor,
                               sparsity_block_size: int,

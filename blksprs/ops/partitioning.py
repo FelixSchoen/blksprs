@@ -9,7 +9,7 @@ from blksprs.utils.validation import validate_dimensions, validate_contiguous, v
     validate_sparsity, validate_sparsity_block_size, ensure_contiguous
 
 
-@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
+@torch.amp.custom_fwd(device_type="cuda")
 def split(x: BlksprsTensor, sparsity_layout: Tensor, partitions: int,
           dim: int, sparsity_block_size: int, lut: dict = None) -> (
         BlksprsTensor, Tensor):
@@ -111,7 +111,7 @@ def split_setup_context(ctx, inputs, output):
 split_forward.register_autograd(split_wrapper_backward, setup_context=split_setup_context)
 
 
-@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float16)
+@torch.amp.custom_fwd(device_type="cuda")
 def merge(x: BlksprsTensor, sparsity_layout: Tensor, partitions: int,
           dim: int, sparsity_block_size: int, lut: dict = None) -> (
         BlksprsTensor, Tensor):
