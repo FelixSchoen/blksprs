@@ -86,7 +86,7 @@ library.
   These instabilities are due to Triton and thus cannot be fixed by this library alone.
   However, for all intents and purposes, these very minor differences should not matter and can safely be ignored.
 
-- Flash Attention is a recent addition. While it has been tested and appears stable, please report any issues you encounter.
+- Flash Attention has broader test coverage now, but it remains the newest major API surface. Please report any issues you encounter.
 
 ## 💻 Usage
 

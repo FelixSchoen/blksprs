@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4] - 2026-05-07
+
+### Added
+
+- Add large-index regression coverage for sparse conversion, row-wise ops, broadcast ops, layout builders, softmax, and flash attention
+
+### Changed
+
+- Update README usage example and README test to document `torch.compile` usage explicitly
+- Harden public sparse, misc, and layout-building kernels with guarded `int32`/`int64` indexing dispatch
+- Isolate hardware-sensitive performance and overflow checks behind the `benchmark` pytest marker
+
+### Fixed
+
+- Fix address-overflow bugs in block-sparse kernels for large flattened index spaces
+- Fix mixed-length batched Longformer evaluation corruption caused by incorrect sparse mask conversion at overflow scale
+- Fix silent CUDA public-API downcasting so caller dtypes are preserved unless autocast is active
+- Fix row-wise, broadcast, and layout-building helper correctness for overflow-scale inputs
+- Fix release verification to use the in-tree `2.4` package state consistently
+
 ## [2.3.2] - 2026-04-08
 
 ### Added
