@@ -9,7 +9,8 @@ from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_config
 from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import stride, build_reverse_lut, can_use_int32_indexing, cast_for_autocast
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
-    validate_sparsity, validate_sparsity_block_size, validate_dtype_float, ensure_contiguous
+    validate_sparsity, validate_sparsity_layout, validate_sparsity_block_size, validate_dtype_float, \
+    validate_shape, ensure_contiguous
 
 
 @torch.amp.custom_fwd(device_type="cuda")
@@ -38,13 +39,21 @@ def matmul(x: BlksprsTensor, sparsity_layout_x: Tensor,
     x, y = cast_for_autocast(x, y)
 
     validate_dimensions(x, y)
-    validate_contiguous(x, y)
+    validate_contiguous(x, y, sparsity_layout_output)
     validate_dtype_float(x, y)
-    validate_device(x, y)
+    validate_device(x, y, sparsity_layout_output)
     validate_sparsity(sparsity_block_size,
                       (x, sparsity_layout_x), (y, sparsity_layout_y))
+    validate_sparsity_layout(sparsity_layout_output)
+    if sparsity_layout_x.size(0) != sparsity_layout_y.size(0):
+        raise ValueError("Batch dimensions of tensors must match")
     if sparsity_layout_x.size(-1) != sparsity_layout_y.size(-2):
         raise ValueError("Inner dimensions of tensors must match")
+    validate_shape(
+        sparsity_layout_output,
+        (sparsity_layout_x.size(0), sparsity_layout_x.size(1), sparsity_layout_y.size(2)),
+        "Output sparsity layout",
+    )
     validate_sparsity_block_size(sparsity_block_size, x, y)
 
     lut = matmul_build_lut(lut, sparsity_layout_x,
@@ -99,13 +108,13 @@ def matmul_forward(x: Tensor, y: Tensor,
         (wrap_triton(matmul_kernel)[triton_grid]
          (x,
           x_b, x_b_s, x_r_s, x_c_s,
-          s_l_x_b, s_l_x_b_s, s_l_x_r_s,
+          s_l_x_b, s_l_x_r, s_l_x_b_s, s_l_x_r_s,
           s_l_x_c, s_l_x_c_s,
           sparsity_reverse_lut_x,
           y,
           y_b, y_b_s, y_r_s, y_c_s,
-          s_l_y_b, s_l_y_b_s, s_l_y_r_s,
-          s_l_y_c_s,
+          s_l_y_b, s_l_y_r, s_l_y_b_s, s_l_y_r_s,
+          s_l_y_c, s_l_y_c_s,
           sparsity_reverse_lut_y,
           output,
           o_b, o_b_s, o_r_s, o_c_s,
@@ -143,11 +152,11 @@ def matmul_wrapper_backward(ctx, grad_output):
 @triton.jit
 def matmul_kernel(x,
                   x_b, x_b_s, x_r_s, x_c_s,
-                  s_l_x_b, s_l_x_b_s, s_l_x_r_s, s_l_x_c, s_l_x_c_s,
+                  s_l_x_b, s_l_x_r, s_l_x_b_s, s_l_x_r_s, s_l_x_c, s_l_x_c_s,
                   r_lut_x,
                   y,
                   y_b, y_b_s, y_r_s, y_c_s,
-                  s_l_y_b, s_l_y_b_s, s_l_y_r_s, s_l_y_c_s,
+                  s_l_y_b, s_l_y_r, s_l_y_b_s, s_l_y_r_s, s_l_y_c, s_l_y_c_s,
                   r_lut_y,
                   o,
                   o_b, o_b_s, o_r_s, o_c_s,
@@ -190,18 +199,26 @@ def matmul_kernel(x,
         rev_idx_spa_x_idx = (spa_bat_o * s_l_x_b_s +
                              spa_row_o * s_l_x_r_s +
                              i_seg_spa * s_l_x_c_s)
-        rev_idx_spa_x_msk = ((rev_idx_spa_x_idx >= 0) &
-                             (rev_idx_spa_x_idx < tl.cast(s_l_x_b, index_dtype) * s_l_x_b_s))
+        rev_idx_spa_x_msk = ((spa_bat_o >= 0) &
+                             (spa_bat_o < tl.cast(s_l_x_b, index_dtype)) &
+                             (spa_row_o >= 0) &
+                             (spa_row_o < tl.cast(s_l_x_r, index_dtype)) &
+                             (i_seg_spa >= 0) &
+                             (i_seg_spa < tl.cast(s_l_x_c, index_dtype)))
         rev_idx_spa_x = tl.cast(
-            tl.load(r_lut_x + rev_idx_spa_x_idx, mask=rev_idx_spa_x_msk), tl.int32)
+            tl.load(r_lut_x + rev_idx_spa_x_idx, mask=rev_idx_spa_x_msk, other=-1), tl.int32)
 
         # Get reverse sparsity indices for y
         rev_idx_spa_y_idx = (spa_bat_o * s_l_y_b_s +
                              i_seg_spa * s_l_y_r_s + spa_col_o * s_l_y_c_s)
-        rev_idx_spa_y_msk = ((rev_idx_spa_y_idx >= 0) &
-                             (rev_idx_spa_y_idx < tl.cast(s_l_y_b, index_dtype) * s_l_y_b_s))
+        rev_idx_spa_y_msk = ((spa_bat_o >= 0) &
+                             (spa_bat_o < tl.cast(s_l_y_b, index_dtype)) &
+                             (i_seg_spa >= 0) &
+                             (i_seg_spa < tl.cast(s_l_y_r, index_dtype)) &
+                             (spa_col_o >= 0) &
+                             (spa_col_o < tl.cast(s_l_y_c, index_dtype)))
         rev_idx_spa_y = tl.cast(
-            tl.load(r_lut_y + rev_idx_spa_y_idx, mask=rev_idx_spa_y_msk), tl.int32)
+            tl.load(r_lut_y + rev_idx_spa_y_idx, mask=rev_idx_spa_y_msk, other=-1), tl.int32)
 
         # If both blocks are present commence calculation
         if rev_idx_spa_x >= 0 and rev_idx_spa_y >= 0:
@@ -210,14 +227,14 @@ def matmul_kernel(x,
                          ((i_seg_tri_mod * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * x_c_s)[None, :])
             blk_x_msk = ((blk_x_idx >= 0) &
                          (blk_x_idx < tl.cast(x_b, index_dtype) * x_b_s))
-            blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
+            blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk, other=0)
 
             blk_y_idx = ((tl.cast(rev_idx_spa_y, index_dtype) * y_b_s) +
                          ((i_seg_tri_mod * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * y_r_s)[:, None] +
                          ((pid_col * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * y_c_s)[None, :])
             blk_y_msk = ((blk_y_idx >= 0) &
                          (blk_y_idx < tl.cast(y_b, index_dtype) * y_b_s))
-            blk_y = tl.load(y + blk_y_idx, mask=blk_y_msk)
+            blk_y = tl.load(y + blk_y_idx, mask=blk_y_msk, other=0)
 
             # Perform matrix multiplication
             buf += tl.dot(blk_x, blk_y)

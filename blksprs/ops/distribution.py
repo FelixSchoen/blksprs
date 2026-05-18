@@ -86,7 +86,7 @@ def gather_forward(x: Tensor, sparsity_layout_x: Tensor, sparsity_reverse_lut_x:
         (wrap_triton(gather_kernel)[triton_grid]
          (x,
           x_b, x_b_s, x_r_s, x_c_s,
-          s_l_x_b, s_l_x_b_s, s_l_x_r_s, s_l_x_c_s,
+          s_l_x_b, s_l_x_r, s_l_x_c, s_l_x_b_s, s_l_x_r_s, s_l_x_c_s,
           sparsity_reverse_lut_x,
           dim,
           i,
@@ -120,7 +120,7 @@ def gather_wrapper_backward(ctx, grad_output):
 @triton.jit
 def gather_kernel(x,
                   x_b, x_b_s, x_r_s, x_c_s,
-                  s_l_x_b, s_l_x_b_s, s_l_x_r_s, s_l_x_c_s,
+                  s_l_x_b, s_l_x_r, s_l_x_c, s_l_x_b_s, s_l_x_r_s, s_l_x_c_s,
                   r_lut_x,
                   dim,
                   i,
@@ -152,7 +152,7 @@ def gather_kernel(x,
                  ((pid_col * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * i_c_s)[None, :])
     blk_i_msk = ((blk_i_idx >= 0) &
                  (blk_i_idx < tl.cast(i_b, index_dtype) * i_b_s))
-    blk_i = tl.cast(tl.load(i + blk_i_idx, mask=blk_i_msk), tl.int32)
+    blk_i = tl.cast(tl.load(i + blk_i_idx, mask=blk_i_msk, other=0), tl.int32)
 
     # Get indices of sparsity blocks and positions within the blocks
     pos_spa_blk_x = blk_i // sparsity_block_size
@@ -181,10 +181,14 @@ def gather_kernel(x,
     rev_idx_spa_x_idx = ((tl.cast(rev_dst_bat_x, index_dtype) * s_l_x_b_s) +
                          (tl.cast(rev_dst_row_x, index_dtype) * s_l_x_r_s) +
                          (tl.cast(rev_dst_col_x, index_dtype) * s_l_x_c_s))
-    rev_idx_spa_x_msk = ((rev_idx_spa_x_idx >= 0) &
-                         (rev_idx_spa_x_idx < tl.cast(s_l_x_b, index_dtype) * s_l_x_b_s))
+    rev_idx_spa_x_msk = ((rev_dst_bat_x >= 0) &
+                         (tl.cast(rev_dst_bat_x, index_dtype) < tl.cast(s_l_x_b, index_dtype)) &
+                         (rev_dst_row_x >= 0) &
+                         (tl.cast(rev_dst_row_x, index_dtype) < tl.cast(s_l_x_r, index_dtype)) &
+                         (rev_dst_col_x >= 0) &
+                         (tl.cast(rev_dst_col_x, index_dtype) < tl.cast(s_l_x_c, index_dtype)))
     rev_idx_spa_x = tl.cast(
-        tl.load(r_lut_x + rev_idx_spa_x_idx, mask=rev_idx_spa_x_msk), tl.int32)
+        tl.load(r_lut_x + rev_idx_spa_x_idx, mask=rev_idx_spa_x_msk, other=-1), tl.int32)
 
     # Load x values
     blk_x_idx = ((tl.cast(rev_idx_spa_x, index_dtype) * x_b_s) +
@@ -193,7 +197,7 @@ def gather_kernel(x,
     blk_x_msk = (((blk_x_idx >= 0) &
                   (blk_x_idx < tl.cast(x_b, index_dtype) * x_b_s)) &
                  (rev_idx_spa_x >= 0))
-    blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
+    blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk, other=0)
 
     # Store output
     blk_o_idx = ((pid_blk * o_b_s) +
@@ -354,7 +358,7 @@ def scatter_reduce_forward(x: Tensor, _: Tensor, sparsity_lut_x: Tensor,
           i_b, i_b_s, i_r_s, i_c_s,
           output,
           o_b, o_b_s,
-          s_l_o_b, s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
+          s_l_o_b, s_l_o_r, s_l_o_c, s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
           sparsity_reverse_lut_o,
           reduce_op_ind,
           sparsity_block_size,
@@ -392,7 +396,7 @@ def scatter_reduce_kernel(x,
                           i_b, i_b_s, i_r_s, i_c_s,
                           o,
                           o_b, o_b_s,
-                          s_l_o_b, s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
+                          s_l_o_b, s_l_o_r, s_l_o_c, s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
                           r_lut_o,
                           reduce_op_ind,
                           sparsity_block_size,
@@ -419,7 +423,7 @@ def scatter_reduce_kernel(x,
                  ((pid_col * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * x_c_s)[None, :])
     blk_x_msk = ((blk_x_idx >= 0) &
                  (blk_x_idx < tl.cast(x_b, index_dtype) * x_b_s))
-    blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
+    blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk, other=0)
 
     # Load index values
     blk_i_idx = ((pid_blk * i_b_s) +
@@ -427,7 +431,7 @@ def scatter_reduce_kernel(x,
                  ((pid_col * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * i_c_s)[None, :])
     blk_i_msk = ((blk_i_idx >= 0) &
                  (blk_i_idx < tl.cast(i_b, index_dtype) * i_b_s))
-    blk_i = tl.cast(tl.load(i + blk_i_idx, mask=blk_i_msk), tl.int32)
+    blk_i = tl.cast(tl.load(i + blk_i_idx, mask=blk_i_msk, other=0), tl.int32)
 
     # Get indices of sparsity blocks and positions within the blocks
     pos_spa_blk_x = blk_i // sparsity_block_size
@@ -456,10 +460,14 @@ def scatter_reduce_kernel(x,
     rev_idx_spa_o_idx = ((tl.cast(rev_dst_bat_o, index_dtype) * s_l_o_b_s) +
                          (tl.cast(rev_dst_row_o, index_dtype) * s_l_o_r_s) +
                          (tl.cast(rev_dst_col_o, index_dtype) * s_l_o_c_s))
-    rev_idx_spa_o_msk = ((rev_idx_spa_o_idx >= 0) &
-                         (rev_idx_spa_o_idx < tl.cast(s_l_o_b, index_dtype) * s_l_o_b_s))
+    rev_idx_spa_o_msk = ((rev_dst_bat_o >= 0) &
+                         (tl.cast(rev_dst_bat_o, index_dtype) < tl.cast(s_l_o_b, index_dtype)) &
+                         (rev_dst_row_o >= 0) &
+                         (tl.cast(rev_dst_row_o, index_dtype) < tl.cast(s_l_o_r, index_dtype)) &
+                         (rev_dst_col_o >= 0) &
+                         (tl.cast(rev_dst_col_o, index_dtype) < tl.cast(s_l_o_c, index_dtype)))
     rev_idx_spa_o = tl.cast(
-        tl.load(r_lut_o + rev_idx_spa_o_idx, mask=rev_idx_spa_o_msk), tl.int32)
+        tl.load(r_lut_o + rev_idx_spa_o_idx, mask=rev_idx_spa_o_msk, other=-1), tl.int32)
 
     # Store output
     blk_o_idx = ((tl.cast(rev_idx_spa_o, index_dtype) * o_b_s) +

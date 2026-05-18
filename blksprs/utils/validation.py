@@ -97,6 +97,44 @@ def validate_device(*tensors: Tensor) -> None:
             raise ValueError("Tensors must be on same device")
 
 
+def validate_shape(tensor: Tensor, expected_shape, name: str = "Tensor") -> None:
+    if _check_skip_validation():
+        return
+
+    expected_shape = torch.Size(expected_shape)
+    if tensor.shape != expected_shape:
+        raise ValueError(
+            f"{name} shape {tuple(tensor.shape)} doesn't match expected {tuple(expected_shape)}")
+
+
+def validate_positive_integer(value: int, name: str) -> None:
+    if _check_skip_validation():
+        return
+
+    if value < 1:
+        raise ValueError(f"{name} must be a positive integer")
+
+
+def validate_positive_integer_tuple(values: tuple[int, ...], length: int, name: str) -> None:
+    if _check_skip_validation():
+        return
+
+    if len(values) != length or any(value < 1 for value in values):
+        raise ValueError(f"{name} must contain {length} positive integers")
+
+
+def validate_divisible(value: int, divisor: int, value_name: str, divisor_name: str) -> None:
+    if _check_skip_validation():
+        return
+
+    _validate_divisible(value, divisor, value_name, divisor_name)
+
+
+def _validate_divisible(value: int, divisor: int, value_name: str, divisor_name: str) -> None:
+    if value % divisor != 0:
+        raise ValueError(f"{value_name} must be divisible by {divisor_name}")
+
+
 def validate_sparsity(sparsity_block_size: int, *tensor_sparsity_layout_tuples: tuple[Tensor, Tensor]) -> None:
     if _check_skip_validation():
         return
@@ -121,17 +159,33 @@ def validate_sparsity_dense(sparsity_block_size: int, *tensor_sparsity_layout_tu
 
         if not sparsity_layout.dim() == 3:
             raise ValueError("Sparsity layout must have exactly 3 dimensions")
+        _validate_divisible(tensor.size(-1), sparsity_block_size, "Tensor sizes", "sparsity block size")
+        _validate_divisible(tensor.size(-2), sparsity_block_size, "Tensor sizes", "sparsity block size")
         if not (tensor.size(-1) // sparsity_block_size == sparsity_layout.size(-1) and
                 tensor.size(-2) // sparsity_block_size == sparsity_layout.size(-2)):
             raise ValueError("Tensor not conforming to sparsity layout")
 
 
+def validate_sparsity_layout(*sparsity_layouts: Tensor) -> None:
+    if _check_skip_validation():
+        return
+
+    for sparsity_layout in sparsity_layouts:
+        _validate_sparsity_layout_values(sparsity_layout)
+
+        if not sparsity_layout.dim() == 3:
+            raise ValueError("Sparsity layout must have exactly 3 dimensions")
+
+
 def _validate_sparsity_layout_values(sparsity_layout: Tensor):
+    if sparsity_layout.dtype == torch.bool:
+        return
+
     if not torch.all(torch.logical_or(sparsity_layout == 0, sparsity_layout == 1)):
         raise ValueError("Sparsity layout values must be either 0 or 1")
 
 
-def validate_sparsity_block_size(sparsity_block_size: int, *tensors):
+def validate_sparsity_block_size(sparsity_block_size: int, *values):
     if _check_skip_validation():
         return
 
@@ -141,9 +195,10 @@ def validate_sparsity_block_size(sparsity_block_size: int, *tensors):
     if not (sparsity_block_size & (sparsity_block_size - 1)) == 0:
         raise ValueError("Sparsity block size must be a power of 2")
 
-    for tensor in tensors:
-        if not (tensor.size(-1) % sparsity_block_size == 0 and tensor.size(-2) % sparsity_block_size == 0):
-            raise ValueError("Tensor sizes must be divisible by sparsity block size")
+    for value in values:
+        size = value if isinstance(value, (torch.Size, tuple, list)) else value.size()
+        _validate_divisible(size[-1], sparsity_block_size, "Tensor sizes", "sparsity block size")
+        _validate_divisible(size[-2], sparsity_block_size, "Tensor sizes", "sparsity block size")
 
 
 def _check_contiguous():

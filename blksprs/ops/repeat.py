@@ -6,7 +6,8 @@ from blksprs.ops.flow import flow_pull_forward, flow_push_forward
 from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import build_reverse_lut
 from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_device, \
-    validate_sparsity, validate_sparsity_block_size, ensure_contiguous
+    validate_sparsity, validate_sparsity_layout, validate_sparsity_block_size, validate_shape, \
+    validate_positive_integer, validate_positive_integer_tuple, ensure_contiguous
 
 
 @torch.amp.custom_fwd(device_type="cuda")
@@ -44,6 +45,21 @@ def repeat(x: BlksprsTensor, sparsity_layout_x: Tensor, repeats: tuple[int, int,
     validate_device(x)
     validate_sparsity(sparsity_block_size, (x, sparsity_layout_x))
     validate_sparsity_block_size(sparsity_block_size, x)
+    validate_positive_integer_tuple(repeats, 3, "repeats")
+    if sparsity_layout_output is not None:
+        sparsity_layout_output = ensure_contiguous(sparsity_layout_output)
+        validate_sparsity_layout(sparsity_layout_output)
+        validate_contiguous(sparsity_layout_output)
+        validate_device(sparsity_layout_output, x)
+        validate_shape(
+            sparsity_layout_output,
+            (
+                sparsity_layout_x.size(0) * repeats[0],
+                sparsity_layout_x.size(1) * repeats[1],
+                sparsity_layout_x.size(2) * repeats[2],
+            ),
+            "Output sparsity layout",
+        )
 
     lut = repeat_build_lut(lut, sparsity_layout_x, repeats, sparsity_layout_output)
 
@@ -85,6 +101,21 @@ def repeat_interleave(x: BlksprsTensor, sparsity_layout_x: Tensor, repeats: int,
     validate_device(x)
     validate_sparsity(sparsity_block_size, (x, sparsity_layout_x))
     validate_sparsity_block_size(sparsity_block_size, x)
+    validate_positive_integer(repeats, "repeats")
+    if sparsity_layout_output is not None:
+        sparsity_layout_output = ensure_contiguous(sparsity_layout_output)
+        validate_sparsity_layout(sparsity_layout_output)
+        validate_contiguous(sparsity_layout_output)
+        validate_device(sparsity_layout_output, x)
+        validate_shape(
+            sparsity_layout_output,
+            (
+                sparsity_layout_x.size(0) * repeats,
+                sparsity_layout_x.size(1),
+                sparsity_layout_x.size(2),
+            ),
+            "Output sparsity layout",
+        )
 
     lut = repeat_interleave_build_lut(lut, sparsity_layout_x, repeats, sparsity_layout_output)
 

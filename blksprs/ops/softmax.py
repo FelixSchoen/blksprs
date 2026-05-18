@@ -213,7 +213,7 @@ def softmax_kernel(x,
     rev_idx_spa_s_msk = ((rev_idx_spa_s_idx >= 0) &
                          (rev_idx_spa_s_idx < tl.cast(s_l_s_b, index_dtype) * s_l_s_b_s))
     rev_idx_spa_s = tl.cast(
-        tl.load(r_lut_s + rev_idx_spa_s_idx, mask=rev_idx_spa_s_msk), tl.int32)
+        tl.load(r_lut_s + rev_idx_spa_s_idx, mask=rev_idx_spa_s_msk, other=-1), tl.int32)
 
     if rev_idx_spa_s >= 0:
         # Load x block
@@ -222,7 +222,7 @@ def softmax_kernel(x,
                      ((pid_col * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * x_c_s)[None, :])
         blk_x_msk = ((blk_x_idx >= 0) &
                      (blk_x_idx < tl.cast(x_b, index_dtype) * x_b_s))
-        blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
+        blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk, other=0)
 
         # Load sum block
         blk_s_idx = (tl.cast(rev_idx_spa_s, index_dtype) * s_b_s +
@@ -230,7 +230,7 @@ def softmax_kernel(x,
                      (tl.cast(tl.arange(0, 1), index_dtype) * s_c_s)[None, :])
         blk_s_msk = ((blk_s_idx >= 0) &
                      (blk_s_idx < tl.cast(s_b, index_dtype) * s_b_s))
-        blk_s = tl.load(s + blk_s_idx, mask=blk_s_msk)
+        blk_s = tl.load(s + blk_s_idx, mask=blk_s_msk, other=1)
 
         # Compute softmax
         buf = tl.div_rn(blk_x, blk_s)
@@ -280,7 +280,7 @@ def softmax_kernel_grad(g,
     rev_idx_spa_s_msk = ((rev_idx_spa_s_idx >= 0) &
                          (rev_idx_spa_s_idx < tl.cast(s_l_s_b, index_dtype) * s_l_s_b_s))
     rev_idx_spa_s = tl.cast(
-        tl.load(r_lut_s + rev_idx_spa_s_idx, mask=rev_idx_spa_s_msk), tl.int32)
+        tl.load(r_lut_s + rev_idx_spa_s_idx, mask=rev_idx_spa_s_msk, other=-1), tl.int32)
 
     if rev_idx_spa_s >= 0:
         blk_s_idx = (tl.cast(rev_idx_spa_s, index_dtype) * s_b_s +
@@ -288,21 +288,21 @@ def softmax_kernel_grad(g,
                      (tl.cast(tl.arange(0, 1), index_dtype) * s_c_s)[None, :])
         blk_s_msk = ((blk_s_idx >= 0) &
                      (blk_s_idx < tl.cast(s_b, index_dtype) * s_b_s))
-        blk_s = tl.load(s + blk_s_idx, mask=blk_s_msk)
+        blk_s = tl.load(s + blk_s_idx, mask=blk_s_msk, other=0)
 
         blk_g_idx = ((pid_blk * g_b_s) +
                      ((pid_row * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * g_r_s)[:, None] +
                      ((pid_col * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * g_c_s)[None, :])
         blk_g_msk = ((blk_g_idx >= 0) &
                      (blk_g_idx < tl.cast(g_b, index_dtype) * g_b_s))
-        blk_g = tl.load(g + blk_g_idx, mask=blk_g_msk)
+        blk_g = tl.load(g + blk_g_idx, mask=blk_g_msk, other=0)
 
         blk_x_idx = ((pid_blk * x_b_s) +
                      ((pid_row * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * x_r_s)[:, None] +
                      ((pid_col * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * x_c_s)[None, :])
         blk_x_msk = ((blk_x_idx >= 0) &
                      (blk_x_idx < tl.cast(x_b, index_dtype) * x_b_s))
-        blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
+        blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk, other=0)
 
         buf = blk_x * (blk_g - blk_s)
 
@@ -566,7 +566,7 @@ def softmax_fused_kernel_grad(g,
         blk_g_mask = (((blk_g_idx >= 0) &
                        (blk_g_idx < tl.cast(g_b, index_dtype) * g_b_s)) &
                       (blk_rev_ext != -1))
-        blk_g = tl.load(g + blk_g_idx, mask=blk_g_mask)
+        blk_g = tl.load(g + blk_g_idx, mask=blk_g_mask, other=0)
 
         # Load line of x
         blk_x_idx = (tl.cast(blk_rev_ext, index_dtype) * x_b_s +
@@ -575,7 +575,7 @@ def softmax_fused_kernel_grad(g,
         blk_x_mask = (((blk_x_idx >= 0) &
                        (blk_x_idx < tl.cast(x_b, index_dtype) * x_b_s)) &
                       (blk_rev_ext != -1))
-        blk_x = tl.load(x + blk_x_idx, mask=blk_x_mask)
+        blk_x = tl.load(x + blk_x_idx, mask=blk_x_mask, other=0)
 
         # Compute gradients
         blk_grad = blk_x * (blk_g - tl.sum(blk_x * blk_g))

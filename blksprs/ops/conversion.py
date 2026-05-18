@@ -499,7 +499,7 @@ def to_dense_kernel(x,
     rev_idx_spa_msk = ((rev_idx_spa_idx >= 0) &
                        (rev_idx_spa_idx < tl.cast(s_l_b, index_dtype) * s_l_b_s))
     rev_idx_spa = tl.cast(tl.load(sparsity_reverse_lut +
-                          rev_idx_spa_idx, mask=rev_idx_spa_msk), tl.int32)
+                          rev_idx_spa_idx, mask=rev_idx_spa_msk, other=-1), tl.int32)
 
     # If block is present commence operations
     if rev_idx_spa >= 0:
@@ -510,7 +510,7 @@ def to_dense_kernel(x,
                      tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * x_c_s)[None, :])
         blk_msk = ((blk_idx >= 0) &
                    (blk_idx < tl.cast(x_b, index_dtype) * x_b_s))
-        blk = tl.load(x + blk_idx, mask=blk_msk)
+        blk = tl.load(x + blk_idx, mask=blk_msk, other=0)
 
         o_idx = (pid_blk * o_b_s +
                  ((pid_row * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * o_r_s)[:, None] +
@@ -672,7 +672,7 @@ def adapt_layout_forward(x: Tensor,
         (wrap_triton(adapt_layout_kernel)[triton_grid]
          (x,
           x_b, x_b_s, x_r_s, x_c_s,
-          s_l_x_b, s_l_x_b_s, s_l_x_r_s, s_l_x_c_s,
+          s_l_x_b, s_l_x_r, s_l_x_c, s_l_x_b_s, s_l_x_r_s, s_l_x_c_s,
           sparsity_reverse_lut_from,
           output,
           o_b, o_b_s, o_r_s, o_c_s,
@@ -703,7 +703,7 @@ def adapt_layout_wrapper_backward(ctx, grad_output):
 @triton.jit
 def adapt_layout_kernel(x,
                         x_b, x_b_s, x_r_s, x_c_s,
-                        s_l_x_b, s_l_x_b_s, s_l_x_r_s, s_l_x_c_s,
+                        s_l_x_b, s_l_x_r, s_l_x_c, s_l_x_b_s, s_l_x_r_s, s_l_x_c_s,
                         r_lut_x,
                         o,
                         o_b, o_b_s, o_r_s, o_c_s,
@@ -738,10 +738,14 @@ def adapt_layout_kernel(x,
     rev_idx_spa_x_idx = (spa_bat_x * s_l_x_b_s +
                          spa_row_x * s_l_x_r_s +
                          spa_col_x * s_l_x_c_s)
-    rev_idx_spa_x_msk = ((rev_idx_spa_x_idx >= 0) &
-                         (rev_idx_spa_x_idx < tl.cast(s_l_x_b, index_dtype) * s_l_x_b_s))
+    rev_idx_spa_x_msk = ((spa_bat_x >= 0) &
+                         (spa_bat_x < tl.cast(s_l_x_b, index_dtype)) &
+                         (spa_row_x >= 0) &
+                         (spa_row_x < tl.cast(s_l_x_r, index_dtype)) &
+                         (spa_col_x >= 0) &
+                         (spa_col_x < tl.cast(s_l_x_c, index_dtype)))
     rev_idx_spa_x = tl.cast(
-        tl.load(r_lut_x + rev_idx_spa_x_idx, mask=rev_idx_spa_x_msk), tl.int32)
+        tl.load(r_lut_x + rev_idx_spa_x_idx, mask=rev_idx_spa_x_msk, other=-1), tl.int32)
 
     # If block is present commence operations
     if rev_idx_spa_x >= 0:
@@ -757,7 +761,7 @@ def adapt_layout_kernel(x,
                      ((shift_col_x * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * x_c_s)[None, :])
         blk_x_msk = ((blk_x_idx >= 0) &
                      (blk_x_idx < tl.cast(x_b, index_dtype) * x_b_s))
-        blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
+        blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk, other=0)
 
         # Store output
         blk_o_idx = ((pid_blk * o_b_s) +

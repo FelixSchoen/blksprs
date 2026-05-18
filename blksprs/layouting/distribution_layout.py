@@ -11,7 +11,7 @@ from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_config
 from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import stride, can_use_int32_indexing
 from blksprs.utils.validation import validate_dimensions, validate_device, \
-    validate_contiguous
+    validate_contiguous, validate_sparsity, validate_sparsity_block_size
 
 
 @torch.amp.custom_fwd(device_type="cuda")
@@ -32,8 +32,10 @@ def build_distribution_layout(indices: BlksprsTensor, sparsity_layout_indices: T
 
     """
     validate_dimensions(indices)
-    validate_contiguous(indices)
-    validate_device(indices)
+    validate_contiguous(indices, sparsity_layout_indices)
+    validate_device(indices, sparsity_layout_indices)
+    validate_sparsity(sparsity_block_size, (indices, sparsity_layout_indices))
+    validate_sparsity_block_size(sparsity_block_size, indices, size_target)
 
     sparsity_lut_i = torch.nonzero(sparsity_layout_indices).contiguous()
 
@@ -66,12 +68,12 @@ def build_distribution_layout_operation(indices: Tensor, sparsity_lut_i: Tensor,
 
         (wrap_triton(build_distribution_layout_kernel)[triton_grid]
          (indices,
-          i_b, i_b_s, i_r_s, i_c_s,
+          i_b, i_r, i_c, i_b_s, i_r_s, i_c_s,
           sparsity_lut_i,
           s_lut_i_r, s_lut_i_r_s, s_lut_i_c_s,
           adjusted_dim,
           output,
-          o_b, o_b_s, o_r_s, o_c_s,
+          o_b, o_r, o_c, o_b_s, o_r_s, o_c_s,
           sparsity_block_size,
           USE_INT64=use_int64))
 
@@ -86,12 +88,12 @@ def build_distribution_layout_operation(indices: Tensor, sparsity_lut_i: Tensor,
 )
 @triton.jit
 def build_distribution_layout_kernel(i,
-                                     i_b, i_b_s, i_r_s, i_c_s,
+                                     i_b, i_r, i_c, i_b_s, i_r_s, i_c_s,
                                      s_lut_i,
                                      s_lut_i_r, s_lut_i_r_s, s_lut_i_c_s,
                                      dim,
                                      o,
-                                     o_b, o_b_s, o_r_s, o_c_s,
+                                     o_b, o_r, o_c, o_b_s, o_r_s, o_c_s,
                                      sparsity_block_size,
                                      USE_INT64: tl.constexpr,
                                      TRITON_BLOCK_SIZE: tl.constexpr) -> None:
@@ -105,24 +107,27 @@ def build_distribution_layout_kernel(i,
     spa_bat_i_idx = (pid_blk * s_lut_i_r_s + 0 * s_lut_i_c_s)
     spa_bat_i_msk = ((spa_bat_i_idx >= 0) &
                      (spa_bat_i_idx < tl.cast(s_lut_i_r, index_dtype) * s_lut_i_r_s))
-    spa_bat_i = tl.cast(tl.load(s_lut_i + spa_bat_i_idx, mask=spa_bat_i_msk), index_dtype)
+    spa_bat_i = tl.cast(tl.load(s_lut_i + spa_bat_i_idx, mask=spa_bat_i_msk, other=0), index_dtype)
 
     spa_row_i_idx = (pid_blk * s_lut_i_r_s + 1 * s_lut_i_c_s)
     spa_row_i_msk = ((spa_row_i_idx >= 0) &
                      (spa_row_i_idx < tl.cast(s_lut_i_r, index_dtype) * s_lut_i_r_s))
-    spa_row_i = tl.cast(tl.load(s_lut_i + spa_row_i_idx, mask=spa_row_i_msk), index_dtype)
+    spa_row_i = tl.cast(tl.load(s_lut_i + spa_row_i_idx, mask=spa_row_i_msk, other=0), index_dtype)
 
     spa_col_i_idx = (pid_blk * s_lut_i_r_s + 2 * s_lut_i_c_s)
     spa_col_i_msk = ((spa_col_i_idx >= 0) &
                      (spa_col_i_idx < tl.cast(s_lut_i_r, index_dtype) * s_lut_i_r_s))
-    spa_col_i = tl.cast(tl.load(s_lut_i + spa_col_i_idx, mask=spa_col_i_msk), index_dtype)
+    spa_col_i = tl.cast(tl.load(s_lut_i + spa_col_i_idx, mask=spa_col_i_msk, other=0), index_dtype)
 
+    row_offsets = pid_row * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)
+    col_offsets = pid_col * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)
     blk_i_idx = (pid_blk * i_b_s +
-                 ((pid_row * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * i_r_s)[:, None] +
-                 ((pid_col * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * i_c_s)[None, :])
-    blk_i_msk = ((blk_i_idx >= 0) &
-                 (blk_i_idx < tl.cast(i_b, index_dtype) * i_b_s))
-    blk_i = tl.cast(tl.load(i + blk_i_idx, mask=blk_i_msk), index_dtype)
+                 (row_offsets * i_r_s)[:, None] +
+                 (col_offsets * i_c_s)[None, :])
+    blk_i_msk = ((pid_blk < tl.cast(i_b, index_dtype)) &
+                 (row_offsets[:, None] < tl.cast(i_r, index_dtype)) &
+                 (col_offsets[None, :] < tl.cast(i_c, index_dtype)))
+    blk_i = tl.cast(tl.load(i + blk_i_idx, mask=blk_i_msk, other=0), index_dtype)
 
     dst_bat_idx = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), spa_bat_i, dtype=index_dtype)
     dst_row_idx = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), spa_row_i, dtype=index_dtype)
@@ -139,6 +144,11 @@ def build_distribution_layout_kernel(i,
     blk_o_idx = ((dst_bat_idx * o_b_s) +
                  (dst_row_idx * o_r_s) +
                  (dst_col_idx * o_c_s))
-    blk_o_msk = ((blk_o_idx >= 0) &
-                 (blk_o_idx < tl.cast(o_b, index_dtype) * o_b_s))
+    blk_o_msk = (blk_i_msk &
+                 (dst_bat_idx >= 0) &
+                 (dst_bat_idx < tl.cast(o_b, index_dtype)) &
+                 (dst_row_idx >= 0) &
+                 (dst_row_idx < tl.cast(o_r, index_dtype)) &
+                 (dst_col_idx >= 0) &
+                 (dst_col_idx < tl.cast(o_c, index_dtype)))
     tl.store(o + blk_o_idx, blk_v, mask=blk_o_msk)

@@ -14,6 +14,8 @@ from torch import Tensor
 
 import blksprs as bs
 from blksprs import BlksprsTensor
+from blksprs.layouting.distribution_layout import build_distribution_layout_operation
+from blksprs.layouting.sparsity_layout import build_sparsity_layout_operation
 
 # Device setup
 DEVICE = torch.device("cuda:0")
@@ -88,6 +90,20 @@ TEST_CONFIGURATIONS = [
 OVERFLOW_TEST_CONFIGURATIONS = [
     # (b, m, n, k, sparsity_block_size, sparsity_percentage)
     # Designed so block-sparse storage crosses the signed int32 element-index limit.
+    (4096, 16384, 32, 32, 32, 1),
+]
+
+OVERFLOW_PARTITION_CONFIGURATIONS = [
+    # (b, m, n, k, sparsity_block_size, sparsity_percentage)
+    # Two column blocks so split/merge can partition while sparse storage still
+    # crosses the signed int32 element-index limit.
+    (4096, 8192, 32, 64, 32, 1),
+]
+
+LARGE_INDEX_BUILD_LAYOUT_CONFIGURATIONS = [
+    # (b, m, n, k, sparsity_block_size, sparsity_percentage)
+    # Just below and just above the signed int32 element-index limit.
+    (4095, 16384, 32, 32, 32, 1),
     (4096, 16384, 32, 32, 32, 1),
 ]
 
@@ -329,6 +345,34 @@ def test_blksprs_gather(config: list, use_amp: bool):
                                       atol=ATOL, rtol=RTOL)
 
 
+@pytest.mark.parametrize("dim", [1, 2])
+def test_gather_kernel_masks_reverse_lut_indices_per_axis(dim: int):
+    sparsity_block_size = 16
+    sparsity_layout_src = torch.ones((2, 1, 1), dtype=torch.bool, device=DEVICE)
+    sparsity_layout_idx = torch.ones((1, 1, 1), dtype=torch.bool, device=DEVICE)
+
+    src = torch.zeros((2, sparsity_block_size, sparsity_block_size), device=DEVICE)
+    src[1] = 7
+    idx = torch.full(
+        (1, sparsity_block_size, sparsity_block_size),
+        fill_value=sparsity_block_size,
+        dtype=torch.int32,
+        device=DEVICE,
+    )
+
+    actual = bs.ops.gather(
+        BlksprsTensor.wrap(src),
+        sparsity_layout_src,
+        dim,
+        BlksprsTensor.wrap(idx),
+        sparsity_layout_idx,
+        sparsity_block_size,
+    )
+    torch.cuda.synchronize()
+
+    assert torch.equal(actual, torch.zeros_like(actual))
+
+
 @pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
 @pytest.mark.parametrize("use_amp", [True, False])
 def test_blksprs_scatter(config: list, use_amp: bool):
@@ -403,6 +447,34 @@ def test_blksprs_scatter(config: list, use_amp: bool):
                 assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=ATOL, rtol=RTOL)
 
 
+@pytest.mark.parametrize("dim", [1, 2])
+def test_scatter_reduce_kernel_masks_reverse_lut_indices_per_axis(dim: int):
+    sparsity_block_size = 16
+    sparsity_layout_src = torch.ones((1, 1, 1), dtype=torch.bool, device=DEVICE)
+    sparsity_layout_tgt = torch.ones((2, 1, 1), dtype=torch.bool, device=DEVICE)
+
+    src = torch.full((1, sparsity_block_size, sparsity_block_size), 7.0, device=DEVICE)
+    idx = torch.full(
+        (1, sparsity_block_size, sparsity_block_size),
+        fill_value=sparsity_block_size,
+        dtype=torch.int32,
+        device=DEVICE,
+    )
+
+    actual = bs.ops.scatter_reduce(
+        BlksprsTensor.wrap(src),
+        sparsity_layout_src,
+        dim,
+        BlksprsTensor.wrap(idx),
+        sparsity_layout_tgt,
+        sparsity_block_size,
+        reduce_op="sum",
+    )
+    torch.cuda.synchronize()
+
+    assert torch.equal(actual, torch.zeros_like(actual))
+
+
 @pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
 @pytest.mark.parametrize("use_amp", [True, False])
 def test_blksprs_matmul(config: list, use_amp: bool):
@@ -459,6 +531,18 @@ def test_blksprs_matmul(config: list, use_amp: bool):
 
             assert torch.allclose(x_blksprs.grad, x_stock.grad, atol=atol, rtol=rtol)
             assert torch.allclose(y_blksprs.grad, y_stock.grad, atol=atol, rtol=rtol)
+
+
+def test_matmul_rejects_incompatible_output_layout_shape():
+    sparsity_block_size = 16
+    sparsity_layout_x = torch.ones((2, 1, 1), dtype=torch.bool, device=DEVICE)
+    sparsity_layout_y = torch.ones((2, 1, 1), dtype=torch.bool, device=DEVICE)
+    sparsity_layout_output = torch.ones((2, 2, 1), dtype=torch.bool, device=DEVICE)
+    x = BlksprsTensor.wrap(torch.zeros((2, sparsity_block_size, sparsity_block_size), device=DEVICE))
+    y = BlksprsTensor.wrap(torch.zeros((2, sparsity_block_size, sparsity_block_size), device=DEVICE))
+
+    with pytest.raises(ValueError, match="Output sparsity layout shape"):
+        bs.ops.matmul(x, sparsity_layout_x, y, sparsity_layout_y, sparsity_layout_output, sparsity_block_size)
 
 
 @pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
@@ -897,6 +981,34 @@ def test_blksprs_adapt_layout(config: list, use_amp: bool):
                 assert torch.allclose(x_from_blksprs.grad, x_from_stock.grad, atol=ATOL, rtol=RTOL)
 
 
+def test_adapt_layout_zero_pads_larger_non_divisible_output_blocks():
+    sparsity_block_size_from = 16
+    sparsity_block_size_to = 32
+    sparsity_layout_from = torch.ones((2, 1, 1), dtype=torch.bool, device=DEVICE)
+    x_sparse = torch.zeros(
+        (2, sparsity_block_size_from, sparsity_block_size_from),
+        dtype=torch.float32,
+        device=DEVICE,
+    )
+    x_sparse[0] = 1
+    x_sparse[1] = 2
+
+    out_sparse, sparsity_layout_to = bs.ops.adapt_layout(
+        BlksprsTensor.wrap(x_sparse),
+        sparsity_layout_from,
+        sparsity_block_size_from,
+        sparsity_block_size_to,
+    )
+    torch.cuda.synchronize()
+
+    out_dense = bs.ops.to_dense(out_sparse, sparsity_layout_to, sparsity_block_size_to)
+    expected = torch.zeros((2, sparsity_block_size_to, sparsity_block_size_to), device=DEVICE)
+    expected[:, :sparsity_block_size_from, :sparsity_block_size_from] = x_sparse
+
+    assert torch.equal(sparsity_layout_to, torch.ones((2, 1, 1), dtype=torch.bool, device=DEVICE))
+    assert torch.equal(out_dense, expected)
+
+
 # Layouting
 
 @pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
@@ -982,6 +1094,87 @@ def test_build_distribution_layout(config: list, use_amp: bool):
                                       atol=ATOL, rtol=RTOL)
 
 
+def test_build_sparsity_layout_rejects_non_divisible_shape():
+    x = torch.zeros((1, 17, 16), device=DEVICE)
+
+    with pytest.raises(ValueError, match="divisible"):
+        bs.layouting.build_sparsity_layout(x, 16)
+
+    with pytest.raises(ValueError, match="divisible"):
+        bs.layouting.build_sparsity_layout_full(x, 16)
+
+
+def test_build_distribution_layout_rejects_non_divisible_target_shape():
+    sparsity_block_size = 16
+    sparsity_layout_indices = torch.ones((1, 1, 1), dtype=torch.bool, device=DEVICE)
+    indices = torch.zeros((1, sparsity_block_size, sparsity_block_size), dtype=torch.int32, device=DEVICE)
+
+    with pytest.raises(ValueError, match="divisible"):
+        bs.layouting.build_distribution_layout(
+            indices,
+            sparsity_layout_indices,
+            2,
+            torch.Size((1, sparsity_block_size, sparsity_block_size + 1)),
+            sparsity_block_size,
+        )
+
+
+def test_validate_sparsity_dense_rejects_non_divisible_shape():
+    sparsity_block_size = 16
+    x = torch.zeros((1, sparsity_block_size + 1, sparsity_block_size), device=DEVICE)
+    sparsity_layout = torch.ones((1, 1, 1), dtype=torch.bool, device=DEVICE)
+
+    with pytest.raises(ValueError, match="divisible"):
+        bs.utils.validation.validate_sparsity_dense(sparsity_block_size, (x, sparsity_layout))
+
+
+def test_build_sparsity_layout_kernel_masks_row_edge_tiles_per_axis():
+    sparsity_block_size = 16
+    x = torch.zeros((2, sparsity_block_size + 1, sparsity_block_size), device=DEVICE)
+    x[0, sparsity_block_size, 0] = 1
+
+    actual = build_sparsity_layout_operation(x, sparsity_block_size)
+    torch.cuda.synchronize()
+
+    expected = torch.zeros((2, 1, 1), dtype=torch.bool, device=DEVICE)
+    assert torch.equal(actual, expected)
+
+
+def test_build_sparsity_layout_kernel_masks_col_edge_tiles_per_axis():
+    sparsity_block_size = 16
+    x = torch.zeros((2, sparsity_block_size, sparsity_block_size + 1), device=DEVICE)
+    x[0, 0, sparsity_block_size] = 1
+
+    actual = build_sparsity_layout_operation(x, sparsity_block_size)
+    torch.cuda.synchronize()
+
+    expected = torch.zeros((2, 1, 1), dtype=torch.bool, device=DEVICE)
+    assert torch.equal(actual, expected)
+
+
+def test_build_distribution_layout_kernel_masks_target_edge_tiles_per_axis():
+    sparsity_block_size = 16
+    indices = torch.full(
+        (1, sparsity_block_size, sparsity_block_size),
+        fill_value=sparsity_block_size,
+        dtype=torch.int32,
+        device=DEVICE,
+    )
+    sparsity_lut_indices = torch.tensor([[0, 0, 0]], dtype=torch.int64, device=DEVICE)
+
+    actual = build_distribution_layout_operation(
+        indices,
+        sparsity_lut_indices,
+        2,
+        [2, sparsity_block_size, sparsity_block_size + 1],
+        sparsity_block_size,
+    )
+    torch.cuda.synchronize()
+
+    expected = torch.zeros((2, 1, 1), dtype=torch.bool, device=DEVICE)
+    assert torch.equal(actual, expected)
+
+
 # Processing
 
 @pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
@@ -1013,6 +1206,16 @@ def test_apply_torch_linear(config: list, use_amp: bool):
                                                            sparsity_block_size)
 
                 assert torch.allclose(blksprs_linear_dense_out.to(stock_dtype), stock_linear_out, atol=ATOL, rtol=RTOL)
+
+
+def test_apply_torch_linear_rejects_non_divisible_weight_shape():
+    sparsity_block_size = 16
+    sparsity_layout = torch.ones((1, 1, 1), dtype=torch.bool, device=DEVICE)
+    x = BlksprsTensor.wrap(torch.zeros((1, sparsity_block_size, sparsity_block_size), device=DEVICE))
+    linear = torch.nn.Linear(sparsity_block_size + 1, sparsity_block_size, bias=False, device=DEVICE)
+
+    with pytest.raises(ValueError, match="divisible"):
+        bs.utils.apply_torch_linear(x, sparsity_layout, sparsity_block_size, linear)
 
 
 @pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
@@ -1126,6 +1329,16 @@ def test_broadcast_addition(config: list, use_amp: bool):
             assert torch.allclose(blksprs_broadcast_subtraction_dense_out.to(stock_dtype),
                                   stock_broadcast_subtraction,
                                   atol=ATOL, rtol=RTOL)
+
+
+def test_broadcast_add_rejects_non_divisible_inputs():
+    sparsity_block_size = 16
+    x = torch.zeros((1, sparsity_block_size + 1), device=DEVICE)
+    y = torch.zeros((1, sparsity_block_size + 1), device=DEVICE)
+    sparsity_layout = torch.ones((1, 1, 1), dtype=torch.bool, device=DEVICE)
+
+    with pytest.raises(ValueError, match="divisible"):
+        bs.ops.misc.broadcast_add(x, y, sparsity_layout, sparsity_block_size)
 
 
 @pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
@@ -1908,7 +2121,7 @@ def test_blksprs_large_index_operations(config: tuple):
 
 
 @pytest.mark.benchmark
-@pytest.mark.parametrize("config", OVERFLOW_TEST_CONFIGURATIONS)
+@pytest.mark.parametrize("config", LARGE_INDEX_BUILD_LAYOUT_CONFIGURATIONS)
 def test_blksprs_large_index_build_sparsity_layout(config: tuple):
     _require_min_cuda_memory(20)
 
@@ -1922,6 +2135,7 @@ def test_blksprs_large_index_build_sparsity_layout(config: tuple):
     _set_sample_blocks(x, sparsity_block_size, sample_batches, sample_rows)
 
     actual = bs.layouting.build_sparsity_layout(x, sparsity_block_size)
+    torch.cuda.synchronize()
 
     expected = torch.zeros((b, n_row_blocks, n_col_blocks), dtype=torch.bool, device=DEVICE)
     for batch_idx in sample_batches:
@@ -1929,6 +2143,9 @@ def test_blksprs_large_index_build_sparsity_layout(config: tuple):
             expected[batch_idx, row_idx, 0] = True
 
     assert torch.equal(actual, expected)
+
+    actual_full = bs.layouting.build_sparsity_layout_full(x, sparsity_block_size)
+    assert torch.equal(actual_full, torch.ones_like(expected))
 
 
 @pytest.mark.benchmark
@@ -1964,6 +2181,7 @@ def test_blksprs_large_index_build_sparsity_layout_adaption(config: tuple):
         sparsity_block_size_from,
         sparsity_block_size_to,
     )
+    torch.cuda.synchronize()
 
     expected = torch.zeros((b, n_row_blocks_to, n_col_blocks_to), dtype=torch.bool, device=DEVICE)
     for batch_idx in sample_batches:
@@ -1994,6 +2212,7 @@ def test_blksprs_large_index_row_wise_operations(config: tuple):
     row_max_sparse, sparsity_layout_max = bs.ops.misc.row_wise_max(
         x_sparse, sparsity_layout_x, sparsity_block_size, flag_slice_only=True)
     row_add_sparse = bs.ops.misc.row_wise_add(x_sparse, sparsity_layout_x, row_max_sparse, sparsity_block_size)
+    row_sub_sparse = bs.ops.misc.row_wise_sub(x_sparse, sparsity_layout_x, row_max_sparse, sparsity_block_size)
 
     assert torch.equal(sparsity_layout_sum, torch.max(sparsity_layout_x, dim=-1, keepdim=True).values)
     assert torch.equal(sparsity_layout_max, torch.max(sparsity_layout_x, dim=-1, keepdim=True).values)
@@ -2016,13 +2235,318 @@ def test_blksprs_large_index_row_wise_operations(config: tuple):
                 row_idx * sparsity_block_size:(row_idx + 1) * sparsity_block_size,
                 :sparsity_block_size,
             ] + ref_max.unsqueeze(-1)
+            ref_sub = x[
+                batch_idx,
+                row_idx * sparsity_block_size:(row_idx + 1) * sparsity_block_size,
+                :sparsity_block_size,
+            ] - ref_max.unsqueeze(-1)
 
             assert torch.allclose(row_sum_sparse[block_idx_x, :, 0], ref_sum, atol=ATOL, rtol=RTOL)
             assert torch.allclose(row_max_sparse[block_idx_x, :, 0].float(), ref_max.float(), atol=ATOL, rtol=RTOL)
             assert torch.allclose(row_add_sparse[block_idx_x].float(), ref_add.float(), atol=ATOL, rtol=RTOL)
+            assert torch.allclose(row_sub_sparse[block_idx_x].float(), ref_sub.float(), atol=ATOL, rtol=RTOL)
 
-    del x, x_sparse, row_sum_sparse, row_max_sparse, row_add_sparse
+    del x, x_sparse, row_sum_sparse, row_max_sparse, row_add_sparse, row_sub_sparse
     torch.cuda.empty_cache()
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("config", OVERFLOW_TEST_CONFIGURATIONS)
+def test_blksprs_large_index_repeat_and_adapt_layout(config: tuple):
+    _require_min_cuda_memory(20)
+    torch.cuda.empty_cache()
+
+    b, m, _, k, sparsity_block_size, _ = config
+    dtype = torch.float16
+    n_row_blocks = m // sparsity_block_size
+    n_col_blocks = k // sparsity_block_size
+
+    sparsity_layout_x = torch.ones((b, n_row_blocks, n_col_blocks), dtype=torch.bool, device=DEVICE)
+    n_sparse_blocks = int(sparsity_layout_x.sum().item())
+    x_sparse = torch.zeros(
+        (n_sparse_blocks, sparsity_block_size, sparsity_block_size),
+        device=DEVICE,
+        dtype=dtype,
+    )
+
+    sample_batches = _sample_positions(b)
+    sample_rows = _sample_positions(n_row_blocks)
+    for batch_idx in sample_batches:
+        for row_idx in sample_rows:
+            block_idx = _dense_block_index(batch_idx, row_idx, 0, n_row_blocks, n_col_blocks)
+            x_sparse[block_idx] = torch.randn_like(x_sparse[block_idx])
+
+    repeat_output_layout = torch.zeros((b, n_row_blocks, 2), dtype=torch.bool, device=DEVICE)
+    for batch_idx in sample_batches:
+        for row_idx in sample_rows:
+            repeat_output_layout[batch_idx, row_idx, 1] = True
+    repeated_sparse, repeated_layout = bs.ops.repeat(
+        x_sparse,
+        sparsity_layout_x,
+        (1, 1, 2),
+        sparsity_block_size,
+        sparsity_layout_output=repeat_output_layout,
+    )
+    torch.cuda.synchronize()
+    assert torch.equal(repeated_layout, repeat_output_layout)
+    for sparse_idx, (batch_idx, row_idx) in enumerate(
+        (batch_idx, row_idx) for batch_idx in sample_batches for row_idx in sample_rows
+    ):
+        source_block_idx = _dense_block_index(batch_idx, row_idx, 0, n_row_blocks, n_col_blocks)
+        assert torch.allclose(repeated_sparse[sparse_idx], x_sparse[source_block_idx], atol=ATOL, rtol=RTOL)
+    del repeated_sparse, repeated_layout, repeat_output_layout
+    torch.cuda.empty_cache()
+
+    repeat_interleave_output_layout = torch.zeros((b * 2, n_row_blocks, n_col_blocks), dtype=torch.bool, device=DEVICE)
+    for batch_idx in sample_batches:
+        for row_idx in sample_rows:
+            repeat_interleave_output_layout[batch_idx * 2 + 1, row_idx, 0] = True
+    repeated_interleaved_sparse, repeated_interleaved_layout = bs.ops.repeat_interleave(
+        x_sparse,
+        sparsity_layout_x,
+        2,
+        sparsity_block_size,
+        sparsity_layout_output=repeat_interleave_output_layout,
+    )
+    torch.cuda.synchronize()
+    assert torch.equal(repeated_interleaved_layout, repeat_interleave_output_layout)
+    for sparse_idx, (batch_idx, row_idx) in enumerate(
+        (batch_idx, row_idx) for batch_idx in sample_batches for row_idx in sample_rows
+    ):
+        source_block_idx = _dense_block_index(batch_idx, row_idx, 0, n_row_blocks, n_col_blocks)
+        assert torch.allclose(repeated_interleaved_sparse[sparse_idx], x_sparse[source_block_idx], atol=ATOL, rtol=RTOL)
+    del repeated_interleaved_sparse, repeated_interleaved_layout, repeat_interleave_output_layout
+    torch.cuda.empty_cache()
+
+    sparsity_block_size_to = sparsity_block_size // 2
+    adaption_output_layout = torch.zeros(
+        (b, n_row_blocks * 2, n_col_blocks * 2),
+        dtype=torch.bool,
+        device=DEVICE,
+    )
+    for batch_idx in sample_batches:
+        for row_idx in sample_rows:
+            adaption_output_layout[batch_idx, row_idx * 2 + 1, 1] = True
+    adapted_sparse, adapted_layout = bs.ops.adapt_layout(
+        x_sparse,
+        sparsity_layout_x,
+        sparsity_block_size,
+        sparsity_block_size_to,
+        sparsity_layout_to=adaption_output_layout,
+    )
+    torch.cuda.synchronize()
+    assert torch.equal(adapted_layout, adaption_output_layout)
+    for sparse_idx, (batch_idx, row_idx) in enumerate(
+        (batch_idx, row_idx) for batch_idx in sample_batches for row_idx in sample_rows
+    ):
+        source_block_idx = _dense_block_index(batch_idx, row_idx, 0, n_row_blocks, n_col_blocks)
+        expected = x_sparse[source_block_idx, sparsity_block_size_to:, sparsity_block_size_to:]
+        assert torch.allclose(adapted_sparse[sparse_idx], expected, atol=ATOL, rtol=RTOL)
+
+    del x_sparse, sparsity_layout_x, adapted_sparse, adapted_layout, adaption_output_layout
+    torch.cuda.empty_cache()
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("config", OVERFLOW_TEST_CONFIGURATIONS)
+def test_blksprs_large_index_scatter_operations(config: tuple):
+    _require_min_cuda_memory(20)
+    torch.cuda.empty_cache()
+
+    b, m, _, k, sparsity_block_size, _ = config
+    dtype = torch.float16
+    n_row_blocks = m // sparsity_block_size
+    n_col_blocks = k // sparsity_block_size
+
+    sparsity_layout_src = torch.ones((b, n_row_blocks, n_col_blocks), dtype=torch.bool, device=DEVICE)
+    n_sparse_blocks = int(sparsity_layout_src.sum().item())
+    src_sparse = torch.zeros(
+        (n_sparse_blocks, sparsity_block_size, sparsity_block_size),
+        device=DEVICE,
+        dtype=dtype,
+    )
+    idx_sparse = torch.full(
+        (n_sparse_blocks, sparsity_block_size, sparsity_block_size),
+        b,
+        device=DEVICE,
+        dtype=torch.int32,
+    )
+
+    sample_batches = _sample_positions(b)
+    sample_rows = _sample_positions(n_row_blocks)
+    sparsity_layout_tgt = torch.zeros_like(sparsity_layout_src)
+    for batch_idx in sample_batches:
+        for row_idx in sample_rows:
+            block_idx = _dense_block_index(batch_idx, row_idx, 0, n_row_blocks, n_col_blocks)
+            src_sparse[block_idx] = torch.randn_like(src_sparse[block_idx])
+            idx_sparse[block_idx] = batch_idx
+            sparsity_layout_tgt[batch_idx, row_idx, 0] = True
+
+    scattered_sparse = bs.ops.scatter(
+        src_sparse,
+        sparsity_layout_src,
+        0,
+        idx_sparse,
+        sparsity_layout_tgt,
+        sparsity_block_size,
+    )
+    scatter_reduced_sparse = bs.ops.scatter_reduce(
+        src_sparse,
+        sparsity_layout_src,
+        0,
+        idx_sparse,
+        sparsity_layout_tgt,
+        sparsity_block_size,
+        reduce_op="sum",
+    )
+    torch.cuda.synchronize()
+
+    for sparse_idx, (batch_idx, row_idx) in enumerate(
+        (batch_idx, row_idx) for batch_idx in sample_batches for row_idx in sample_rows
+    ):
+        source_block_idx = _dense_block_index(batch_idx, row_idx, 0, n_row_blocks, n_col_blocks)
+        assert torch.allclose(scattered_sparse[sparse_idx], src_sparse[source_block_idx], atol=ATOL, rtol=RTOL)
+        assert torch.allclose(scatter_reduced_sparse[sparse_idx], src_sparse[source_block_idx], atol=ATOL, rtol=RTOL)
+
+    del src_sparse, idx_sparse, scattered_sparse, scatter_reduced_sparse, sparsity_layout_src, sparsity_layout_tgt
+    torch.cuda.empty_cache()
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("config", OVERFLOW_PARTITION_CONFIGURATIONS)
+def test_blksprs_large_index_partition_operations(config: tuple):
+    _require_min_cuda_memory(20)
+    torch.cuda.empty_cache()
+
+    b, m, _, k, sparsity_block_size, _ = config
+    dtype = torch.float16
+    n_row_blocks = m // sparsity_block_size
+    n_col_blocks = k // sparsity_block_size
+    partitions = 2
+
+    sparsity_layout_x = torch.ones((b, n_row_blocks, n_col_blocks), dtype=torch.bool, device=DEVICE)
+    n_sparse_blocks = int(sparsity_layout_x.sum().item())
+    x_sparse = torch.zeros(
+        (n_sparse_blocks, sparsity_block_size, sparsity_block_size),
+        device=DEVICE,
+        dtype=dtype,
+    )
+
+    sample_batches = _sample_positions(b)
+    sample_rows = _sample_positions(n_row_blocks)
+    for batch_idx in sample_batches:
+        for row_idx in sample_rows:
+            for col_idx in range(n_col_blocks):
+                block_idx = _dense_block_index(batch_idx, row_idx, col_idx, n_row_blocks, n_col_blocks)
+                x_sparse[block_idx] = torch.randn_like(x_sparse[block_idx])
+
+    split_sparse, split_layout = bs.ops.split(x_sparse, sparsity_layout_x, partitions, 2, sparsity_block_size)
+    torch.cuda.synchronize()
+    for batch_idx in sample_batches:
+        for row_idx in sample_rows:
+            for col_idx in range(n_col_blocks):
+                source_block_idx = _dense_block_index(batch_idx, row_idx, col_idx, n_row_blocks, n_col_blocks)
+                split_block_idx = _dense_block_index(batch_idx * partitions + col_idx, row_idx, 0, n_row_blocks, 1)
+                assert torch.allclose(split_sparse[split_block_idx], x_sparse[source_block_idx], atol=ATOL, rtol=RTOL)
+
+    merged_sparse, merged_layout = bs.ops.merge(split_sparse, split_layout, partitions, 2, sparsity_block_size)
+    torch.cuda.synchronize()
+    assert torch.equal(merged_layout, sparsity_layout_x)
+    for batch_idx in sample_batches:
+        for row_idx in sample_rows:
+            for col_idx in range(n_col_blocks):
+                source_block_idx = _dense_block_index(batch_idx, row_idx, col_idx, n_row_blocks, n_col_blocks)
+                assert torch.allclose(merged_sparse[source_block_idx], x_sparse[source_block_idx], atol=ATOL, rtol=RTOL)
+
+    del x_sparse, split_sparse, merged_sparse, sparsity_layout_x, split_layout, merged_layout
+    torch.cuda.empty_cache()
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("config", OVERFLOW_TEST_CONFIGURATIONS)
+def test_blksprs_large_index_row_striped_conversion(config: tuple):
+    _require_min_cuda_memory(20)
+    torch.cuda.empty_cache()
+
+    b, m, _, k, sparsity_block_size, _ = config
+    dtype = torch.float16
+    n_row_blocks = m // sparsity_block_size
+    n_col_blocks = k // sparsity_block_size
+
+    x = torch.zeros((b, m, k), device=DEVICE, dtype=dtype)
+    sparsity_layout = torch.ones((b, n_row_blocks, n_col_blocks), dtype=torch.bool, device=DEVICE)
+    sample_batches = _sample_positions(b)
+    sample_rows = _sample_positions(n_row_blocks)
+    for batch_idx in sample_batches:
+        for row_idx in sample_rows:
+            x[
+                batch_idx,
+                row_idx * sparsity_block_size:(row_idx + 1) * sparsity_block_size,
+                :sparsity_block_size,
+            ] = torch.randn((sparsity_block_size, sparsity_block_size), device=DEVICE, dtype=dtype)
+    sample_blocks = {
+        (batch_idx, row_idx): x[
+            batch_idx,
+            row_idx * sparsity_block_size:(row_idx + 1) * sparsity_block_size,
+            :sparsity_block_size,
+        ].cpu()
+        for batch_idx in sample_batches
+        for row_idx in sample_rows
+    }
+
+    assert bs.ops.is_row_striped_layout(sparsity_layout)
+    x_sparse = bs.ops.to_sparse_row_striped(x, sparsity_layout, sparsity_block_size)
+    torch.cuda.synchronize()
+    for batch_idx in sample_batches:
+        for row_idx in sample_rows:
+            block_idx = _dense_block_index(batch_idx, row_idx, 0, n_row_blocks, n_col_blocks)
+            assert torch.allclose(x_sparse[block_idx].cpu(), sample_blocks[(batch_idx, row_idx)], atol=ATOL, rtol=RTOL)
+
+    del x
+    torch.cuda.empty_cache()
+
+    x_dense = bs.ops.to_dense_row_striped(x_sparse, sparsity_layout, sparsity_block_size)
+    torch.cuda.synchronize()
+    for batch_idx in sample_batches:
+        for row_idx in sample_rows:
+            dense_block = x_dense[
+                batch_idx,
+                row_idx * sparsity_block_size:(row_idx + 1) * sparsity_block_size,
+                :sparsity_block_size,
+            ]
+            assert torch.allclose(dense_block.cpu(), sample_blocks[(batch_idx, row_idx)], atol=ATOL, rtol=RTOL)
+
+    del x_sparse, x_dense, sparsity_layout
+    torch.cuda.empty_cache()
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("config", OVERFLOW_TEST_CONFIGURATIONS)
+def test_blksprs_large_index_layout_matmul_helpers(config: tuple):
+    _require_min_cuda_memory(20)
+
+    b, m, n, k, sparsity_block_size, _ = config
+    n_row_blocks = m // sparsity_block_size
+    n_inner_blocks = k // sparsity_block_size
+    n_col_blocks = n // sparsity_block_size
+
+    sparsity_layout_x = torch.zeros((b, n_row_blocks, n_inner_blocks), dtype=torch.bool, device=DEVICE)
+    sparsity_layout_y = torch.ones((b, n_inner_blocks, n_col_blocks), dtype=torch.bool, device=DEVICE)
+    expected = torch.zeros((b, n_row_blocks, n_col_blocks), dtype=torch.bool, device=DEVICE)
+
+    for batch_idx in _sample_positions(b):
+        for row_idx in _sample_positions(n_row_blocks):
+            sparsity_layout_x[batch_idx, row_idx, 0] = True
+            expected[batch_idx, row_idx, 0] = True
+
+    actual = bs.layouting.build_sparsity_layout_matmul(sparsity_layout_x, sparsity_layout_y)
+    actual_fast = bs.layouting.build_sparsity_layout_matmul_fast(sparsity_layout_x, sparsity_layout_y)
+    actual_outer = bs.layouting.build_sparsity_layout_matmul_outer(sparsity_layout_x, sparsity_layout_y)
+    torch.cuda.synchronize()
+
+    assert torch.equal(actual, expected)
+    assert torch.equal(actual_fast, expected)
+    assert torch.equal(actual_outer, torch.ones_like(expected))
 
 
 @pytest.mark.benchmark
@@ -2049,6 +2573,7 @@ def test_blksprs_large_index_build_distribution_layout(config: tuple):
         torch.Size((1, m, k)),
         sparsity_block_size,
     )
+    torch.cuda.synchronize()
 
     expected = torch.ones((1, n_row_blocks, n_col_blocks), dtype=torch.bool, device=DEVICE)
 
@@ -2079,13 +2604,16 @@ def test_blksprs_large_index_broadcast_operations(config: tuple):
     sparsity_layout_o[sample_batches, 0, 0] = True
 
     out_add_sparse = bs.ops.misc.broadcast_add(x, y, sparsity_layout_o, sparsity_block_size)
+    out_sub_sparse = bs.ops.misc.broadcast_sub(x, y, sparsity_layout_o, sparsity_block_size)
 
     for sparse_idx, batch_idx in enumerate(sample_batches):
         ref_add = x[batch_idx, :sparsity_block_size].unsqueeze(-1) + y[batch_idx, :sparsity_block_size].unsqueeze(0)
+        ref_sub = x[batch_idx, :sparsity_block_size].unsqueeze(-1) - y[batch_idx, :sparsity_block_size].unsqueeze(0)
 
         assert torch.allclose(out_add_sparse[sparse_idx].float(), ref_add.float(), atol=ATOL, rtol=RTOL)
+        assert torch.allclose(out_sub_sparse[sparse_idx].float(), ref_sub.float(), atol=ATOL, rtol=RTOL)
 
-    del x, y, out_add_sparse, sparsity_layout_o
+    del x, y, out_add_sparse, out_sub_sparse, sparsity_layout_o
     torch.cuda.empty_cache()
 
 

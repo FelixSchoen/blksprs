@@ -93,7 +93,7 @@ def flow_pull_kernel(x,
     rev_idx_spa_msk = ((rev_idx_spa_idx >= 0) &
                        (rev_idx_spa_idx < tl.cast(s_l_o_b, index_dtype) * s_l_o_b_s))
     rev_idx_spa = tl.cast(tl.load(r_lut + rev_idx_spa_idx,
-                          mask=rev_idx_spa_msk), tl.int32)
+                          mask=rev_idx_spa_msk, other=-1), tl.int32)
 
     if rev_idx_spa >= 0:
         blk_x_idx = (tl.cast(rev_idx_spa, index_dtype) * x_b_s +
@@ -101,7 +101,7 @@ def flow_pull_kernel(x,
                      ((pid_col * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * x_c_s)[None, :])
         blk_x_msk = ((blk_x_idx >= 0) &
                      (blk_x_idx < tl.cast(x_b, index_dtype) * x_b_s))
-        blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
+        blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk, other=0)
 
         blk_o_idx = (pid_blk * o_b_s +
                      ((pid_row * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * o_r_s)[:, None] +
@@ -194,7 +194,7 @@ def flow_push_kernel(x,
     rev_idx_spa_msk = ((rev_idx_spa_idx >= 0) &
                        (rev_idx_spa_idx < tl.cast(s_l_x_b, index_dtype) * s_l_x_b_s))
     rev_idx_spa = tl.cast(tl.load(r_lut + rev_idx_spa_idx,
-                          mask=rev_idx_spa_msk), tl.int32)
+                          mask=rev_idx_spa_msk, other=-1), tl.int32)
 
     if rev_idx_spa >= 0:
         blk_x_idx = (pid_blk * x_b_s +
@@ -202,7 +202,7 @@ def flow_push_kernel(x,
                      ((pid_col * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * x_c_s)[None, :])
         blk_x_msk = ((blk_x_idx >= 0) &
                      (blk_x_idx < tl.cast(x_b, index_dtype) * x_b_s))
-        blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
+        blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk, other=0)
 
         blk_o_idx = (tl.cast(rev_idx_spa, index_dtype) * o_b_s +
                      ((pid_row * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * o_r_s)[:, None] +

@@ -44,4 +44,5 @@ class utils:
     class validation:
         from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_dtype_float, \
             validate_dtype_int, validate_device, validate_sparsity, validate_sparsity_dense, \
-            validate_sparsity_block_size
+            validate_shape, validate_positive_integer, validate_positive_integer_tuple, validate_divisible, \
+            validate_sparsity_layout, validate_sparsity_block_size

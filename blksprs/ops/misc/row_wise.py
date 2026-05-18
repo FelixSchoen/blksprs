@@ -133,7 +133,7 @@ def row_wise_sum_kernel(x,
     # Get position of current sparsity block consisting of its batch and row index
     spa_val_idx = pid_blk * s_lut_x_r_s + tl.cast(tl.arange(0, 4), index_dtype) * s_lut_x_c_s
     spa_val_msk = (tl.arange(0, 4) < 3)
-    spa_val = tl.load(s_lut_x + spa_val_idx, mask=spa_val_msk)
+    spa_val = tl.load(s_lut_x + spa_val_idx, mask=spa_val_msk, other=0)
 
     spa_bat_x = tl.cast(tl.sum(spa_val * (tl.arange(0, 4) == 0)), index_dtype)
     spa_row_x = tl.cast(tl.sum(spa_val * (tl.arange(0, 4) == 1)), index_dtype)
@@ -144,7 +144,7 @@ def row_wise_sum_kernel(x,
                        spa_row_x * s_l_o_r_s)
     rev_idx_spa_msk = ((rev_idx_spa_idx >= 0) &
                        (rev_idx_spa_idx < tl.cast(s_l_o_b, index_dtype) * s_l_o_b_s))
-    rev_idx_spa = tl.cast(tl.load(r_lut_o + rev_idx_spa_idx, mask=rev_idx_spa_msk), tl.int32)
+    rev_idx_spa = tl.cast(tl.load(r_lut_o + rev_idx_spa_idx, mask=rev_idx_spa_msk, other=-1), tl.int32)
 
     if rev_idx_spa >= 0:
         blk_idx = ((pid_blk * x_b_s) +
@@ -152,7 +152,7 @@ def row_wise_sum_kernel(x,
                    ((pid_col * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * x_c_s)[None, :])
         blk_msk = ((blk_idx >= 0) &
                    (blk_idx < tl.cast(x_b, index_dtype) * x_b_s))
-        blk = tl.load(x + blk_idx, mask=blk_msk)
+        blk = tl.load(x + blk_idx, mask=blk_msk, other=0)
 
         buf = tl.reshape(tl.sum(blk, axis=-1), (TRITON_BLOCK_SIZE, 1))
 
@@ -194,6 +194,7 @@ def row_wise_max(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size:
 
     validate_dimensions(x)
     validate_contiguous(x)
+    validate_dtype_float(x)
     validate_device(x)
     validate_sparsity(sparsity_block_size, (x, sparsity_layout))
     validate_sparsity_block_size(sparsity_block_size, x)
@@ -287,7 +288,7 @@ def row_wise_max_kernel(x,
     # Get position of current sparsity block consisting of its batch and row index
     spa_val_idx = pid_blk * s_lut_x_r_s + tl.cast(tl.arange(0, 4), index_dtype) * s_lut_x_c_s
     spa_val_msk = (tl.arange(0, 4) < 3)
-    spa_val = tl.load(s_lut_x + spa_val_idx, mask=spa_val_msk)
+    spa_val = tl.load(s_lut_x + spa_val_idx, mask=spa_val_msk, other=0)
 
     spa_bat_x = tl.cast(tl.sum(spa_val * (tl.arange(0, 4) == 0)), index_dtype)
     spa_row_x = tl.cast(tl.sum(spa_val * (tl.arange(0, 4) == 1)), index_dtype)
@@ -298,7 +299,7 @@ def row_wise_max_kernel(x,
                        spa_row_x * s_l_o_r_s)
     rev_idx_spa_msk = ((rev_idx_spa_idx >= 0) &
                        (rev_idx_spa_idx < tl.cast(s_l_o_b, index_dtype) * s_l_o_b_s))
-    rev_idx_spa = tl.cast(tl.load(r_lut_o + rev_idx_spa_idx, mask=rev_idx_spa_msk), tl.int32)
+    rev_idx_spa = tl.cast(tl.load(r_lut_o + rev_idx_spa_idx, mask=rev_idx_spa_msk, other=-1), tl.int32)
 
     if rev_idx_spa >= 0:
         blk_idx = ((pid_blk * x_b_s) +
@@ -306,7 +307,7 @@ def row_wise_max_kernel(x,
                    ((pid_col * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * x_c_s)[None, :])
         blk_msk = ((blk_idx >= 0) &
                    (blk_idx < tl.cast(x_b, index_dtype) * x_b_s))
-        blk = tl.load(x + blk_idx, mask=blk_msk)
+        blk = tl.load(x + blk_idx, mask=blk_msk, other=float("-inf"))
 
         buf = tl.reshape(tl.max(blk, axis=-1), (TRITON_BLOCK_SIZE, 1))
 
@@ -337,11 +338,13 @@ def row_wise_add(x: BlksprsTensor, sparsity_layout_x: Tensor, y: Tensor,
             compressed form.
 
     """
-    x = ensure_contiguous(x)
+    x, y = ensure_contiguous(x, y)
 
-    validate_dimensions(x)
-    validate_contiguous(x)
-    validate_device(x)
+    validate_dimensions(x, y)
+    validate_contiguous(x, y)
+    validate_dtype_float(x)
+    validate_dtype_float(y)
+    validate_device(x, y)
     validate_sparsity(sparsity_block_size, (x, sparsity_layout_x))
     validate_sparsity_block_size(sparsity_block_size, x)
 
@@ -349,6 +352,13 @@ def row_wise_add(x: BlksprsTensor, sparsity_layout_x: Tensor, y: Tensor,
 
     sparsity_layout_rwm, _ = torch.max(sparsity_layout_x, dim=-1, keepdim=True)
     sparsity_reverse_lut_rwm = build_reverse_lut(sparsity_layout_rwm)
+    n_sparse_blocks_rwm = torch.sum(sparsity_layout_rwm.to(torch.int)).item()
+
+    if y.size(0) != n_sparse_blocks_rwm:
+        raise ValueError("Row-wise tensor does not conform to input sparsity layout")
+    if y.size(-2) != sparsity_block_size or y.size(-1) not in (1, sparsity_block_size):
+        raise ValueError(
+            "Row-wise tensor blocks must have sparsity block size rows and either 1 or sparsity block size columns")
 
     validate_contiguous(sparsity_layout_x, sparsity_lut_x, sparsity_reverse_lut_rwm)
 
@@ -438,7 +448,7 @@ def row_wise_add_kernel(x,
     # Get position of current sparsity block consisting of its batch and row index
     spa_val_idx = pid_blk * s_lut_x_r_s + tl.cast(tl.arange(0, 4), index_dtype) * s_lut_x_c_s
     spa_val_msk = (tl.arange(0, 4) < 3)
-    spa_val = tl.load(s_lut_x + spa_val_idx, mask=spa_val_msk)
+    spa_val = tl.load(s_lut_x + spa_val_idx, mask=spa_val_msk, other=0)
 
     spa_bat_x = tl.cast(tl.sum(spa_val * (tl.arange(0, 4) == 0)), index_dtype)
     spa_row_x = tl.cast(tl.sum(spa_val * (tl.arange(0, 4) == 1)), index_dtype)
@@ -449,7 +459,7 @@ def row_wise_add_kernel(x,
                          spa_row_x * s_l_y_r_s)
     rev_idx_spa_s_msk = ((rev_idx_spa_s_idx >= 0) &
                          (rev_idx_spa_s_idx < tl.cast(s_l_y_b, index_dtype) * s_l_y_b_s))
-    rev_idx_spa_s = tl.cast(tl.load(r_lut_y + rev_idx_spa_s_idx, mask=rev_idx_spa_s_msk), tl.int32)
+    rev_idx_spa_s = tl.cast(tl.load(r_lut_y + rev_idx_spa_s_idx, mask=rev_idx_spa_s_msk, other=-1), tl.int32)
 
     if rev_idx_spa_s == -1:
         tl.device_assert(False)
@@ -461,7 +471,7 @@ def row_wise_add_kernel(x,
                  ((pid_col * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * x_c_s)[None, :])
     blk_x_msk = ((blk_x_idx >= 0) &
                  (blk_x_idx < tl.cast(x_b, index_dtype) * x_b_s))
-    blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
+    blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk, other=0)
 
     # Load sum block
     blk_s_idx = (tl.cast(rev_idx_spa_s, index_dtype) * y_b_s +
@@ -469,7 +479,7 @@ def row_wise_add_kernel(x,
                  (tl.cast(tl.arange(0, 1), index_dtype) * y_c_s)[None, :])
     blk_s_msk = ((blk_s_idx >= 0) &
                  (blk_s_idx < tl.cast(y_b, index_dtype) * y_b_s))
-    blk_s = tl.load(y + blk_s_idx, mask=blk_s_msk)
+    blk_s = tl.load(y + blk_s_idx, mask=blk_s_msk, other=0)
 
     # Compute exp
     buf = blk_x + tl.broadcast_to(blk_s, (TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE))

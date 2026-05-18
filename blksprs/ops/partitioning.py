@@ -6,7 +6,8 @@ from blksprs.ops.flow import flow_pull_forward
 from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import build_reverse_lut
 from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_device, \
-    validate_sparsity, validate_sparsity_block_size, ensure_contiguous
+    validate_sparsity, validate_sparsity_block_size, validate_positive_integer, validate_divisible, \
+    ensure_contiguous
 
 
 @torch.amp.custom_fwd(device_type="cuda")
@@ -39,6 +40,8 @@ def split(x: BlksprsTensor, sparsity_layout: Tensor, partitions: int,
     adjusted_dim = dim % 3
     if adjusted_dim != 2:
         raise NotImplementedError("Currently only supports dim=2")
+    validate_positive_integer(partitions, "partitions")
+    validate_divisible(sparsity_layout.size(2), partitions, "Number of column blocks", "partitions")
 
     lut = split_build_lut(lut, sparsity_layout, partitions)
 
@@ -141,6 +144,8 @@ def merge(x: BlksprsTensor, sparsity_layout: Tensor, partitions: int,
     adjusted_dim = dim % 3
     if adjusted_dim != 2:
         raise NotImplementedError("Currently only supports dim=2")
+    validate_positive_integer(partitions, "partitions")
+    validate_divisible(sparsity_layout.size(0), partitions, "Batch blocks", "partitions")
 
     lut = merge_build_lut(lut, sparsity_layout, partitions)
 

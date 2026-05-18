@@ -9,6 +9,7 @@ from blksprs.ops.conversion import to_sparse, to_sparse_shaped
 from blksprs.ops.matmul import matmul
 from blksprs.ops.repeat import repeat
 from blksprs.utils.blksprs_tensor import BlksprsTensor
+from blksprs.utils.validation import validate_sparsity_block_size
 
 
 @torch.amp.custom_fwd(device_type="cuda")
@@ -17,6 +18,7 @@ def apply_torch_linear(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block
     # Extract weight; bias uses the explicit override if provided, otherwise falls back to linear.bias
     w = linear.weight
     b = bias if bias is not None else linear.bias
+    validate_sparsity_block_size(sparsity_block_size, w)
 
     # Convert w to block-sparse representation
     sparsity_layout_w_t = torch.ones(size=(sparsity_layout.size(0), w.size(1) // sparsity_block_size,
@@ -40,6 +42,7 @@ def apply_torch_linear(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block
     # Apply bias
     if b is not None:
         b_slice = b.unsqueeze(0).unsqueeze(0).repeat(1, sparsity_block_size, 1)
+        validate_sparsity_block_size(sparsity_block_size, b_slice)
         sparsity_layout_b_slice = torch.ones(size=(1, b_slice.size(1) // sparsity_block_size,
                                                    b_slice.size(2) // sparsity_block_size), dtype=torch.bool,
                                              device=x.device)
@@ -79,6 +82,7 @@ def apply_torch_linear_cached(x: BlksprsTensor,
 
     w = linear.weight
     b = bias if bias is not None else linear.bias
+    validate_sparsity_block_size(sparsity_block_size, w)
 
     cache_key = (
         x.device.type,
@@ -143,6 +147,7 @@ def apply_torch_linear_cached(x: BlksprsTensor,
             b_slice = b.unsqueeze(0).unsqueeze(0).repeat(
                 1, sparsity_block_size, 1
             ).contiguous()
+            validate_sparsity_block_size(sparsity_block_size, b_slice)
             lut["bias_slice_layout"] = torch.ones(
                 size=(1,
                       b_slice.size(1) // sparsity_block_size,

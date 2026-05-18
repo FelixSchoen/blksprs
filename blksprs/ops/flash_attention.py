@@ -9,7 +9,7 @@ from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_config
 from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import stride, build_reverse_lut, can_use_int32_indexing, cast_for_autocast
 from blksprs.utils.validation import validate_contiguous, validate_device, validate_dtype_float, \
-    validate_dimensions, validate_sparsity, validate_sparsity_block_size, ensure_contiguous
+    validate_dimensions, validate_sparsity, validate_sparsity_block_size, validate_shape, ensure_contiguous
 
 
 @torch.amp.custom_fwd(device_type="cuda")
@@ -90,10 +90,7 @@ def flash_attention(q: BlksprsTensor, sparsity_layout_q: Tensor,
         raise ValueError("V sparsity layout must be compatible with K")
 
     expected_attn_shape = (n_batches, n_seq_blocks_q, n_seq_blocks_k)
-    if attention_layout.shape != torch.Size(expected_attn_shape):
-        raise ValueError(
-            f"attention_layout shape {tuple(attention_layout.shape)} doesn't match "
-            f"expected {expected_attn_shape}")
+    validate_shape(attention_layout, expected_attn_shape, "attention_layout")
 
     # Resolve output sparsity layout
     if sparsity_layout_o is None:
@@ -107,10 +104,7 @@ def flash_attention(q: BlksprsTensor, sparsity_layout_q: Tensor,
         validate_device(sparsity_layout_o, q)
 
     expected_output_shape = (n_batches, n_seq_blocks_q, n_head_blocks_v)
-    if sparsity_layout_o.shape != torch.Size(expected_output_shape):
-        raise ValueError(
-            f"sparsity_layout_o shape {tuple(sparsity_layout_o.shape)} doesn't match "
-            f"expected {expected_output_shape}")
+    validate_shape(sparsity_layout_o, expected_output_shape, "sparsity_layout_o")
 
     if scale is None:
         scale = 1.0 / math.sqrt(n_head_blocks_qk * sparsity_block_size)
@@ -133,6 +127,7 @@ def flash_attention(q: BlksprsTensor, sparsity_layout_q: Tensor,
         validate_contiguous(attention_mask, sparsity_layout_mask)
         validate_device(attention_mask, sparsity_layout_mask, q)
         validate_sparsity(sparsity_block_size, (attention_mask, sparsity_layout_mask))
+        validate_shape(sparsity_layout_mask, expected_attn_shape, "sparsity_layout_mask")
     else:
         attention_mask = torch.empty(0, device=q.device, dtype=q.dtype)
 
@@ -147,6 +142,7 @@ def flash_attention(q: BlksprsTensor, sparsity_layout_q: Tensor,
         validate_contiguous(attention_bias, sparsity_layout_bias)
         validate_device(attention_bias, sparsity_layout_bias, q)
         validate_sparsity(sparsity_block_size, (attention_bias, sparsity_layout_bias))
+        validate_shape(sparsity_layout_bias, expected_attn_shape, "sparsity_layout_bias")
     else:
         attention_bias = torch.empty(0, device=q.device, dtype=q.dtype)
 
@@ -571,12 +567,12 @@ def flash_attention_kernel(q,
                 rev_idx_spa_q_idx = (pid_bat * s_l_q_b_s + pid_q_seq * s_l_q_r_s + h * s_l_q_c_s)
                 rev_idx_spa_q_msk = ((rev_idx_spa_q_idx >= 0) &
                                      (rev_idx_spa_q_idx < tl.cast(s_l_q_b, index_dtype) * s_l_q_b_s))
-                rev_idx_spa_q = tl.cast(tl.load(r_lut_q + rev_idx_spa_q_idx, mask=rev_idx_spa_q_msk), tl.int32)
+                rev_idx_spa_q = tl.cast(tl.load(r_lut_q + rev_idx_spa_q_idx, mask=rev_idx_spa_q_msk, other=-1), tl.int32)
 
                 rev_idx_spa_k_idx = (pid_bat * s_l_k_b_s + tl.cast(k_seq_block, index_dtype) * s_l_k_r_s + h * s_l_k_c_s)
                 rev_idx_spa_k_msk = ((rev_idx_spa_k_idx >= 0) &
                                      (rev_idx_spa_k_idx < tl.cast(s_l_k_b, index_dtype) * s_l_k_b_s))
-                rev_idx_spa_k = tl.cast(tl.load(r_lut_k + rev_idx_spa_k_idx, mask=rev_idx_spa_k_msk), tl.int32)
+                rev_idx_spa_k = tl.cast(tl.load(r_lut_k + rev_idx_spa_k_idx, mask=rev_idx_spa_k_msk, other=-1), tl.int32)
 
                 if rev_idx_spa_q >= 0 and rev_idx_spa_k >= 0:
                     blk_q_idx = ((tl.cast(rev_idx_spa_q, index_dtype) * q_b_s) +
@@ -584,14 +580,14 @@ def flash_attention_kernel(q,
                                  (offs_d[None, :] * q_c_s))
                     blk_q_msk = ((blk_q_idx >= 0) &
                                  (blk_q_idx < tl.cast(q_b, index_dtype) * q_b_s))
-                    blk_q = tl.load(q + blk_q_idx, mask=blk_q_msk)
+                    blk_q = tl.load(q + blk_q_idx, mask=blk_q_msk, other=0)
 
                     blk_k_idx = ((tl.cast(rev_idx_spa_k, index_dtype) * k_b_s) +
                                  (offs_m[:, None] * k_r_s) +
                                  (offs_d[None, :] * k_c_s))
                     blk_k_msk = ((blk_k_idx >= 0) &
                                  (blk_k_idx < tl.cast(k_b, index_dtype) * k_b_s))
-                    blk_k = tl.load(k + blk_k_idx, mask=blk_k_msk)
+                    blk_k = tl.load(k + blk_k_idx, mask=blk_k_msk, other=0)
 
                     buf_s += tl.dot(blk_q, tl.trans(blk_k))
 
@@ -636,12 +632,12 @@ def flash_attention_kernel(q,
                 rev_idx_spa_o_idx = (pid_bat * s_l_o_b_s + pid_q_seq * s_l_o_r_s + h * s_l_o_c_s)
                 rev_idx_spa_o_msk = ((rev_idx_spa_o_idx >= 0) &
                                      (rev_idx_spa_o_idx < tl.cast(s_l_o_b, index_dtype) * s_l_o_b_s))
-                rev_idx_spa_o = tl.cast(tl.load(r_lut_o + rev_idx_spa_o_idx, mask=rev_idx_spa_o_msk), tl.int32)
+                rev_idx_spa_o = tl.cast(tl.load(r_lut_o + rev_idx_spa_o_idx, mask=rev_idx_spa_o_msk, other=-1), tl.int32)
 
                 rev_idx_spa_v_idx = (pid_bat * s_l_v_b_s + tl.cast(k_seq_block, index_dtype) * s_l_v_r_s + h * s_l_v_c_s)
                 rev_idx_spa_v_msk = ((rev_idx_spa_v_idx >= 0) &
                                      (rev_idx_spa_v_idx < tl.cast(s_l_v_b, index_dtype) * s_l_v_b_s))
-                rev_idx_spa_v = tl.cast(tl.load(r_lut_v + rev_idx_spa_v_idx, mask=rev_idx_spa_v_msk), tl.int32)
+                rev_idx_spa_v = tl.cast(tl.load(r_lut_v + rev_idx_spa_v_idx, mask=rev_idx_spa_v_msk, other=-1), tl.int32)
 
                 if rev_idx_spa_o >= 0:
                     blk_o_idx = ((tl.cast(rev_idx_spa_o, index_dtype) * o_b_s) +
@@ -649,7 +645,7 @@ def flash_attention_kernel(q,
                                  (offs_d[None, :] * o_c_s))
                     blk_o_msk = ((blk_o_idx >= 0) &
                                  (blk_o_idx < tl.cast(o_b, index_dtype) * o_b_s))
-                    blk_o = tl.cast(tl.load(o + blk_o_idx, mask=blk_o_msk), tl.float32)
+                    blk_o = tl.cast(tl.load(o + blk_o_idx, mask=blk_o_msk, other=0), tl.float32)
                     blk_o = blk_o * alpha[:, None]
 
                     if rev_idx_spa_v >= 0:
@@ -658,7 +654,7 @@ def flash_attention_kernel(q,
                                      (offs_d[None, :] * v_c_s))
                         blk_v_msk = ((blk_v_idx >= 0) &
                                      (blk_v_idx < tl.cast(v_b, index_dtype) * v_b_s))
-                        blk_v = tl.load(v + blk_v_idx, mask=blk_v_msk)
+                        blk_v = tl.load(v + blk_v_idx, mask=blk_v_msk, other=0)
                         blk_o = blk_o + tl.cast(tl.dot(tl.cast(p, blk_v.dtype), blk_v), tl.float32)
 
                     tl.store(o + blk_o_idx, tl.cast(blk_o, o.dtype.element_ty), mask=blk_o_msk)
@@ -673,14 +669,14 @@ def flash_attention_kernel(q,
         rev_idx_spa_o_idx = (pid_bat * s_l_o_b_s + pid_q_seq * s_l_o_r_s + h * s_l_o_c_s)
         rev_idx_spa_o_msk = ((rev_idx_spa_o_idx >= 0) &
                              (rev_idx_spa_o_idx < tl.cast(s_l_o_b, index_dtype) * s_l_o_b_s))
-        rev_idx_spa_o = tl.cast(tl.load(r_lut_o + rev_idx_spa_o_idx, mask=rev_idx_spa_o_msk), tl.int32)
+        rev_idx_spa_o = tl.cast(tl.load(r_lut_o + rev_idx_spa_o_idx, mask=rev_idx_spa_o_msk, other=-1), tl.int32)
         if rev_idx_spa_o >= 0:
             blk_o_idx = ((tl.cast(rev_idx_spa_o, index_dtype) * o_b_s) +
                          (offs_m[:, None] * o_r_s) +
                          (offs_d[None, :] * o_c_s))
             blk_o_msk = ((blk_o_idx >= 0) &
                          (blk_o_idx < tl.cast(o_b, index_dtype) * o_b_s))
-            blk_o = tl.cast(tl.load(o + blk_o_idx, mask=blk_o_msk), tl.float32)
+            blk_o = tl.cast(tl.load(o + blk_o_idx, mask=blk_o_msk, other=0), tl.float32)
             blk_o = blk_o / l_safe[:, None]
             blk_o = tl.where(has_attention[:, None], blk_o, 0.0)
             tl.store(o + blk_o_idx, tl.cast(blk_o, o.dtype.element_ty), mask=blk_o_msk)
@@ -726,8 +722,8 @@ def flash_attention_kernel_bwd_preprocess(o, do, delta,
                        (offs_m[:, None] * o_r_s) +
                        (offs_d[None, :] * o_c_s))
             blk_msk = ((blk_idx >= 0) & (blk_idx < tl.cast(total_o_blocks, index_dtype) * o_b_s))
-            blk_o = tl.cast(tl.load(o + blk_idx, mask=blk_msk), tl.float32)
-            blk_do = tl.cast(tl.load(do + blk_idx, mask=blk_msk), tl.float32)
+            blk_o = tl.cast(tl.load(o + blk_idx, mask=blk_msk, other=0), tl.float32)
+            blk_do = tl.cast(tl.load(do + blk_idx, mask=blk_msk, other=0), tl.float32)
             delta_acc += tl.sum(blk_o * blk_do, axis=1)
 
     tl.store(
@@ -799,11 +795,11 @@ def flash_attention_kernel_bwd_dkdv(q, q_b_s, q_r_s, q_c_s,
                     blk_q_idx = ((tl.cast(rev_idx_spa_q, index_dtype) * q_b_s) +
                                  (offs_m[:, None] * q_r_s) +
                                  (offs_d[None, :] * q_c_s))
-                    blk_q = tl.load(q + blk_q_idx, mask=((blk_q_idx >= 0) & (blk_q_idx < tl.cast(total_q_blocks, index_dtype) * q_b_s)))
+                    blk_q = tl.load(q + blk_q_idx, mask=((blk_q_idx >= 0) & (blk_q_idx < tl.cast(total_q_blocks, index_dtype) * q_b_s)), other=0)
                     blk_k_idx = ((tl.cast(rev_idx_spa_k, index_dtype) * k_b_s) +
                                  (offs_m[:, None] * k_r_s) +
                                  (offs_d[None, :] * k_c_s))
-                    blk_k = tl.load(k + blk_k_idx, mask=((blk_k_idx >= 0) & (blk_k_idx < tl.cast(total_k_blocks, index_dtype) * k_b_s)))
+                    blk_k = tl.load(k + blk_k_idx, mask=((blk_k_idx >= 0) & (blk_k_idx < tl.cast(total_k_blocks, index_dtype) * k_b_s)), other=0)
                     buf_s += tl.dot(blk_q, tl.trans(blk_k))
 
             buf_s = buf_s * qk_scale
@@ -848,11 +844,11 @@ def flash_attention_kernel_bwd_dkdv(q, q_b_s, q_r_s, q_c_s,
                     blk_do_idx = ((tl.cast(rev_idx_spa_o_h, index_dtype) * do_b_s) +
                                   (offs_m[:, None] * do_r_s) +
                                   (offs_d[None, :] * do_c_s))
-                    blk_do = tl.load(do + blk_do_idx, mask=((blk_do_idx >= 0) & (blk_do_idx < tl.cast(total_o_blocks, index_dtype) * do_b_s)))
+                    blk_do = tl.load(do + blk_do_idx, mask=((blk_do_idx >= 0) & (blk_do_idx < tl.cast(total_o_blocks, index_dtype) * do_b_s)), other=0)
                     blk_v_idx = ((tl.cast(rev_idx_spa_v_h, index_dtype) * v_b_s) +
                                  (offs_m[:, None] * v_r_s) +
                                  (offs_d[None, :] * v_c_s))
-                    blk_v = tl.load(v + blk_v_idx, mask=((blk_v_idx >= 0) & (blk_v_idx < tl.cast(total_v_blocks, index_dtype) * v_b_s)))
+                    blk_v = tl.load(v + blk_v_idx, mask=((blk_v_idx >= 0) & (blk_v_idx < tl.cast(total_v_blocks, index_dtype) * v_b_s)), other=0)
                     dp += tl.cast(tl.dot(blk_do, tl.trans(blk_v)), tl.float32)
 
             # ds = P * (dp - Di)
@@ -867,11 +863,11 @@ def flash_attention_kernel_bwd_dkdv(q, q_b_s, q_r_s, q_c_s,
                     blk_q_idx = ((tl.cast(rev_idx_spa_q_h, index_dtype) * q_b_s) +
                                  (offs_m[:, None] * q_r_s) +
                                  (offs_d[None, :] * q_c_s))
-                    blk_q = tl.load(q + blk_q_idx, mask=((blk_q_idx >= 0) & (blk_q_idx < tl.cast(total_q_blocks, index_dtype) * q_b_s)))
+                    blk_q = tl.load(q + blk_q_idx, mask=((blk_q_idx >= 0) & (blk_q_idx < tl.cast(total_q_blocks, index_dtype) * q_b_s)), other=0)
                     blk_dk_idx = ((tl.cast(rev_idx_spa_k_h, index_dtype) * k_b_s) +
                                   (offs_m[:, None] * k_r_s) +
                                   (offs_d[None, :] * k_c_s))
-                    blk_dk = tl.cast(tl.load(dk + blk_dk_idx, mask=((blk_dk_idx >= 0) & (blk_dk_idx < tl.cast(total_k_blocks, index_dtype) * k_b_s))), tl.float32)
+                    blk_dk = tl.cast(tl.load(dk + blk_dk_idx, mask=((blk_dk_idx >= 0) & (blk_dk_idx < tl.cast(total_k_blocks, index_dtype) * k_b_s)), other=0), tl.float32)
                     blk_dk += tl.cast(tl.dot(tl.trans(tl.cast(ds, blk_q.dtype)), blk_q), tl.float32) * scale
                     tl.store(dk + blk_dk_idx, tl.cast(blk_dk, dk.dtype.element_ty))
 
@@ -883,11 +879,11 @@ def flash_attention_kernel_bwd_dkdv(q, q_b_s, q_r_s, q_c_s,
                     blk_do_idx = ((tl.cast(rev_idx_spa_o_h, index_dtype) * do_b_s) +
                                   (offs_m[:, None] * do_r_s) +
                                   (offs_d[None, :] * do_c_s))
-                    blk_do = tl.load(do + blk_do_idx, mask=((blk_do_idx >= 0) & (blk_do_idx < tl.cast(total_o_blocks, index_dtype) * do_b_s)))
+                    blk_do = tl.load(do + blk_do_idx, mask=((blk_do_idx >= 0) & (blk_do_idx < tl.cast(total_o_blocks, index_dtype) * do_b_s)), other=0)
                     blk_dv_idx = ((tl.cast(rev_idx_spa_v_h, index_dtype) * v_b_s) +
                                   (offs_m[:, None] * v_r_s) +
                                   (offs_d[None, :] * v_c_s))
-                    blk_dv = tl.cast(tl.load(dv + blk_dv_idx, mask=((blk_dv_idx >= 0) & (blk_dv_idx < tl.cast(total_v_blocks, index_dtype) * v_b_s))), tl.float32)
+                    blk_dv = tl.cast(tl.load(dv + blk_dv_idx, mask=((blk_dv_idx >= 0) & (blk_dv_idx < tl.cast(total_v_blocks, index_dtype) * v_b_s)), other=0), tl.float32)
                     blk_dv += tl.cast(tl.dot(tl.trans(tl.cast(p, blk_do.dtype)), blk_do), tl.float32)
                     tl.store(dv + blk_dv_idx, tl.cast(blk_dv, dv.dtype.element_ty))
 
@@ -898,7 +894,7 @@ def flash_attention_kernel_bwd_dkdv(q, q_b_s, q_r_s, q_c_s,
                     blk_dbias_idx = ((tl.cast(rev_idx_spa_bias, index_dtype) * dbias_b_s) +
                                      (offs_m[:, None] * dbias_r_s) +
                                      (offs_d[None, :] * dbias_c_s))
-                    blk_dbias = tl.cast(tl.load(dbias + blk_dbias_idx, mask=((blk_dbias_idx >= 0) & (blk_dbias_idx < tl.cast(total_bias_blocks, index_dtype) * dbias_b_s))), tl.float32)
+                    blk_dbias = tl.cast(tl.load(dbias + blk_dbias_idx, mask=((blk_dbias_idx >= 0) & (blk_dbias_idx < tl.cast(total_bias_blocks, index_dtype) * dbias_b_s)), other=0), tl.float32)
                     blk_dbias += ds
                     tl.store(dbias + blk_dbias_idx, tl.cast(blk_dbias, dbias.dtype.element_ty))
 
@@ -968,11 +964,11 @@ def flash_attention_kernel_bwd_dq(q, q_b_s, q_r_s, q_c_s,
                     blk_q_idx = ((tl.cast(rev_idx_spa_q, index_dtype) * q_b_s) +
                                  (offs_m[:, None] * q_r_s) +
                                  (offs_d[None, :] * q_c_s))
-                    blk_q = tl.load(q + blk_q_idx, mask=((blk_q_idx >= 0) & (blk_q_idx < tl.cast(total_q_blocks, index_dtype) * q_b_s)))
+                    blk_q = tl.load(q + blk_q_idx, mask=((blk_q_idx >= 0) & (blk_q_idx < tl.cast(total_q_blocks, index_dtype) * q_b_s)), other=0)
                     blk_k_idx = ((tl.cast(rev_idx_spa_k, index_dtype) * k_b_s) +
                                  (offs_m[:, None] * k_r_s) +
                                  (offs_d[None, :] * k_c_s))
-                    blk_k = tl.load(k + blk_k_idx, mask=((blk_k_idx >= 0) & (blk_k_idx < tl.cast(total_k_blocks, index_dtype) * k_b_s)))
+                    blk_k = tl.load(k + blk_k_idx, mask=((blk_k_idx >= 0) & (blk_k_idx < tl.cast(total_k_blocks, index_dtype) * k_b_s)), other=0)
                     buf_s += tl.dot(blk_q, tl.trans(blk_k))
 
             buf_s = buf_s * qk_scale
@@ -1009,11 +1005,11 @@ def flash_attention_kernel_bwd_dq(q, q_b_s, q_r_s, q_c_s,
                     blk_do_idx = ((tl.cast(rev_idx_spa_o_h, index_dtype) * do_b_s) +
                                   (offs_m[:, None] * do_r_s) +
                                   (offs_d[None, :] * do_c_s))
-                    blk_do = tl.load(do + blk_do_idx, mask=((blk_do_idx >= 0) & (blk_do_idx < tl.cast(total_o_blocks, index_dtype) * do_b_s)))
+                    blk_do = tl.load(do + blk_do_idx, mask=((blk_do_idx >= 0) & (blk_do_idx < tl.cast(total_o_blocks, index_dtype) * do_b_s)), other=0)
                     blk_v_idx = ((tl.cast(rev_idx_spa_v_h, index_dtype) * v_b_s) +
                                  (offs_m[:, None] * v_r_s) +
                                  (offs_d[None, :] * v_c_s))
-                    blk_v = tl.load(v + blk_v_idx, mask=((blk_v_idx >= 0) & (blk_v_idx < tl.cast(total_v_blocks, index_dtype) * v_b_s)))
+                    blk_v = tl.load(v + blk_v_idx, mask=((blk_v_idx >= 0) & (blk_v_idx < tl.cast(total_v_blocks, index_dtype) * v_b_s)), other=0)
                     dp += tl.cast(tl.dot(blk_do, tl.trans(blk_v)), tl.float32)
 
             # ds = P * (dp - Di)
@@ -1027,11 +1023,11 @@ def flash_attention_kernel_bwd_dq(q, q_b_s, q_r_s, q_c_s,
                     blk_k_idx = ((tl.cast(rev_idx_spa_k_h, index_dtype) * k_b_s) +
                                  (offs_m[:, None] * k_r_s) +
                                  (offs_d[None, :] * k_c_s))
-                    blk_k = tl.load(k + blk_k_idx, mask=((blk_k_idx >= 0) & (blk_k_idx < tl.cast(total_k_blocks, index_dtype) * k_b_s)))
+                    blk_k = tl.load(k + blk_k_idx, mask=((blk_k_idx >= 0) & (blk_k_idx < tl.cast(total_k_blocks, index_dtype) * k_b_s)), other=0)
                     blk_dq_idx = ((tl.cast(rev_idx_spa_q_h, index_dtype) * q_b_s) +
                                   (offs_m[:, None] * q_r_s) +
                                   (offs_d[None, :] * q_c_s))
-                    blk_dq = tl.cast(tl.load(dq + blk_dq_idx, mask=((blk_dq_idx >= 0) & (blk_dq_idx < tl.cast(total_q_blocks, index_dtype) * q_b_s))), tl.float32)
+                    blk_dq = tl.cast(tl.load(dq + blk_dq_idx, mask=((blk_dq_idx >= 0) & (blk_dq_idx < tl.cast(total_q_blocks, index_dtype) * q_b_s)), other=0), tl.float32)
                     blk_dq += tl.cast(tl.dot(tl.cast(ds, blk_k.dtype), blk_k), tl.float32) * scale
                     tl.store(dq + blk_dq_idx, tl.cast(blk_dq, dq.dtype.element_ty))
 

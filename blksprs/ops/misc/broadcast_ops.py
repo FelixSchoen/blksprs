@@ -9,7 +9,7 @@ from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_config
 from blksprs.utils.blksprs_tensor import BlksprsTensor
 from blksprs.utils.tools import stride, can_use_int32_indexing
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
-    validate_sparsity_block_size, ensure_contiguous
+    validate_sparsity_layout, validate_sparsity_block_size, validate_shape, validate_divisible, ensure_contiguous
 
 
 @torch.amp.custom_fwd(device_type="cuda")
@@ -37,11 +37,21 @@ def broadcast_add(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
     validate_dimensions(x, dims=2)
     validate_dimensions(y, dims=2)
     validate_dimensions(sparsity_layout_output)
-    validate_device(x, y)
-    validate_contiguous(x, y)
+    validate_sparsity_layout(sparsity_layout_output)
+    validate_device(x, y, sparsity_layout_output)
+    validate_contiguous(x, y, sparsity_layout_output)
+    if x.size(0) != y.size(0):
+        raise ValueError("Batch dimensions of tensors must match")
     if x.size(-1) != y.size(-1):
         raise ValueError("Dimensions of tensors must match")
     validate_sparsity_block_size(sparsity_block_size)
+    validate_divisible(x.size(-1), sparsity_block_size, "Tensor sizes", "sparsity block size")
+    validate_divisible(y.size(-1), sparsity_block_size, "Tensor sizes", "sparsity block size")
+    validate_shape(
+        sparsity_layout_output,
+        (x.size(0), x.size(-1) // sparsity_block_size, y.size(-1) // sparsity_block_size),
+        "Output sparsity layout",
+    )
 
     sparsity_lut_o = torch.nonzero(sparsity_layout_output).contiguous()
 
@@ -123,7 +133,7 @@ def broadcast_add_kernel(x,
     # Get position of current sparsity block consisting of its batch, row, and column index
     spa_val_idx = pid_blk * s_lut_o_r_s + tl.cast(tl.arange(0, 4), index_dtype) * s_lut_o_c_s
     spa_val_msk = (tl.arange(0, 4) < 3)
-    spa_val = tl.load(s_lut_o + spa_val_idx, mask=spa_val_msk)
+    spa_val = tl.load(s_lut_o + spa_val_idx, mask=spa_val_msk, other=0)
 
     spa_bat_o = tl.cast(tl.sum(spa_val * (tl.arange(0, 4) == 0)), index_dtype)
     spa_row_o = tl.cast(tl.sum(spa_val * (tl.arange(0, 4) == 1)), index_dtype)
@@ -135,7 +145,7 @@ def broadcast_add_kernel(x,
                    tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * x_c_s)[None, :])
     blk_x_msk = ((blk_x_idx >= 0) &
                  (blk_x_idx < tl.cast(x_b, index_dtype) * x_b_s))
-    blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk)
+    blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk, other=0)
 
     # Load y block
     blk_y_idx = (spa_bat_o * y_b_s +
@@ -143,7 +153,7 @@ def broadcast_add_kernel(x,
                    tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * y_c_s)[None, :])
     blk_y_msk = ((blk_y_idx >= 0) &
                  (blk_y_idx < tl.cast(y_b, index_dtype) * y_b_s))
-    blk_y = tl.load(y + blk_y_idx, mask=blk_y_msk)
+    blk_y = tl.load(y + blk_y_idx, mask=blk_y_msk, other=0)
 
     # Compute sum
     blk_x, blk_y = tl.broadcast(tl.trans(blk_x), blk_y)
