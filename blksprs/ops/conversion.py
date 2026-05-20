@@ -7,7 +7,7 @@ from triton import language as tl
 from blksprs.layouting.sparsity_layout import build_sparsity_layout_adaption
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs, prune_autotune_configs_conversion
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import stride, build_reverse_lut, can_use_int32_indexing
+from blksprs.utils.tools import stride, build_packed_indices, can_use_int32_indexing
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity, validate_sparsity_block_size, validate_sparsity_dense, ensure_contiguous
 
@@ -22,7 +22,7 @@ def to_blksprs(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int) -> 
 def to_sparse_shaped(x: Tensor,
                      sparsity_layout: Tensor,
                      sparsity_block_size: int,
-                     lut: dict = None) -> BlksprsTensor:
+                     layout_cache: dict = None) -> BlksprsTensor:
     """Converts an already block-shaped dense tensor to compressed form.
 
     This is a named convenience wrapper around :func:`to_sparse` for call sites
@@ -33,15 +33,15 @@ def to_sparse_shaped(x: Tensor,
         x (Tensor): Dense tensor in block-shaped form.
         sparsity_layout (Tensor): Sparsity layout for ``x``.
         sparsity_block_size (int): Size of the sparsity blocks.
-        lut (dict, optional): Optional conversion LUT cache.
+        layout_cache (dict, optional): Optional conversion layout cache.
 
     Returns:
         BlksprsTensor: ``x`` converted to compressed block-sparse form.
     """
-    return to_sparse(x, sparsity_layout, sparsity_block_size, lut=lut)
+    return to_sparse(x, sparsity_layout, sparsity_block_size, layout_cache=layout_cache)
 
 
-def is_row_striped_layout(sparsity_layout: Tensor, lut: dict = None) -> bool:
+def is_row_striped_layout(sparsity_layout: Tensor, layout_cache: dict = None) -> bool:
     """Check whether a sparsity layout is dense along columns for active rows.
 
     A row-striped layout marks either all blocks or no blocks in a given row.
@@ -50,22 +50,22 @@ def is_row_striped_layout(sparsity_layout: Tensor, lut: dict = None) -> bool:
 
     Args:
         sparsity_layout (Tensor): Layout to inspect.
-        lut (dict, optional): Optional mutable cache for derived row metadata.
+        layout_cache (dict, optional): Optional mutable cache for derived row metadata.
 
     Returns:
         bool: ``True`` if the layout is row-striped, ``False`` otherwise.
     """
-    if lut is None:
-        lut = dict()
+    if layout_cache is None:
+        layout_cache = dict()
 
-    row_striped_build_lut(lut, sparsity_layout)
-    return lut["is_row_striped"]
+    row_striped_build_layout_cache(layout_cache, sparsity_layout)
+    return layout_cache["is_row_striped"]
 
 
 def to_sparse_row_striped(x: Tensor,
                           sparsity_layout: Tensor,
                           sparsity_block_size: int,
-                          lut: dict = None) -> BlksprsTensor:
+                          layout_cache: dict = None) -> BlksprsTensor:
     """Convert a block-shaped dense tensor with row-striped sparsity to compressed form.
 
     This specialised path is faster than :func:`to_sparse` when the sparsity
@@ -77,7 +77,7 @@ def to_sparse_row_striped(x: Tensor,
         x (Tensor): Dense tensor in block-shaped form.
         sparsity_layout (Tensor): Row-striped sparsity layout for ``x``.
         sparsity_block_size (int): Size of the sparsity blocks.
-        lut (dict, optional): Optional conversion LUT cache.
+        layout_cache (dict, optional): Optional conversion layout cache.
 
     Returns:
         BlksprsTensor: ``x`` converted to compressed block-sparse form.
@@ -90,20 +90,20 @@ def to_sparse_row_striped(x: Tensor,
     validate_sparsity_dense(sparsity_block_size, (x, sparsity_layout))
     validate_sparsity_block_size(sparsity_block_size, x)
 
-    lut = row_striped_build_lut(lut, sparsity_layout)
+    layout_cache = row_striped_build_layout_cache(layout_cache, sparsity_layout)
 
-    if not lut["is_row_striped"]:
+    if not layout_cache["is_row_striped"]:
         raise ValueError(
             "to_sparse_row_striped requires a row-striped sparsity layout.")
 
-    if lut["n_sparse_blocks"] == 0:
+    if layout_cache["n_sparse_blocks"] == 0:
         return BlksprsTensor.wrap(torch.empty(
             (0, sparsity_block_size, sparsity_block_size),
             dtype=x.dtype,
             device=x.device,
         ))
 
-    if lut["n_active_row_blocks"] == lut["n_total_row_blocks"]:
+    if layout_cache["n_active_row_blocks"] == layout_cache["n_total_row_blocks"]:
         x_blocks = (
             x.reshape(
                 x.size(0),
@@ -130,14 +130,14 @@ def to_sparse_row_striped(x: Tensor,
         .contiguous()
     )
     selected_rows = x_blocks_flat.index_select(
-        0, lut["active_row_flat_indices"])
+        0, layout_cache["active_row_flat_indices"])
 
     return BlksprsTensor.wrap(selected_rows.reshape(-1, sparsity_block_size, sparsity_block_size))
 
 
 @torch.amp.custom_fwd(device_type="cuda")
 def to_sparse(x: Tensor, sparsity_layout: Tensor,
-              sparsity_block_size: int, lut: dict = None) -> BlksprsTensor:
+              sparsity_block_size: int, layout_cache: dict = None) -> BlksprsTensor:
     """Converts a block-sparse tensor in regular form to a block-sparse tensor in compressed form based on the given
     sparsity layout.
 
@@ -145,7 +145,7 @@ def to_sparse(x: Tensor, sparsity_layout: Tensor,
         x (Tensor): A block-sparse tensor in regular form.
         sparsity_layout (Tensor): The sparsity layout of the block-sparse tensor.
         sparsity_block_size (int): The size of the sparsity blocks.
-        lut (dict, optional): A dictionary containing the look-up tables for the operation (default ``None``).
+        layout_cache (dict, optional): A dictionary containing the layout cache data for the operation (default ``None``).
 
     Returns:
         BlksprsTensor: The block-sparse tensor converted to compressed form.
@@ -159,26 +159,26 @@ def to_sparse(x: Tensor, sparsity_layout: Tensor,
     validate_sparsity_dense(sparsity_block_size, (x, sparsity_layout))
     validate_sparsity_block_size(sparsity_block_size, x)
 
-    lut = to_sparse_build_lut(lut, sparsity_layout)
+    layout_cache = to_sparse_build_layout_cache(layout_cache, sparsity_layout)
 
     if sparsity_layout.size(1) == 1 and sparsity_layout.size(2) == 1 and torch.all(sparsity_layout):
         return BlksprsTensor.wrap(x)
 
     return BlksprsTensor.wrap(to_sparse_forward(x, sparsity_layout,
-                                                lut["sparsity_lut"], sparsity_block_size, lut["n_sparse_blocks"]))
+                                                layout_cache["layout_indices"], sparsity_block_size, layout_cache["n_sparse_blocks"]))
 
 
 @triton_op("blksprs::to_sparse_forward", mutates_args={})
 def to_sparse_forward(x: Tensor, _: Tensor,
-                      sparsity_lut: Tensor, sparsity_block_size: int, n_sparse_blocks: int) -> Tensor:
+                      layout_indices: Tensor, sparsity_block_size: int, n_sparse_blocks: int) -> Tensor:
     with torch.no_grad():
         output = torch.empty(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
                              dtype=x.dtype, device=x.device)
 
         x_b, x_r, x_c = x.size()
         x_b_s, x_r_s, x_c_s = stride(x)
-        s_lut_r, s_lut_c = sparsity_lut.size()
-        s_lut_r_s, s_lut_c_s = stride(sparsity_lut)
+        lidx_r, lidx_c = layout_indices.size()
+        lidx_r_s, lidx_c_s = stride(layout_indices)
         o_b, o_r, o_c = output.size()
         o_b_s, o_r_s, o_c_s = stride(output)
 
@@ -187,11 +187,11 @@ def to_sparse_forward(x: Tensor, _: Tensor,
                                            o_r, meta["TRITON_BLOCK_SIZE"]),
                                        triton.cdiv(o_c, meta["TRITON_BLOCK_SIZE"])]
 
-        use_int64 = not can_use_int32_indexing(x, sparsity_lut, output)
+        use_int64 = not can_use_int32_indexing(x, layout_indices, output)
 
         (wrap_triton(to_sparse_kernel)[triton_grid]
          (x, x_b, x_b_s, x_r_s, x_c_s,
-          sparsity_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
+          layout_indices, lidx_r, lidx_r_s, lidx_c_s,
           output, o_b_s, o_r_s, o_c_s,
           sparsity_block_size,
           USE_INT64=use_int64))
@@ -215,7 +215,7 @@ def to_sparse_wrapper_backward(ctx, grad_output):
 @triton.jit
 def to_sparse_kernel(x,
                      x_b, x_b_s, x_r_s, x_c_s,
-                     s_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
+                     lidx, lidx_r, lidx_r_s, lidx_c_s,
                      o,
                      o_b_s, o_r_s, o_c_s,
                      sparsity_block_size,
@@ -228,9 +228,9 @@ def to_sparse_kernel(x,
     pid_col = tl.cast(tl.program_id(axis=2), index_dtype)
 
     # Get sparsity index of current output block consisting of its batch, row, and column index
-    spa_val_idx = pid_blk * s_lut_r_s + tl.cast(tl.arange(0, 4), index_dtype) * s_lut_c_s
+    spa_val_idx = pid_blk * lidx_r_s + tl.cast(tl.arange(0, 4), index_dtype) * lidx_c_s
     spa_val_msk = (tl.arange(0, 4) < 3)
-    spa_val = tl.load(s_lut + spa_val_idx, mask=spa_val_msk, other=0)
+    spa_val = tl.load(lidx + spa_val_idx, mask=spa_val_msk, other=0)
 
     spa_bat = tl.cast(tl.sum(spa_val * (tl.arange(0, 4) == 0)), index_dtype)
     spa_row = tl.cast(tl.sum(spa_val * (tl.arange(0, 4) == 1)), index_dtype)
@@ -255,21 +255,21 @@ def to_sparse_kernel(x,
     tl.store(o + blk_o_idx, blk_d, mask=blk_o_msk)
 
 
-def to_sparse_build_lut(lut: dict, sparsity_layout: Tensor):
-    if lut is None:
-        lut = dict()
+def to_sparse_build_layout_cache(layout_cache: dict, sparsity_layout: Tensor):
+    if layout_cache is None:
+        layout_cache = dict()
 
-    if "sparsity_lut" not in lut:
-        sparsity_lut = torch.nonzero(sparsity_layout).contiguous()
-        lut["sparsity_lut"] = sparsity_lut
+    if "layout_indices" not in layout_cache:
+        layout_indices = torch.nonzero(sparsity_layout).contiguous()
+        layout_cache["layout_indices"] = layout_indices
 
-    if "n_sparse_blocks" not in lut:
+    if "n_sparse_blocks" not in layout_cache:
         n_sparse_blocks = int(sparsity_layout.sum().item())
-        lut["n_sparse_blocks"] = n_sparse_blocks
+        layout_cache["n_sparse_blocks"] = n_sparse_blocks
 
-    validate_contiguous(sparsity_layout, lut["sparsity_lut"])
+    validate_contiguous(sparsity_layout, layout_cache["layout_indices"])
 
-    return lut
+    return layout_cache
 
 
 # noinspection PyUnusedLocal
@@ -285,18 +285,18 @@ to_sparse_forward.register_autograd(
 
 
 def from_blksprs(x: BlksprsTensor, sparsity_layout: Tensor,
-                 sparsity_block_size: int, fill_value: float = 0, lut: dict = None) -> Tensor:
+                 sparsity_block_size: int, fill_value: float = 0, layout_cache: dict = None) -> Tensor:
     """Wrapper for :func:`to_dense`.
 
     """
-    return to_dense(x, sparsity_layout, sparsity_block_size, fill_value=fill_value, lut=lut)
+    return to_dense(x, sparsity_layout, sparsity_block_size, fill_value=fill_value, layout_cache=layout_cache)
 
 
 def to_dense_shaped(x: BlksprsTensor,
                     sparsity_layout: Tensor,
                     sparsity_block_size: int,
                     fill_value: float = 0,
-                    lut: dict = None) -> Tensor:
+                    layout_cache: dict = None) -> Tensor:
     """Converts a compressed tensor back to an already block-shaped dense tensor.
 
     This is a named convenience wrapper around :func:`to_dense` for call sites
@@ -308,19 +308,19 @@ def to_dense_shaped(x: BlksprsTensor,
         sparsity_layout (Tensor): Sparsity layout for ``x``.
         sparsity_block_size (int): Size of the sparsity blocks.
         fill_value (float): Fill value for sparse regions.
-        lut (dict, optional): Optional conversion LUT cache.
+        layout_cache (dict, optional): Optional conversion layout cache.
 
     Returns:
         Tensor: Dense tensor in block-shaped form.
     """
-    return to_dense(x, sparsity_layout, sparsity_block_size, fill_value=fill_value, lut=lut)
+    return to_dense(x, sparsity_layout, sparsity_block_size, fill_value=fill_value, layout_cache=layout_cache)
 
 
 def to_dense_row_striped(x: BlksprsTensor,
                          sparsity_layout: Tensor,
                          sparsity_block_size: int,
                          fill_value: float = 0,
-                         lut: dict = None) -> Tensor:
+                         layout_cache: dict = None) -> Tensor:
     """Convert a compressed row-striped tensor back to block-shaped dense form.
 
     This is the inverse of :func:`to_sparse_row_striped`.
@@ -330,7 +330,7 @@ def to_dense_row_striped(x: BlksprsTensor,
         sparsity_layout (Tensor): Row-striped sparsity layout for ``x``.
         sparsity_block_size (int): Size of the sparsity blocks.
         fill_value (float): Fill value for sparse regions.
-        lut (dict, optional): Optional conversion LUT cache.
+        layout_cache (dict, optional): Optional conversion layout cache.
 
     Returns:
         Tensor: Dense tensor in block-shaped form.
@@ -343,9 +343,9 @@ def to_dense_row_striped(x: BlksprsTensor,
     validate_sparsity(sparsity_block_size, (x, sparsity_layout))
     validate_sparsity_block_size(sparsity_block_size, x)
 
-    lut = row_striped_build_lut(lut, sparsity_layout)
+    layout_cache = row_striped_build_layout_cache(layout_cache, sparsity_layout)
 
-    if not lut["is_row_striped"]:
+    if not layout_cache["is_row_striped"]:
         raise ValueError(
             "to_dense_row_striped requires a row-striped sparsity layout.")
 
@@ -361,15 +361,15 @@ def to_dense_row_striped(x: BlksprsTensor,
         device=x.device,
     )
 
-    if lut["n_sparse_blocks"] > 0:
+    if layout_cache["n_sparse_blocks"] > 0:
         source_rows = x.reshape(
-            lut["n_active_row_blocks"],
+            layout_cache["n_active_row_blocks"],
             sparsity_layout.size(2),
             sparsity_block_size,
             sparsity_block_size,
         )
         output_blocks_flat.index_copy_(
-            0, lut["active_row_flat_indices"], source_rows)
+            0, layout_cache["active_row_flat_indices"], source_rows)
 
     return (
         output_blocks_flat.reshape(
@@ -391,7 +391,7 @@ def to_dense_row_striped(x: BlksprsTensor,
 
 @torch.amp.custom_fwd(device_type="cuda")
 def to_dense(x: BlksprsTensor, sparsity_layout: Tensor,
-             sparsity_block_size: int, fill_value: float = 0, lut: dict = None) -> Tensor:
+             sparsity_block_size: int, fill_value: float = 0, layout_cache: dict = None) -> Tensor:
     """Converts a block-sparse tensor in compressed form to a block-sparse tensor in regular form based on the given
         sparsity layout.
 
@@ -401,7 +401,7 @@ def to_dense(x: BlksprsTensor, sparsity_layout: Tensor,
         sparsity_block_size (int): The size of the sparsity blocks.
         fill_value (float): The value to fill the resulting dense tensor with where the block-sparse tensor is not
             present (default ``0``).
-        lut (dict, optional): A dictionary containing the look-up tables for the operation (default ``None``).
+        layout_cache (dict, optional): A dictionary containing the layout cache data for the operation (default ``None``).
 
     Returns:
         Tensor: The block-sparse tensor converted to regular form.
@@ -415,18 +415,18 @@ def to_dense(x: BlksprsTensor, sparsity_layout: Tensor,
     validate_sparsity(sparsity_block_size, (x, sparsity_layout))
     validate_sparsity_block_size(sparsity_block_size, x)
 
-    lut = to_dense_build_lut(lut, sparsity_layout)
+    layout_cache = to_dense_build_layout_cache(layout_cache, sparsity_layout)
 
     if sparsity_layout.size(1) == 1 and sparsity_layout.size(2) == 1 and torch.all(sparsity_layout):
         return x
 
     return Tensor(to_dense_forward(x, sparsity_layout,
-                                   lut["sparsity_reverse_lut"], sparsity_block_size, fill_value))
+                                   layout_cache["packed_indices"], sparsity_block_size, fill_value))
 
 
 @triton_op("blksprs::to_dense_forward", mutates_args={})
 def to_dense_forward(x: Tensor, sparsity_layout: Tensor,
-                     sparsity_reverse_lut: Tensor,
+                     packed_indices: Tensor,
                      sparsity_block_size: int, fill_value: float) -> Tensor:
     with torch.no_grad():
         output = torch.full(size=(sparsity_layout.size(0), sparsity_layout.size(1) * sparsity_block_size,
@@ -445,13 +445,13 @@ def to_dense_forward(x: Tensor, sparsity_layout: Tensor,
                                            o_r, meta["TRITON_BLOCK_SIZE"]),
                                        triton.cdiv(o_c, meta["TRITON_BLOCK_SIZE"])]
 
-        use_int64 = not can_use_int32_indexing(x, sparsity_layout, sparsity_reverse_lut, output)
+        use_int64 = not can_use_int32_indexing(x, sparsity_layout, packed_indices, output)
 
         (wrap_triton(to_dense_kernel)[triton_grid]
          (x,
           x_b, x_b_s, x_r_s, x_c_s,
           s_l_b, s_l_b_s, s_l_r_s, s_l_c_s,
-          sparsity_reverse_lut,
+          packed_indices,
           output,
           o_b, o_b_s, o_r_s, o_c_s,
           sparsity_block_size,
@@ -477,7 +477,7 @@ def to_dense_wrapper_backward(ctx, grad_output):
 def to_dense_kernel(x,
                     x_b, x_b_s, x_r_s, x_c_s,
                     s_l_b, s_l_b_s, s_l_r_s, s_l_c_s,
-                    sparsity_reverse_lut,
+                    packed_indices,
                     o,
                     o_b, o_b_s, o_r_s, o_c_s,
                     sparsity_block_size,
@@ -493,17 +493,17 @@ def to_dense_kernel(x,
     spa_row = (pid_row * TRITON_BLOCK_SIZE) // sparsity_block_size
     spa_col = (pid_col * TRITON_BLOCK_SIZE) // sparsity_block_size
 
-    # Get reverse sparsity index for current block
-    rev_idx_spa_idx = (pid_blk * s_l_b_s + spa_row *
+    # Get packed index for current block
+    packed_idx_idx = (pid_blk * s_l_b_s + spa_row *
                        s_l_r_s + spa_col * s_l_c_s)
-    rev_idx_spa_msk = ((rev_idx_spa_idx >= 0) &
-                       (rev_idx_spa_idx < tl.cast(s_l_b, index_dtype) * s_l_b_s))
-    rev_idx_spa = tl.cast(tl.load(sparsity_reverse_lut +
-                          rev_idx_spa_idx, mask=rev_idx_spa_msk, other=-1), tl.int32)
+    packed_idx_msk = ((packed_idx_idx >= 0) &
+                       (packed_idx_idx < tl.cast(s_l_b, index_dtype) * s_l_b_s))
+    packed_idx = tl.cast(tl.load(packed_indices +
+                          packed_idx_idx, mask=packed_idx_msk, other=-1), tl.int32)
 
     # If block is present commence operations
-    if rev_idx_spa >= 0:
-        blk_idx = (tl.cast(rev_idx_spa, index_dtype) * x_b_s +
+    if packed_idx >= 0:
+        blk_idx = (tl.cast(packed_idx, index_dtype) * x_b_s +
                    (((pid_row % (sparsity_block_size // TRITON_BLOCK_SIZE)) * TRITON_BLOCK_SIZE +
                      tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * x_r_s)[:, None] +
                    (((pid_col % (sparsity_block_size // TRITON_BLOCK_SIZE)) * TRITON_BLOCK_SIZE +
@@ -520,57 +520,57 @@ def to_dense_kernel(x,
         tl.store(o + o_idx, blk, o_msk)
 
 
-def to_dense_build_lut(lut: dict, sparsity_layout: Tensor):
-    if lut is None:
-        lut = dict()
+def to_dense_build_layout_cache(layout_cache: dict, sparsity_layout: Tensor):
+    if layout_cache is None:
+        layout_cache = dict()
 
-    if "sparsity_reverse_lut" not in lut:
-        lut["sparsity_reverse_lut"] = build_reverse_lut(sparsity_layout)
+    if "packed_indices" not in layout_cache:
+        layout_cache["packed_indices"] = build_packed_indices(sparsity_layout)
 
-    validate_contiguous(lut["sparsity_reverse_lut"])
+    validate_contiguous(layout_cache["packed_indices"])
 
-    return lut
+    return layout_cache
 
 
-def row_striped_build_lut(lut: dict, sparsity_layout: Tensor):
-    if lut is None:
-        lut = dict()
+def row_striped_build_layout_cache(layout_cache: dict, sparsity_layout: Tensor):
+    if layout_cache is None:
+        layout_cache = dict()
 
-    if "active_row_mask" not in lut:
+    if "active_row_mask" not in layout_cache:
         active_row_mask = torch.all(sparsity_layout, dim=-1).contiguous()
-        lut["active_row_mask"] = active_row_mask
+        layout_cache["active_row_mask"] = active_row_mask
 
-    if "is_row_striped" not in lut:
-        dense_rows = lut["active_row_mask"].unsqueeze(
+    if "is_row_striped" not in layout_cache:
+        dense_rows = layout_cache["active_row_mask"].unsqueeze(
             -1).expand_as(sparsity_layout)
-        lut["is_row_striped"] = bool(torch.equal(sparsity_layout, dense_rows))
+        layout_cache["is_row_striped"] = bool(torch.equal(sparsity_layout, dense_rows))
 
-    if not lut["is_row_striped"]:
-        return lut
+    if not layout_cache["is_row_striped"]:
+        return layout_cache
 
-    if "active_row_flat_indices" not in lut:
+    if "active_row_flat_indices" not in layout_cache:
         active_row_flat_indices = torch.nonzero(
-            lut["active_row_mask"].reshape(-1), as_tuple=False
+            layout_cache["active_row_mask"].reshape(-1), as_tuple=False
         ).squeeze(-1).contiguous()
-        lut["active_row_flat_indices"] = active_row_flat_indices
+        layout_cache["active_row_flat_indices"] = active_row_flat_indices
 
-    if "n_active_row_blocks" not in lut:
-        lut["n_active_row_blocks"] = int(
-            lut["active_row_flat_indices"].numel())
+    if "n_active_row_blocks" not in layout_cache:
+        layout_cache["n_active_row_blocks"] = int(
+            layout_cache["active_row_flat_indices"].numel())
 
-    if "n_total_row_blocks" not in lut:
-        lut["n_total_row_blocks"] = int(
+    if "n_total_row_blocks" not in layout_cache:
+        layout_cache["n_total_row_blocks"] = int(
             sparsity_layout.size(0) * sparsity_layout.size(1))
 
-    if "n_sparse_blocks" not in lut:
-        lut["n_sparse_blocks"] = int(
-            lut["n_active_row_blocks"] * sparsity_layout.size(2))
+    if "n_sparse_blocks" not in layout_cache:
+        layout_cache["n_sparse_blocks"] = int(
+            layout_cache["n_active_row_blocks"] * sparsity_layout.size(2))
 
-    validate_contiguous(lut["active_row_mask"])
-    if lut["n_active_row_blocks"] > 0:
-        validate_contiguous(lut["active_row_flat_indices"])
+    validate_contiguous(layout_cache["active_row_mask"])
+    if layout_cache["n_active_row_blocks"] > 0:
+        validate_contiguous(layout_cache["active_row_flat_indices"])
 
-    return lut
+    return layout_cache
 
 
 # noinspection PyUnusedLocal
@@ -612,35 +612,35 @@ def adapt_layout(x: BlksprsTensor, sparsity_layout_from: Tensor, sparsity_block_
     validate_sparsity_block_size(sparsity_block_size_from, x)
     validate_sparsity_block_size(sparsity_block_size_to)
 
-    sparsity_reverse_lut_from = build_reverse_lut(sparsity_layout_from)
+    packed_indices_from = build_packed_indices(sparsity_layout_from)
 
     if sparsity_layout_to is None:
         sparsity_layout_to = build_sparsity_layout_adaption(x, sparsity_layout_from,
                                                             sparsity_block_size_from, sparsity_block_size_to)
 
-    sparsity_lut_to = torch.nonzero(sparsity_layout_to).contiguous()
+    layout_indices_to = torch.nonzero(sparsity_layout_to).contiguous()
 
     n_sparse_blocks_to = torch.sum(sparsity_layout_to.to(torch.int)).item()
 
-    validate_contiguous(sparsity_reverse_lut_from,
-                        sparsity_layout_to, sparsity_lut_to)
+    validate_contiguous(packed_indices_from,
+                        sparsity_layout_to, layout_indices_to)
 
     if (sparsity_block_size_from == sparsity_block_size_to) and torch.equal(sparsity_layout_from, sparsity_layout_to):
         return BlksprsTensor.wrap(x), sparsity_layout_to
 
     return BlksprsTensor.wrap(adapt_layout_forward(x,
-                                                   sparsity_layout_from, sparsity_reverse_lut_from,
+                                                   sparsity_layout_from, packed_indices_from,
                                                    sparsity_block_size_from,
-                                                   sparsity_layout_to, sparsity_lut_to,
+                                                   sparsity_layout_to, layout_indices_to,
                                                    sparsity_block_size_to,
                                                    n_sparse_blocks_to)), sparsity_layout_to
 
 
 @triton_op("blksprs::adapt_layout_forward", mutates_args={})
 def adapt_layout_forward(x: Tensor,
-                         sparsity_layout_from: Tensor, sparsity_reverse_lut_from: Tensor,
+                         sparsity_layout_from: Tensor, packed_indices_from: Tensor,
                          sparsity_block_size_from: int,
-                         _: Tensor, sparsity_lut_to: Tensor,
+                         _: Tensor, layout_indices_to: Tensor,
                          sparsity_block_size_to: int,
                          n_sparse_blocks_to: int) -> Tensor:
     with torch.no_grad():
@@ -653,8 +653,8 @@ def adapt_layout_forward(x: Tensor,
         s_l_x_b_s, s_l_x_r_s, s_l_x_c_s = stride(sparsity_layout_from)
         o_b, o_r, o_c = output.size()
         o_b_s, o_r_s, o_c_s = stride(output)
-        s_lut_o_r, s_lut_o_c = sparsity_lut_to.size()
-        s_lut_o_r_s, s_lut_o_c_s = stride(sparsity_lut_to)
+        lidx_o_r, lidx_o_c = layout_indices_to.size()
+        lidx_o_r_s, lidx_o_c_s = stride(layout_indices_to)
 
         def triton_grid(meta): return [o_b,
                                        triton.cdiv(
@@ -664,19 +664,19 @@ def adapt_layout_forward(x: Tensor,
         use_int64 = not can_use_int32_indexing(
             x,
             sparsity_layout_from,
-            sparsity_reverse_lut_from,
+            packed_indices_from,
             output,
-            sparsity_lut_to,
+            layout_indices_to,
         )
 
         (wrap_triton(adapt_layout_kernel)[triton_grid]
          (x,
           x_b, x_b_s, x_r_s, x_c_s,
           s_l_x_b, s_l_x_r, s_l_x_c, s_l_x_b_s, s_l_x_r_s, s_l_x_c_s,
-          sparsity_reverse_lut_from,
+          packed_indices_from,
           output,
           o_b, o_b_s, o_r_s, o_c_s,
-          sparsity_lut_to, s_lut_o_r, s_lut_o_r_s, s_lut_o_c_s,
+          layout_indices_to, lidx_o_r, lidx_o_r_s, lidx_o_c_s,
           sparsity_block_size_from,
           sparsity_block_size_to,
           USE_INT64=use_int64))
@@ -704,10 +704,10 @@ def adapt_layout_wrapper_backward(ctx, grad_output):
 def adapt_layout_kernel(x,
                         x_b, x_b_s, x_r_s, x_c_s,
                         s_l_x_b, s_l_x_r, s_l_x_c, s_l_x_b_s, s_l_x_r_s, s_l_x_c_s,
-                        r_lut_x,
+                        pidx_x,
                         o,
                         o_b, o_b_s, o_r_s, o_c_s,
-                        s_lut_o, s_lut_o_r, s_lut_o_r_s, s_lut_o_c_s,
+                        lidx_o, lidx_o_r, lidx_o_r_s, lidx_o_c_s,
                         sparsity_block_size_from,
                         sparsity_block_size_to,
                         USE_INT64: tl.constexpr,
@@ -719,9 +719,9 @@ def adapt_layout_kernel(x,
     pid_col = tl.cast(tl.program_id(axis=2), index_dtype)
 
     # Get position of current sparsity block consisting of its batch, row, and column index
-    spa_val_idx = pid_blk * s_lut_o_r_s + tl.cast(tl.arange(0, 4), index_dtype) * s_lut_o_c_s
+    spa_val_idx = pid_blk * lidx_o_r_s + tl.cast(tl.arange(0, 4), index_dtype) * lidx_o_c_s
     spa_val_msk = (tl.arange(0, 4) < 3)
-    spa_val = tl.load(s_lut_o + spa_val_idx, mask=spa_val_msk, other=0)
+    spa_val = tl.load(lidx_o + spa_val_idx, mask=spa_val_msk, other=0)
 
     spa_bat_o = tl.cast(tl.sum(spa_val * (tl.arange(0, 4) == 0)), index_dtype)
     spa_row_o = tl.cast(tl.sum(spa_val * (tl.arange(0, 4) == 1)), index_dtype)
@@ -734,21 +734,21 @@ def adapt_layout_kernel(x,
     spa_col_x = (spa_col_o * sparsity_block_size_to + pid_col *
                  TRITON_BLOCK_SIZE) // sparsity_block_size_from
 
-    # Get reverse sparsity indices for x
-    rev_idx_spa_x_idx = (spa_bat_x * s_l_x_b_s +
+    # Get packed indices for x
+    packed_idx_x_idx = (spa_bat_x * s_l_x_b_s +
                          spa_row_x * s_l_x_r_s +
                          spa_col_x * s_l_x_c_s)
-    rev_idx_spa_x_msk = ((spa_bat_x >= 0) &
+    packed_idx_x_msk = ((spa_bat_x >= 0) &
                          (spa_bat_x < tl.cast(s_l_x_b, index_dtype)) &
                          (spa_row_x >= 0) &
                          (spa_row_x < tl.cast(s_l_x_r, index_dtype)) &
                          (spa_col_x >= 0) &
                          (spa_col_x < tl.cast(s_l_x_c, index_dtype)))
-    rev_idx_spa_x = tl.cast(
-        tl.load(r_lut_x + rev_idx_spa_x_idx, mask=rev_idx_spa_x_msk, other=-1), tl.int32)
+    packed_idx_x = tl.cast(
+        tl.load(pidx_x + packed_idx_x_idx, mask=packed_idx_x_msk, other=-1), tl.int32)
 
     # If block is present commence operations
-    if rev_idx_spa_x >= 0:
+    if packed_idx_x >= 0:
         # Calculate triton block size shifts
         shift_row_x = ((spa_row_o * sparsity_block_size_to + pid_row * TRITON_BLOCK_SIZE)
                        % sparsity_block_size_from) // TRITON_BLOCK_SIZE
@@ -756,7 +756,7 @@ def adapt_layout_kernel(x,
                        % sparsity_block_size_from) // TRITON_BLOCK_SIZE
 
         # Load x values
-        blk_x_idx = ((tl.cast(rev_idx_spa_x, index_dtype) * x_b_s) +
+        blk_x_idx = ((tl.cast(packed_idx_x, index_dtype) * x_b_s) +
                      ((shift_row_x * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * x_r_s)[:, None] +
                      ((shift_col_x * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * x_c_s)[None, :])
         blk_x_msk = ((blk_x_idx >= 0) &

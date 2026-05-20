@@ -98,10 +98,15 @@ def test_readme():
     k_sparse = bs.ops.to_sparse(k_dense, sparsity_layout_qkv, sparsity_block_size_attn)
     v_sparse = bs.ops.to_sparse(v_dense, sparsity_layout_qkv, sparsity_block_size_attn)
 
-    lut = bs.ops.flash_attention_build_lut(
+    # Pre-build reusable layout cache data for repeated calls with the same layouts
+    flash_layout_cache = bs.ops.flash_attention_build_layout_cache(
         attention_layout,
-        sparsity_layout_qkv, sparsity_layout_qkv, sparsity_layout_qkv,
-        n_seq_blocks, n_seq_blocks, n_head_blocks,
+        sparsity_layout_q=sparsity_layout_qkv,
+        sparsity_layout_k=sparsity_layout_qkv,
+        sparsity_layout_v=sparsity_layout_qkv,
+        n_seq_blocks_q=n_seq_blocks,
+        n_seq_blocks_k=n_seq_blocks,
+        n_head_blocks=n_head_blocks,
     )
 
     attn_out_sparse = bs.ops.flash_attention(
@@ -109,7 +114,7 @@ def test_readme():
         k_sparse, sparsity_layout_qkv,
         v_sparse, sparsity_layout_qkv,
         attention_layout, sparsity_block_size_attn,
-        lut=lut,
+        layout_cache=flash_layout_cache,
     )
     attn_out_dense = bs.ops.to_dense(attn_out_sparse, sparsity_layout_qkv, sparsity_block_size_attn)
     attn_out = attn_out_dense.reshape(b, h, seq_len, head_dim).transpose(1, 2).contiguous()

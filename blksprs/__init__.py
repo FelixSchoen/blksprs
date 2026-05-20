@@ -5,7 +5,7 @@ import torch
 # Capture scalar outputs for torch.compile / Dynamo tracing
 torch._dynamo.config.capture_scalar_outputs = True
 # Set version
-__version__ = "2.4"
+__version__ = "2.5"
 
 # Imports
 
@@ -15,7 +15,7 @@ class ops:
         to_dense_row_striped, to_sparse_row_striped, is_row_striped_layout, \
         from_blksprs, to_blksprs, adapt_layout
     from blksprs.ops.distribution import gather, scatter, scatter_reduce
-    from blksprs.ops.flash_attention import flash_attention, flash_attention_build_lut
+    from blksprs.ops.flash_attention import flash_attention, flash_attention_build_layout_cache
     from blksprs.ops.matmul import matmul
     from blksprs.ops.softmax import softmax, softmax_fused
     from blksprs.ops.transpose import transpose

@@ -53,13 +53,13 @@ def broadcast_add(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
         "Output sparsity layout",
     )
 
-    sparsity_lut_o = torch.nonzero(sparsity_layout_output).contiguous()
+    layout_indices_o = torch.nonzero(sparsity_layout_output).contiguous()
 
     n_sparse_blocks = torch.sum(sparsity_layout_output.to(torch.int)).item()
 
-    validate_contiguous(sparsity_layout_output, sparsity_lut_o)
+    validate_contiguous(sparsity_layout_output, layout_indices_o)
 
-    return BlksprsTensor.wrap(broadcast_add_forward(x, y, sparsity_lut_o, sparsity_block_size, n_sparse_blocks))
+    return BlksprsTensor.wrap(broadcast_add_forward(x, y, layout_indices_o, sparsity_block_size, n_sparse_blocks))
 
 
 def broadcast_sub(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
@@ -72,7 +72,7 @@ def broadcast_sub(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
 
 @triton_op("blksprs::broadcast_add_forward", mutates_args={})
 def broadcast_add_forward(x: Tensor, y: Tensor,
-                          sparsity_lut_o: Tensor,
+                          layout_indices_o: Tensor,
                           sparsity_block_size: int, n_sparse_blocks: int) -> Tensor:
     with torch.no_grad():
         output = torch.zeros(n_sparse_blocks, sparsity_block_size, sparsity_block_size, dtype=x.dtype, device=x.device)
@@ -83,14 +83,14 @@ def broadcast_add_forward(x: Tensor, y: Tensor,
         y_b_s, y_c_s = stride(y)
         o_b, o_r, o_c = output.size()
         o_b_s, o_r_s, o_c_s = stride(output)
-        s_lut_o_r, s_lut_o_c = sparsity_lut_o.size()
-        s_lut_o_r_s, s_lut_o_c_s = stride(sparsity_lut_o)
+        lidx_o_r, lidx_o_c = layout_indices_o.size()
+        lidx_o_r_s, lidx_o_c_s = stride(layout_indices_o)
 
         triton_grid = lambda meta: [o_b,
                                     triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),
                                     triton.cdiv(o_c, meta["TRITON_BLOCK_SIZE"])]
 
-        use_int64 = not can_use_int32_indexing(x, y, output, sparsity_lut_o)
+        use_int64 = not can_use_int32_indexing(x, y, output, layout_indices_o)
 
         (wrap_triton(broadcast_add_kernel)[triton_grid]
          (x,
@@ -99,7 +99,7 @@ def broadcast_add_forward(x: Tensor, y: Tensor,
           y_b, y_b_s, y_c_s,
           output,
           o_b, o_b_s, o_r_s, o_c_s,
-          sparsity_lut_o, s_lut_o_r, s_lut_o_r_s, s_lut_o_c_s,
+          layout_indices_o, lidx_o_r, lidx_o_r_s, lidx_o_c_s,
           sparsity_block_size,
           USE_INT64=use_int64))
 
@@ -119,7 +119,7 @@ def broadcast_add_kernel(x,
                          y_b, y_b_s, y_c_s,
                          o,
                          o_b, o_b_s, o_r_s, o_c_s,
-                         s_lut_o, s_lut_o_r, s_lut_o_r_s, s_lut_o_c_s,
+                         lidx_o, lidx_o_r, lidx_o_r_s, lidx_o_c_s,
                          sparsity_block_size,
                          USE_INT64: tl.constexpr,
                          TRITON_BLOCK_SIZE: tl.constexpr) -> None:
@@ -131,9 +131,9 @@ def broadcast_add_kernel(x,
     pid_col = tl.cast(tl.program_id(axis=2), index_dtype)
 
     # Get position of current sparsity block consisting of its batch, row, and column index
-    spa_val_idx = pid_blk * s_lut_o_r_s + tl.cast(tl.arange(0, 4), index_dtype) * s_lut_o_c_s
+    spa_val_idx = pid_blk * lidx_o_r_s + tl.cast(tl.arange(0, 4), index_dtype) * lidx_o_c_s
     spa_val_msk = (tl.arange(0, 4) < 3)
-    spa_val = tl.load(s_lut_o + spa_val_idx, mask=spa_val_msk, other=0)
+    spa_val = tl.load(lidx_o + spa_val_idx, mask=spa_val_msk, other=0)
 
     spa_bat_o = tl.cast(tl.sum(spa_val * (tl.arange(0, 4) == 0)), index_dtype)
     spa_row_o = tl.cast(tl.sum(spa_val * (tl.arange(0, 4) == 1)), index_dtype)

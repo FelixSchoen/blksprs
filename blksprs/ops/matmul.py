@@ -7,7 +7,7 @@ from triton import language as tl
 from blksprs.ops.transpose import transpose
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import stride, build_reverse_lut, can_use_int32_indexing, cast_for_autocast
+from blksprs.utils.tools import stride, build_packed_indices, can_use_int32_indexing, cast_for_autocast
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity, validate_sparsity_layout, validate_sparsity_block_size, validate_dtype_float, \
     validate_shape, ensure_contiguous
@@ -17,7 +17,7 @@ from blksprs.utils.validation import validate_contiguous, validate_dimensions, v
 def matmul(x: BlksprsTensor, sparsity_layout_x: Tensor,
            y: BlksprsTensor, sparsity_layout_y: Tensor,
            sparsity_layout_output: Tensor,
-           sparsity_block_size: int, lut: dict = None) -> BlksprsTensor:
+           sparsity_block_size: int, layout_cache: dict = None) -> BlksprsTensor:
     """Performs matrix multiplication between two block-sparse tensors.
 
     The sparsity layout of the output tensor is used to only calculate blocks that will be present in the output.
@@ -29,7 +29,7 @@ def matmul(x: BlksprsTensor, sparsity_layout_x: Tensor,
         sparsity_layout_y (Tensor): The sparsity layout of the second block-sparse tensor.
         sparsity_layout_output (Tensor): The sparsity layout of the output tensor.
         sparsity_block_size (int): The size of the sparsity blocks.
-        lut (dict, optional): A dictionary containing the look-up tables for the operation (default ``None``).
+        layout_cache (dict, optional): A dictionary containing the layout cache data for the operation (default ``None``).
 
     Returns:
         BlksprsTensor: The result of the matrix multiplication as a block-sparse tensor in compressed form.
@@ -56,21 +56,21 @@ def matmul(x: BlksprsTensor, sparsity_layout_x: Tensor,
     )
     validate_sparsity_block_size(sparsity_block_size, x, y)
 
-    lut = matmul_build_lut(lut, sparsity_layout_x,
+    layout_cache = matmul_build_layout_cache(layout_cache, sparsity_layout_x,
                            sparsity_layout_y, sparsity_layout_output)
 
     return BlksprsTensor.wrap(matmul_forward(x, y,
-                                             sparsity_layout_x, lut["sparsity_reverse_lut_x"],
-                                             sparsity_layout_y, lut["sparsity_reverse_lut_y"],
-                                             sparsity_layout_output, lut["sparsity_lut_o"],
-                                             sparsity_block_size, lut["n_sparse_blocks"]))
+                                             sparsity_layout_x, layout_cache["packed_indices_x"],
+                                             sparsity_layout_y, layout_cache["packed_indices_y"],
+                                             sparsity_layout_output, layout_cache["layout_indices_o"],
+                                             sparsity_block_size, layout_cache["n_sparse_blocks"]))
 
 
 @triton_op("blksprs::matmul_forward", mutates_args={})
 def matmul_forward(x: Tensor, y: Tensor,
-                   sparsity_layout_x: Tensor, sparsity_reverse_lut_x: Tensor,
-                   sparsity_layout_y: Tensor, sparsity_reverse_lut_y: Tensor,
-                   _: Tensor, sparsity_lut_o: Tensor,
+                   sparsity_layout_x: Tensor, packed_indices_x: Tensor,
+                   sparsity_layout_y: Tensor, packed_indices_y: Tensor,
+                   _: Tensor, layout_indices_o: Tensor,
                    sparsity_block_size: int, n_sparse_blocks: int) -> Tensor:
     with torch.no_grad():
         output = torch.empty(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
@@ -86,8 +86,8 @@ def matmul_forward(x: Tensor, y: Tensor,
         s_l_y_b_s, s_l_y_r_s, s_l_y_c_s = stride(sparsity_layout_y)
         o_b, o_r, o_c = output.size()
         o_b_s, o_r_s, o_c_s = stride(output)
-        s_lut_o_r, s_lut_o_c = sparsity_lut_o.size()
-        s_lut_o_r_s, s_lut_o_c_s = stride(sparsity_lut_o)
+        lidx_o_r, lidx_o_c = layout_indices_o.size()
+        lidx_o_r_s, lidx_o_c_s = stride(layout_indices_o)
 
         def triton_grid(meta): return [o_b,
                                        triton.cdiv(
@@ -97,12 +97,12 @@ def matmul_forward(x: Tensor, y: Tensor,
         use_int64 = not can_use_int32_indexing(
             x,
             sparsity_layout_x,
-            sparsity_reverse_lut_x,
+            packed_indices_x,
             y,
             sparsity_layout_y,
-            sparsity_reverse_lut_y,
+            packed_indices_y,
             output,
-            sparsity_lut_o,
+            layout_indices_o,
         )
 
         (wrap_triton(matmul_kernel)[triton_grid]
@@ -110,16 +110,16 @@ def matmul_forward(x: Tensor, y: Tensor,
           x_b, x_b_s, x_r_s, x_c_s,
           s_l_x_b, s_l_x_r, s_l_x_b_s, s_l_x_r_s,
           s_l_x_c, s_l_x_c_s,
-          sparsity_reverse_lut_x,
+          packed_indices_x,
           y,
           y_b, y_b_s, y_r_s, y_c_s,
           s_l_y_b, s_l_y_r, s_l_y_b_s, s_l_y_r_s,
           s_l_y_c, s_l_y_c_s,
-          sparsity_reverse_lut_y,
+          packed_indices_y,
           output,
           o_b, o_b_s, o_r_s, o_c_s,
-          sparsity_lut_o,
-          s_lut_o_r, s_lut_o_r_s, s_lut_o_c_s,
+          layout_indices_o,
+          lidx_o_r, lidx_o_r_s, lidx_o_c_s,
           sparsity_block_size,
           USE_INT64=use_int64))
 
@@ -153,16 +153,16 @@ def matmul_wrapper_backward(ctx, grad_output):
 def matmul_kernel(x,
                   x_b, x_b_s, x_r_s, x_c_s,
                   s_l_x_b, s_l_x_r, s_l_x_b_s, s_l_x_r_s, s_l_x_c, s_l_x_c_s,
-                  r_lut_x,
+                  pidx_x,
                   y,
                   y_b, y_b_s, y_r_s, y_c_s,
                   s_l_y_b, s_l_y_r, s_l_y_b_s, s_l_y_r_s, s_l_y_c, s_l_y_c_s,
-                  r_lut_y,
+                  pidx_y,
                   o,
                   o_b, o_b_s, o_r_s, o_c_s,
-                  s_lut_o,
-                  s_lut_o_r, s_lut_o_r_s,
-                  s_lut_o_c_s,
+                  lidx_o,
+                  lidx_o_r, lidx_o_r_s,
+                  lidx_o_c_s,
                   sparsity_block_size,
                   USE_INT64: tl.constexpr,
                   TRITON_BLOCK_SIZE: tl.constexpr) -> None:
@@ -173,9 +173,9 @@ def matmul_kernel(x,
     pid_col = tl.cast(tl.program_id(axis=2), index_dtype)
 
     # Get position of current sparsity block consisting of its batch, row, and column index
-    spa_val_idx = pid_blk * s_lut_o_r_s + tl.cast(tl.arange(0, 4), index_dtype) * s_lut_o_c_s
+    spa_val_idx = pid_blk * lidx_o_r_s + tl.cast(tl.arange(0, 4), index_dtype) * lidx_o_c_s
     spa_val_msk = (tl.arange(0, 4) < 3)
-    spa_val = tl.load(s_lut_o + spa_val_idx, mask=spa_val_msk, other=0)
+    spa_val = tl.load(lidx_o + spa_val_idx, mask=spa_val_msk, other=0)
 
     spa_bat_o = tl.cast(tl.sum(spa_val * (tl.arange(0, 4) == 0)), index_dtype)
     spa_row_o = tl.cast(tl.sum(spa_val * (tl.arange(0, 4) == 1)), index_dtype)
@@ -192,44 +192,44 @@ def matmul_kernel(x,
         # Calculate the triton segment index within a block
         i_seg_tri_mod = i_seg_tri % (sparsity_block_size // TRITON_BLOCK_SIZE)
 
-        # Get reverse sparsity indices for input tensors x and y
+        # Get packed indices for input tensors x and y
         # These are either -1 if the block is empty or equal to the index of the block in the sparse tensor
 
-        # Get reverse sparsity indices for x
-        rev_idx_spa_x_idx = (spa_bat_o * s_l_x_b_s +
+        # Get packed indices for x
+        packed_idx_x_idx = (spa_bat_o * s_l_x_b_s +
                              spa_row_o * s_l_x_r_s +
                              i_seg_spa * s_l_x_c_s)
-        rev_idx_spa_x_msk = ((spa_bat_o >= 0) &
+        packed_idx_x_msk = ((spa_bat_o >= 0) &
                              (spa_bat_o < tl.cast(s_l_x_b, index_dtype)) &
                              (spa_row_o >= 0) &
                              (spa_row_o < tl.cast(s_l_x_r, index_dtype)) &
                              (i_seg_spa >= 0) &
                              (i_seg_spa < tl.cast(s_l_x_c, index_dtype)))
-        rev_idx_spa_x = tl.cast(
-            tl.load(r_lut_x + rev_idx_spa_x_idx, mask=rev_idx_spa_x_msk, other=-1), tl.int32)
+        packed_idx_x = tl.cast(
+            tl.load(pidx_x + packed_idx_x_idx, mask=packed_idx_x_msk, other=-1), tl.int32)
 
-        # Get reverse sparsity indices for y
-        rev_idx_spa_y_idx = (spa_bat_o * s_l_y_b_s +
+        # Get packed indices for y
+        packed_idx_y_idx = (spa_bat_o * s_l_y_b_s +
                              i_seg_spa * s_l_y_r_s + spa_col_o * s_l_y_c_s)
-        rev_idx_spa_y_msk = ((spa_bat_o >= 0) &
+        packed_idx_y_msk = ((spa_bat_o >= 0) &
                              (spa_bat_o < tl.cast(s_l_y_b, index_dtype)) &
                              (i_seg_spa >= 0) &
                              (i_seg_spa < tl.cast(s_l_y_r, index_dtype)) &
                              (spa_col_o >= 0) &
                              (spa_col_o < tl.cast(s_l_y_c, index_dtype)))
-        rev_idx_spa_y = tl.cast(
-            tl.load(r_lut_y + rev_idx_spa_y_idx, mask=rev_idx_spa_y_msk, other=-1), tl.int32)
+        packed_idx_y = tl.cast(
+            tl.load(pidx_y + packed_idx_y_idx, mask=packed_idx_y_msk, other=-1), tl.int32)
 
         # If both blocks are present commence calculation
-        if rev_idx_spa_x >= 0 and rev_idx_spa_y >= 0:
-            blk_x_idx = ((tl.cast(rev_idx_spa_x, index_dtype) * x_b_s) +
+        if packed_idx_x >= 0 and packed_idx_y >= 0:
+            blk_x_idx = ((tl.cast(packed_idx_x, index_dtype) * x_b_s) +
                          ((pid_row * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * x_r_s)[:, None] +
                          ((i_seg_tri_mod * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * x_c_s)[None, :])
             blk_x_msk = ((blk_x_idx >= 0) &
                          (blk_x_idx < tl.cast(x_b, index_dtype) * x_b_s))
             blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk, other=0)
 
-            blk_y_idx = ((tl.cast(rev_idx_spa_y, index_dtype) * y_b_s) +
+            blk_y_idx = ((tl.cast(packed_idx_y, index_dtype) * y_b_s) +
                          ((i_seg_tri_mod * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * y_r_s)[:, None] +
                          ((pid_col * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * y_c_s)[None, :])
             blk_y_msk = ((blk_y_idx >= 0) &
@@ -251,30 +251,30 @@ def matmul_kernel(x,
     tl.store(o + blk_o_idx, buf, mask=blk_o_msk)
 
 
-def matmul_build_lut(lut: dict, sparsity_layout_x: Tensor, sparsity_layout_y: Tensor, sparsity_layout_output: Tensor):
-    if lut is None:
-        lut = dict()
+def matmul_build_layout_cache(layout_cache: dict, sparsity_layout_x: Tensor, sparsity_layout_y: Tensor, sparsity_layout_output: Tensor):
+    if layout_cache is None:
+        layout_cache = dict()
 
-    if "sparsity_reverse_lut_x" not in lut:
-        lut["sparsity_reverse_lut_x"] = build_reverse_lut(sparsity_layout_x)
+    if "packed_indices_x" not in layout_cache:
+        layout_cache["packed_indices_x"] = build_packed_indices(sparsity_layout_x)
 
-    if "sparsity_reverse_lut_y" not in lut:
-        lut["sparsity_reverse_lut_y"] = build_reverse_lut(sparsity_layout_y)
+    if "packed_indices_y" not in layout_cache:
+        layout_cache["packed_indices_y"] = build_packed_indices(sparsity_layout_y)
 
-    if "sparsity_lut_o" not in lut:
-        sparsity_lut_o = torch.nonzero(sparsity_layout_output).contiguous()
-        lut["sparsity_lut_o"] = sparsity_lut_o
+    if "layout_indices_o" not in layout_cache:
+        layout_indices_o = torch.nonzero(sparsity_layout_output).contiguous()
+        layout_cache["layout_indices_o"] = layout_indices_o
 
-    if "n_sparse_blocks" not in lut:
+    if "n_sparse_blocks" not in layout_cache:
         n_sparse_blocks = torch.sum(
             sparsity_layout_output.to(torch.int)).item()
-        lut["n_sparse_blocks"] = n_sparse_blocks
+        layout_cache["n_sparse_blocks"] = n_sparse_blocks
 
-    validate_contiguous(sparsity_layout_x, lut["sparsity_reverse_lut_x"],
-                        sparsity_layout_y, lut["sparsity_reverse_lut_y"],
-                        sparsity_layout_output, lut["sparsity_lut_o"])
+    validate_contiguous(sparsity_layout_x, layout_cache["packed_indices_x"],
+                        sparsity_layout_y, layout_cache["packed_indices_y"],
+                        sparsity_layout_output, layout_cache["layout_indices_o"])
 
-    return lut
+    return layout_cache
 
 
 # noinspection PyUnusedLocal

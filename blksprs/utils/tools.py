@@ -4,8 +4,8 @@ from torch import Tensor, Size
 INT32_INDEX_MAX = 2_147_483_647
 
 
-def build_reverse_lut(sparsity_layout: Tensor) -> Tensor:
-    """Builds a reverse look-up table from a sparsity layout.
+def build_packed_indices(sparsity_layout: Tensor) -> Tensor:
+    """Builds a packed indices from a sparsity layout.
 
     Maps each position in the flattened sparsity layout to its index among the non-zero elements. Positions
     corresponding to zero entries are mapped to ``-1``.

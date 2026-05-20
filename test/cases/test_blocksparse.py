@@ -346,7 +346,7 @@ def test_blksprs_gather(config: list, use_amp: bool):
 
 
 @pytest.mark.parametrize("dim", [1, 2])
-def test_gather_kernel_masks_reverse_lut_indices_per_axis(dim: int):
+def test_gather_kernel_masks_packed_indices_per_axis(dim: int):
     sparsity_block_size = 16
     sparsity_layout_src = torch.ones((2, 1, 1), dtype=torch.bool, device=DEVICE)
     sparsity_layout_idx = torch.ones((1, 1, 1), dtype=torch.bool, device=DEVICE)
@@ -448,7 +448,7 @@ def test_blksprs_scatter(config: list, use_amp: bool):
 
 
 @pytest.mark.parametrize("dim", [1, 2])
-def test_scatter_reduce_kernel_masks_reverse_lut_indices_per_axis(dim: int):
+def test_scatter_reduce_kernel_masks_packed_indices_per_axis(dim: int):
     sparsity_block_size = 16
     sparsity_layout_src = torch.ones((1, 1, 1), dtype=torch.bool, device=DEVICE)
     sparsity_layout_tgt = torch.ones((2, 1, 1), dtype=torch.bool, device=DEVICE)
@@ -1160,11 +1160,11 @@ def test_build_distribution_layout_kernel_masks_target_edge_tiles_per_axis():
         dtype=torch.int32,
         device=DEVICE,
     )
-    sparsity_lut_indices = torch.tensor([[0, 0, 0]], dtype=torch.int64, device=DEVICE)
+    layout_indices_i = torch.tensor([[0, 0, 0]], dtype=torch.int64, device=DEVICE)
 
     actual = build_distribution_layout_operation(
         indices,
-        sparsity_lut_indices,
+        layout_indices_i,
         2,
         [2, sparsity_block_size, sparsity_block_size + 1],
         sparsity_block_size,

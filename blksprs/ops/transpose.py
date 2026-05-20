@@ -4,14 +4,14 @@ from torch._library import triton_op
 
 from blksprs.ops.flow import flow_pull_forward
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import build_reverse_lut
+from blksprs.utils.tools import build_packed_indices
 from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_device, \
     validate_sparsity, validate_sparsity_block_size, ensure_contiguous
 
 
 @torch.amp.custom_fwd(device_type="cuda")
 def transpose(x: BlksprsTensor, sparsity_layout: Tensor,
-              sparsity_block_size: int, lut: dict = None) -> (BlksprsTensor, Tensor):
+              sparsity_block_size: int, layout_cache: dict = None) -> (BlksprsTensor, Tensor):
     """Transposes a block-sparse tensor in compressed form.
 
     Note:
@@ -21,7 +21,7 @@ def transpose(x: BlksprsTensor, sparsity_layout: Tensor,
         x (BlksprsTensor): A block-sparse tensor in compressed form.
         sparsity_layout (Tensor): The sparsity layout of the block-sparse tensor.
         sparsity_block_size (int): The size of the sparsity blocks.
-        lut (dict, optional): A dictionary containing the look-up tables for the operation (default ``None``).
+        layout_cache (dict, optional): A dictionary containing the layout cache data for the operation (default ``None``).
 
     Returns:
         BlksprsTensor: The transposed block-sparse tensor in compressed form.
@@ -36,20 +36,20 @@ def transpose(x: BlksprsTensor, sparsity_layout: Tensor,
     validate_sparsity(sparsity_block_size, (x, sparsity_layout))
     validate_sparsity_block_size(sparsity_block_size, x)
 
-    lut = transpose_build_lut(lut, sparsity_layout)
+    layout_cache = transpose_build_layout_cache(layout_cache, sparsity_layout)
 
-    return BlksprsTensor.wrap(transpose_forward(x, lut["sparsity_layout_t"],
-                                                lut["sparsity_lut"], lut["sparsity_reverse_lut"],
-                                                sparsity_block_size, lut["n_sparse_blocks"])), lut["sparsity_layout_t"]
+    return BlksprsTensor.wrap(transpose_forward(x, layout_cache["sparsity_layout_t"],
+                                                layout_cache["layout_indices"], layout_cache["packed_indices"],
+                                                sparsity_block_size, layout_cache["n_sparse_blocks"])), layout_cache["sparsity_layout_t"]
 
 
 @triton_op("blksprs::transpose_forward", mutates_args={})
 def transpose_forward(x: Tensor, sparsity_layout_o: Tensor,
-                      sparsity_lut: Tensor, sparsity_reverse_lut: Tensor,
+                      layout_indices: Tensor, packed_indices: Tensor,
                       sparsity_block_size: int, n_sparse_blocks: int) -> Tensor:
     with torch.no_grad():
         x_t = x.transpose(-1, -2).contiguous()
-        return flow_pull_forward(x_t, sparsity_layout_o, sparsity_lut, sparsity_reverse_lut,
+        return flow_pull_forward(x_t, sparsity_layout_o, layout_indices, packed_indices,
                                  sparsity_block_size, n_sparse_blocks)
 
 
@@ -61,30 +61,30 @@ def transpose_wrapper_backward(ctx, grad_output):
         0], None, None, None, None, None
 
 
-def transpose_build_lut(lut: dict, sparsity_layout: Tensor):
-    if lut is None:
-        lut = dict()
+def transpose_build_layout_cache(layout_cache: dict, sparsity_layout: Tensor):
+    if layout_cache is None:
+        layout_cache = dict()
 
-    if "sparsity_layout_t" not in lut:
+    if "sparsity_layout_t" not in layout_cache:
         sparsity_layout_t = sparsity_layout.transpose(-1, -2).contiguous()
-        lut["sparsity_layout_t"] = sparsity_layout_t
+        layout_cache["sparsity_layout_t"] = sparsity_layout_t
 
-    if "sparsity_lut" not in lut:
-        sparsity_lut = torch.nonzero(lut["sparsity_layout_t"]).contiguous()
-        lut["sparsity_lut"] = sparsity_lut
+    if "layout_indices" not in layout_cache:
+        layout_indices = torch.nonzero(layout_cache["sparsity_layout_t"]).contiguous()
+        layout_cache["layout_indices"] = layout_indices
 
-    if "sparsity_reverse_lut" not in lut:
-        sparsity_reverse_lut = (build_reverse_lut(sparsity_layout)
+    if "packed_indices" not in layout_cache:
+        packed_indices = (build_packed_indices(sparsity_layout)
                                 .reshape(sparsity_layout.size()).transpose(-1, -2).contiguous().reshape(-1))
-        lut["sparsity_reverse_lut"] = sparsity_reverse_lut
+        layout_cache["packed_indices"] = packed_indices
 
-    if "n_sparse_blocks" not in lut:
+    if "n_sparse_blocks" not in layout_cache:
         n_sparse_blocks = torch.sum(sparsity_layout.to(torch.int)).item()
-        lut["n_sparse_blocks"] = n_sparse_blocks
+        layout_cache["n_sparse_blocks"] = n_sparse_blocks
 
-    validate_contiguous(lut["sparsity_layout_t"], lut["sparsity_lut"], lut["sparsity_reverse_lut"])
+    validate_contiguous(layout_cache["sparsity_layout_t"], layout_cache["layout_indices"], layout_cache["packed_indices"])
 
-    return lut
+    return layout_cache
 
 
 # noinspection PyUnusedLocal

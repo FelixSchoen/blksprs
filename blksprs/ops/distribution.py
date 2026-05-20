@@ -7,7 +7,7 @@ from triton import language as tl
 
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import stride, build_reverse_lut, can_use_int32_indexing
+from blksprs.utils.tools import stride, build_packed_indices, can_use_int32_indexing
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity, validate_dtype_int, validate_sparsity_block_size, ensure_contiguous
 
@@ -16,7 +16,7 @@ from blksprs.utils.validation import validate_contiguous, validate_dimensions, v
 def gather(src: BlksprsTensor, sparsity_layout_src: Tensor,
            dim: int,
            idx: BlksprsTensor, sparsity_layout_idx: Tensor,
-           sparsity_block_size: int, lut: dict = None) -> BlksprsTensor:
+           sparsity_block_size: int, layout_cache: dict = None) -> BlksprsTensor:
     """Applies a gather operation on a block-sparse tensor in compressed form.
 
     Args:
@@ -26,7 +26,7 @@ def gather(src: BlksprsTensor, sparsity_layout_src: Tensor,
         idx (BlksprsTensor): The block-sparse indices tensor in compressed form specifying how to gather from the source tensor.
         sparsity_layout_idx (Tensor): The sparsity layout of the indices block-sparse tensor.
         sparsity_block_size (int): The size of the sparsity blocks.
-        lut (dict, optional): A dictionary containing the look-up tables for the operation (default ``None``).
+        layout_cache (dict, optional): A dictionary containing the layout cache data for the operation (default ``None``).
 
     Returns:
         BlksprsTensor: The result of the gather operation as a block-sparse tensor in compressed form.
@@ -44,16 +44,16 @@ def gather(src: BlksprsTensor, sparsity_layout_src: Tensor,
 
     adjusted_dim = dim % 3
 
-    lut = gather_build_lut(lut, sparsity_layout_src, sparsity_layout_idx)
+    layout_cache = gather_build_layout_cache(layout_cache, sparsity_layout_src, sparsity_layout_idx)
 
-    return BlksprsTensor.wrap(gather_forward(src, sparsity_layout_src, lut["sparsity_reverse_lut_x"],
-                                             adjusted_dim, idx, sparsity_layout_idx, lut["sparsity_lut_i"],
+    return BlksprsTensor.wrap(gather_forward(src, sparsity_layout_src, layout_cache["packed_indices_x"],
+                                             adjusted_dim, idx, sparsity_layout_idx, layout_cache["layout_indices_i"],
                                              sparsity_block_size))
 
 
 @triton_op("blksprs::gather_forward", mutates_args={})
-def gather_forward(x: Tensor, sparsity_layout_x: Tensor, sparsity_reverse_lut_x: Tensor,
-                   dim: int, i: Tensor, _: Tensor, sparsity_lut_i: Tensor,
+def gather_forward(x: Tensor, sparsity_layout_x: Tensor, packed_indices_x: Tensor,
+                   dim: int, i: Tensor, _: Tensor, layout_indices_i: Tensor,
                    sparsity_block_size: int) -> Tensor:
     with torch.no_grad():
         output = torch.zeros_like(i, dtype=x.dtype)
@@ -64,8 +64,8 @@ def gather_forward(x: Tensor, sparsity_layout_x: Tensor, sparsity_reverse_lut_x:
         s_l_x_b_s, s_l_x_r_s, s_l_x_c_s = stride(sparsity_layout_x)
         i_b, i_r, i_c = i.size()
         i_b_s, i_r_s, i_c_s = stride(i)
-        s_lut_i_r, s_lut_i_c = sparsity_lut_i.size()
-        s_lut_i_r_s, s_lut_i_c_s = stride(sparsity_lut_i)
+        lidx_i_r, lidx_i_c = layout_indices_i.size()
+        lidx_i_r_s, lidx_i_c_s = stride(layout_indices_i)
         o_b, o_r, o_c = output.size()
         o_b_s, o_r_s, o_c_s = stride(output)
 
@@ -77,23 +77,23 @@ def gather_forward(x: Tensor, sparsity_layout_x: Tensor, sparsity_reverse_lut_x:
         use_int64 = not can_use_int32_indexing(
             x,
             sparsity_layout_x,
-            sparsity_reverse_lut_x,
+            packed_indices_x,
             i,
             output,
-            sparsity_lut_i,
+            layout_indices_i,
         )
 
         (wrap_triton(gather_kernel)[triton_grid]
          (x,
           x_b, x_b_s, x_r_s, x_c_s,
           s_l_x_b, s_l_x_r, s_l_x_c, s_l_x_b_s, s_l_x_r_s, s_l_x_c_s,
-          sparsity_reverse_lut_x,
+          packed_indices_x,
           dim,
           i,
           i_b, i_b_s, i_r_s, i_c_s,
           output,
           o_b, o_b_s, o_r_s, o_c_s,
-          sparsity_lut_i, s_lut_i_r, s_lut_i_r_s, s_lut_i_c_s,
+          layout_indices_i, lidx_i_r, lidx_i_r_s, lidx_i_c_s,
           sparsity_block_size,
           USE_INT64=use_int64))
 
@@ -121,13 +121,13 @@ def gather_wrapper_backward(ctx, grad_output):
 def gather_kernel(x,
                   x_b, x_b_s, x_r_s, x_c_s,
                   s_l_x_b, s_l_x_r, s_l_x_c, s_l_x_b_s, s_l_x_r_s, s_l_x_c_s,
-                  r_lut_x,
+                  pidx_x,
                   dim,
                   i,
                   i_b, i_b_s, i_r_s, i_c_s,
                   o,
                   o_b, o_b_s, o_r_s, o_c_s,
-                  s_lut_o, s_lut_o_r, s_lut_o_r_s, s_lut_o_c_s,
+                  lidx_o, lidx_o_r, lidx_o_r_s, lidx_o_c_s,
                   sparsity_block_size,
                   USE_INT64: tl.constexpr,
                   TRITON_BLOCK_SIZE: tl.constexpr) -> None:
@@ -138,9 +138,9 @@ def gather_kernel(x,
     pid_col = tl.cast(tl.program_id(axis=2), index_dtype)
 
     # Get position of current sparsity block consisting of its batch, row, and column index
-    spa_val_idx = pid_blk * s_lut_o_r_s + tl.cast(tl.arange(0, 4), index_dtype) * s_lut_o_c_s
+    spa_val_idx = pid_blk * lidx_o_r_s + tl.cast(tl.arange(0, 4), index_dtype) * lidx_o_c_s
     spa_val_msk = (tl.arange(0, 4) < 3)
-    spa_val = tl.load(s_lut_o + spa_val_idx, mask=spa_val_msk, other=0)
+    spa_val = tl.load(lidx_o + spa_val_idx, mask=spa_val_msk, other=0)
 
     spa_bat_o = tl.cast(tl.sum(spa_val * (tl.arange(0, 4) == 0)), index_dtype)
     spa_row_o = tl.cast(tl.sum(spa_val * (tl.arange(0, 4) == 1)), index_dtype)
@@ -158,45 +158,45 @@ def gather_kernel(x,
     pos_spa_blk_x = blk_i // sparsity_block_size
     pos_spa_int_x = blk_i % sparsity_block_size
 
-    rev_dst_bat_x = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), tl.cast(
+    packed_dst_bat_x = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), tl.cast(
         spa_bat_o, tl.int32), dtype=tl.int32)
-    rev_dst_row_x = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), tl.cast(
+    packed_dst_row_x = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), tl.cast(
         spa_row_o, tl.int32), dtype=tl.int32)
-    rev_dst_col_x = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), tl.cast(
+    packed_dst_col_x = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), tl.cast(
         spa_col_o, tl.int32), dtype=tl.int32)
     dst_row_x = (((pid_row * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * x_r_s)[:, None]
                  .broadcast_to((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE)))
     dst_col_x = (((pid_col * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * x_c_s)[None, :]
                  .broadcast_to((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE)))
     if dim == 0:
-        rev_dst_bat_x = blk_i
+        packed_dst_bat_x = blk_i
     elif dim == 1:
-        rev_dst_row_x = pos_spa_blk_x
+        packed_dst_row_x = pos_spa_blk_x
         dst_row_x = tl.cast(pos_spa_int_x, index_dtype) * x_r_s
     elif dim == 2:
-        rev_dst_col_x = pos_spa_blk_x
+        packed_dst_col_x = pos_spa_blk_x
         dst_col_x = tl.cast(pos_spa_int_x, index_dtype) * x_c_s
 
-    # Load reverse sparsity indices for x
-    rev_idx_spa_x_idx = ((tl.cast(rev_dst_bat_x, index_dtype) * s_l_x_b_s) +
-                         (tl.cast(rev_dst_row_x, index_dtype) * s_l_x_r_s) +
-                         (tl.cast(rev_dst_col_x, index_dtype) * s_l_x_c_s))
-    rev_idx_spa_x_msk = ((rev_dst_bat_x >= 0) &
-                         (tl.cast(rev_dst_bat_x, index_dtype) < tl.cast(s_l_x_b, index_dtype)) &
-                         (rev_dst_row_x >= 0) &
-                         (tl.cast(rev_dst_row_x, index_dtype) < tl.cast(s_l_x_r, index_dtype)) &
-                         (rev_dst_col_x >= 0) &
-                         (tl.cast(rev_dst_col_x, index_dtype) < tl.cast(s_l_x_c, index_dtype)))
-    rev_idx_spa_x = tl.cast(
-        tl.load(r_lut_x + rev_idx_spa_x_idx, mask=rev_idx_spa_x_msk, other=-1), tl.int32)
+    # Load packed indices for x
+    packed_idx_x_idx = ((tl.cast(packed_dst_bat_x, index_dtype) * s_l_x_b_s) +
+                         (tl.cast(packed_dst_row_x, index_dtype) * s_l_x_r_s) +
+                         (tl.cast(packed_dst_col_x, index_dtype) * s_l_x_c_s))
+    packed_idx_x_msk = ((packed_dst_bat_x >= 0) &
+                         (tl.cast(packed_dst_bat_x, index_dtype) < tl.cast(s_l_x_b, index_dtype)) &
+                         (packed_dst_row_x >= 0) &
+                         (tl.cast(packed_dst_row_x, index_dtype) < tl.cast(s_l_x_r, index_dtype)) &
+                         (packed_dst_col_x >= 0) &
+                         (tl.cast(packed_dst_col_x, index_dtype) < tl.cast(s_l_x_c, index_dtype)))
+    packed_idx_x = tl.cast(
+        tl.load(pidx_x + packed_idx_x_idx, mask=packed_idx_x_msk, other=-1), tl.int32)
 
     # Load x values
-    blk_x_idx = ((tl.cast(rev_idx_spa_x, index_dtype) * x_b_s) +
+    blk_x_idx = ((tl.cast(packed_idx_x, index_dtype) * x_b_s) +
                  dst_row_x +
                  dst_col_x)
     blk_x_msk = (((blk_x_idx >= 0) &
                   (blk_x_idx < tl.cast(x_b, index_dtype) * x_b_s)) &
-                 (rev_idx_spa_x >= 0))
+                 (packed_idx_x >= 0))
     blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk, other=0)
 
     # Store output
@@ -205,25 +205,25 @@ def gather_kernel(x,
                  ((pid_col * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * o_c_s)[None, :])
     blk_o_msk = (((blk_o_idx >= 0) &
                   (blk_o_idx < tl.cast(o_b, index_dtype) * o_b_s)) &
-                 (rev_idx_spa_x >= 0))
+                 (packed_idx_x >= 0))
     tl.store(o + blk_o_idx, blk_x, mask=blk_o_msk)
 
 
-def gather_build_lut(lut: dict, sparsity_layout_src: Tensor, sparsity_layout_idx: Tensor):
-    if lut is None:
-        lut = dict()
+def gather_build_layout_cache(layout_cache: dict, sparsity_layout_src: Tensor, sparsity_layout_idx: Tensor):
+    if layout_cache is None:
+        layout_cache = dict()
 
-    if "sparsity_reverse_lut_x" not in lut:
-        lut["sparsity_reverse_lut_x"] = build_reverse_lut(sparsity_layout_src)
+    if "packed_indices_x" not in layout_cache:
+        layout_cache["packed_indices_x"] = build_packed_indices(sparsity_layout_src)
 
-    if "sparsity_lut_i" not in lut:
-        sparsity_lut_i = torch.nonzero(sparsity_layout_idx).contiguous()
-        lut["sparsity_lut_i"] = sparsity_lut_i
+    if "layout_indices_i" not in layout_cache:
+        layout_indices_i = torch.nonzero(sparsity_layout_idx).contiguous()
+        layout_cache["layout_indices_i"] = layout_indices_i
 
-    validate_contiguous(sparsity_layout_src, lut["sparsity_reverse_lut_x"],
-                        sparsity_layout_idx, lut["sparsity_lut_i"])
+    validate_contiguous(sparsity_layout_src, layout_cache["packed_indices_x"],
+                        sparsity_layout_idx, layout_cache["layout_indices_i"])
 
-    return lut
+    return layout_cache
 
 
 # noinspection PyUnusedLocal
@@ -244,7 +244,7 @@ def scatter(src: BlksprsTensor, sparsity_layout_src: Tensor,
             dim: int,
             idx: BlksprsTensor,
             sparsity_layout_tgt: Tensor,
-            sparsity_block_size: int, lut: dict = None) -> BlksprsTensor:
+            sparsity_block_size: int, layout_cache: dict = None) -> BlksprsTensor:
     """Wrapper for ``scatter_reduce`` with ``reduce_op="none"``.
 
     Warning:
@@ -258,7 +258,7 @@ def scatter(src: BlksprsTensor, sparsity_layout_src: Tensor,
                           idx,
                           sparsity_layout_tgt,
                           sparsity_block_size,
-                          reduce_op="none", lut=lut)
+                          reduce_op="none", layout_cache=layout_cache)
 
 
 @torch.amp.custom_fwd(device_type="cuda")
@@ -267,7 +267,7 @@ def scatter_reduce(src: BlksprsTensor, sparsity_layout_src: Tensor,
                    idx: BlksprsTensor,
                    sparsity_layout_tgt: Tensor,
                    sparsity_block_size: int,
-                   reduce_op: str = "sum", lut: dict = None) -> BlksprsTensor:
+                   reduce_op: str = "sum", layout_cache: dict = None) -> BlksprsTensor:
     """Applies a scatter operation on a block-sparse tensor in compressed form.
 
     Args:
@@ -279,7 +279,7 @@ def scatter_reduce(src: BlksprsTensor, sparsity_layout_src: Tensor,
         sparsity_block_size (int): The size of the sparsity blocks.
         reduce_op (str, optional): The reduction operation to apply during the scatter operation (default ``"sum"``).
             Supported operations are ``"none"`` and ``"sum"``.
-        lut (dict, optional): A dictionary containing the look-up tables for the operation (default ``None``).
+        layout_cache (dict, optional): A dictionary containing the layout cache data for the operation (default ``None``).
 
     Returns:
         BlksprsTensor: The result of the scatter operation as a block-sparse tensor in compressed form.
@@ -300,20 +300,20 @@ def scatter_reduce(src: BlksprsTensor, sparsity_layout_src: Tensor,
 
     adjusted_dim = dim % 3
 
-    lut = scatter_reduce_build_lut(
-        lut, sparsity_layout_src, sparsity_layout_tgt)
+    layout_cache = scatter_reduce_build_layout_cache(
+        layout_cache, sparsity_layout_src, sparsity_layout_tgt)
 
-    return BlksprsTensor.wrap(scatter_reduce_forward(src, sparsity_layout_src, lut["sparsity_lut_x"],
+    return BlksprsTensor.wrap(scatter_reduce_forward(src, sparsity_layout_src, layout_cache["layout_indices_x"],
                                                      adjusted_dim, idx,
-                                                     sparsity_layout_tgt, lut["sparsity_reverse_lut_o"],
-                                                     sparsity_block_size, lut["n_sparse_blocks"],
+                                                     sparsity_layout_tgt, layout_cache["packed_indices_o"],
+                                                     sparsity_block_size, layout_cache["n_sparse_blocks"],
                                                      reduce_op))
 
 
 @triton_op("blksprs::scatter_reduce_forward", mutates_args={})
-def scatter_reduce_forward(x: Tensor, _: Tensor, sparsity_lut_x: Tensor,
+def scatter_reduce_forward(x: Tensor, _: Tensor, layout_indices_x: Tensor,
                            dim: int, i: Tensor,
-                           sparsity_layout_o: Tensor, sparsity_reverse_lut_o: Tensor,
+                           sparsity_layout_o: Tensor, packed_indices_o: Tensor,
                            sparsity_block_size: int, n_sparse_blocks: int,
                            reduce_op: str) -> Tensor:
     with torch.no_grad():
@@ -322,8 +322,8 @@ def scatter_reduce_forward(x: Tensor, _: Tensor, sparsity_lut_x: Tensor,
 
         x_b, x_r, x_c = x.size()
         x_b_s, x_r_s, x_c_s = stride(x)
-        s_lut_x_r, s_lut_x_c = sparsity_lut_x.size()
-        s_lut_x_r_s, s_lut_x_c_s = stride(sparsity_lut_x)
+        lidx_x_r, lidx_x_c = layout_indices_x.size()
+        lidx_x_r_s, lidx_x_c_s = stride(layout_indices_x)
         i_b, i_r, i_c = i.size()
         i_b_s, i_r_s, i_c_s = stride(i)
         o_b, o_r, o_c = output.size()
@@ -342,24 +342,24 @@ def scatter_reduce_forward(x: Tensor, _: Tensor, sparsity_lut_x: Tensor,
 
         use_int64 = not can_use_int32_indexing(
             x,
-            sparsity_lut_x,
+            layout_indices_x,
             i,
             output,
             sparsity_layout_o,
-            sparsity_reverse_lut_o,
+            packed_indices_o,
         )
 
         (wrap_triton(scatter_reduce_kernel)[triton_grid]
          (x,
           x_b, x_b_s, x_r_s, x_c_s,
-          sparsity_lut_x, s_lut_x_r, s_lut_x_r_s, s_lut_x_c_s,
+          layout_indices_x, lidx_x_r, lidx_x_r_s, lidx_x_c_s,
           dim,
           i,
           i_b, i_b_s, i_r_s, i_c_s,
           output,
           o_b, o_b_s,
           s_l_o_b, s_l_o_r, s_l_o_c, s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
-          sparsity_reverse_lut_o,
+          packed_indices_o,
           reduce_op_ind,
           sparsity_block_size,
           USE_INT64=use_int64))
@@ -390,14 +390,14 @@ def scatter_reduce_wrapper_backward(ctx, grad_output):
 @triton.jit
 def scatter_reduce_kernel(x,
                           x_b, x_b_s, x_r_s, x_c_s,
-                          s_lut_x, s_lut_x_r, s_lut_x_r_s, s_lut_x_c_s,
+                          lidx_x, lidx_x_r, lidx_x_r_s, lidx_x_c_s,
                           dim,
                           i,
                           i_b, i_b_s, i_r_s, i_c_s,
                           o,
                           o_b, o_b_s,
                           s_l_o_b, s_l_o_r, s_l_o_c, s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
-                          r_lut_o,
+                          pidx_o,
                           reduce_op_ind,
                           sparsity_block_size,
                           USE_INT64: tl.constexpr,
@@ -409,9 +409,9 @@ def scatter_reduce_kernel(x,
     pid_col = tl.cast(tl.program_id(axis=2), index_dtype)
 
     # Get position of current sparsity block consisting of its batch, row, and column index
-    spa_val_idx = pid_blk * s_lut_x_r_s + tl.cast(tl.arange(0, 4), index_dtype) * s_lut_x_c_s
+    spa_val_idx = pid_blk * lidx_x_r_s + tl.cast(tl.arange(0, 4), index_dtype) * lidx_x_c_s
     spa_val_msk = (tl.arange(0, 4) < 3)
-    spa_val = tl.load(s_lut_x + spa_val_idx, mask=spa_val_msk, other=0)
+    spa_val = tl.load(lidx_x + spa_val_idx, mask=spa_val_msk, other=0)
 
     spa_bat_x = tl.cast(tl.sum(spa_val * (tl.arange(0, 4) == 0)), index_dtype)
     spa_row_x = tl.cast(tl.sum(spa_val * (tl.arange(0, 4) == 1)), index_dtype)
@@ -437,45 +437,45 @@ def scatter_reduce_kernel(x,
     pos_spa_blk_x = blk_i // sparsity_block_size
     pos_spa_int_x = blk_i % sparsity_block_size
 
-    rev_dst_bat_o = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), tl.cast(
+    packed_dst_bat_o = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), tl.cast(
         spa_bat_x, tl.int32), dtype=tl.int32)
-    rev_dst_row_o = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), tl.cast(
+    packed_dst_row_o = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), tl.cast(
         spa_row_x, tl.int32), dtype=tl.int32)
-    rev_dst_col_o = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), tl.cast(
+    packed_dst_col_o = tl.full((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE), tl.cast(
         spa_col_x, tl.int32), dtype=tl.int32)
     dst_row_o = (((pid_row * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * x_r_s)[:, None]
                  .broadcast_to((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE)))
     dst_col_o = (((pid_col * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)) * x_c_s)[None, :]
                  .broadcast_to((TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE)))
     if dim == 0:
-        rev_dst_bat_o = blk_i
+        packed_dst_bat_o = blk_i
     elif dim == 1:
-        rev_dst_row_o = pos_spa_blk_x
+        packed_dst_row_o = pos_spa_blk_x
         dst_row_o = tl.cast(pos_spa_int_x, index_dtype) * x_r_s
     elif dim == 2:
-        rev_dst_col_o = pos_spa_blk_x
+        packed_dst_col_o = pos_spa_blk_x
         dst_col_o = tl.cast(pos_spa_int_x, index_dtype) * x_c_s
 
-    # Load reverse sparsity indices for o
-    rev_idx_spa_o_idx = ((tl.cast(rev_dst_bat_o, index_dtype) * s_l_o_b_s) +
-                         (tl.cast(rev_dst_row_o, index_dtype) * s_l_o_r_s) +
-                         (tl.cast(rev_dst_col_o, index_dtype) * s_l_o_c_s))
-    rev_idx_spa_o_msk = ((rev_dst_bat_o >= 0) &
-                         (tl.cast(rev_dst_bat_o, index_dtype) < tl.cast(s_l_o_b, index_dtype)) &
-                         (rev_dst_row_o >= 0) &
-                         (tl.cast(rev_dst_row_o, index_dtype) < tl.cast(s_l_o_r, index_dtype)) &
-                         (rev_dst_col_o >= 0) &
-                         (tl.cast(rev_dst_col_o, index_dtype) < tl.cast(s_l_o_c, index_dtype)))
-    rev_idx_spa_o = tl.cast(
-        tl.load(r_lut_o + rev_idx_spa_o_idx, mask=rev_idx_spa_o_msk, other=-1), tl.int32)
+    # Load packed indices for o
+    packed_idx_o_idx = ((tl.cast(packed_dst_bat_o, index_dtype) * s_l_o_b_s) +
+                         (tl.cast(packed_dst_row_o, index_dtype) * s_l_o_r_s) +
+                         (tl.cast(packed_dst_col_o, index_dtype) * s_l_o_c_s))
+    packed_idx_o_msk = ((packed_dst_bat_o >= 0) &
+                         (tl.cast(packed_dst_bat_o, index_dtype) < tl.cast(s_l_o_b, index_dtype)) &
+                         (packed_dst_row_o >= 0) &
+                         (tl.cast(packed_dst_row_o, index_dtype) < tl.cast(s_l_o_r, index_dtype)) &
+                         (packed_dst_col_o >= 0) &
+                         (tl.cast(packed_dst_col_o, index_dtype) < tl.cast(s_l_o_c, index_dtype)))
+    packed_idx_o = tl.cast(
+        tl.load(pidx_o + packed_idx_o_idx, mask=packed_idx_o_msk, other=-1), tl.int32)
 
     # Store output
-    blk_o_idx = ((tl.cast(rev_idx_spa_o, index_dtype) * o_b_s) +
+    blk_o_idx = ((tl.cast(packed_idx_o, index_dtype) * o_b_s) +
                  dst_row_o +
                  dst_col_o)
     blk_o_msk = (((blk_o_idx >= 0) &
                   (blk_o_idx < tl.cast(o_b, index_dtype) * o_b_s)) &
-                 (rev_idx_spa_o >= 0))
+                 (packed_idx_o >= 0))
 
     if reduce_op_ind == 0:
         tl.store(o + blk_o_idx, blk_x, mask=blk_o_msk)
@@ -483,25 +483,25 @@ def scatter_reduce_kernel(x,
         tl.atomic_add(o + blk_o_idx, blk_x, mask=blk_o_msk)
 
 
-def scatter_reduce_build_lut(lut: dict, sparsity_layout_src: Tensor, sparsity_layout_tgt: Tensor):
-    if lut is None:
-        lut = dict()
+def scatter_reduce_build_layout_cache(layout_cache: dict, sparsity_layout_src: Tensor, sparsity_layout_tgt: Tensor):
+    if layout_cache is None:
+        layout_cache = dict()
 
-    if "sparsity_lut_x" not in lut:
-        sparsity_lut_x = torch.nonzero(sparsity_layout_src).contiguous()
-        lut["sparsity_lut_x"] = sparsity_lut_x
+    if "layout_indices_x" not in layout_cache:
+        layout_indices_x = torch.nonzero(sparsity_layout_src).contiguous()
+        layout_cache["layout_indices_x"] = layout_indices_x
 
-    if "sparsity_reverse_lut_o" not in lut:
-        lut["sparsity_reverse_lut_o"] = build_reverse_lut(sparsity_layout_tgt)
+    if "packed_indices_o" not in layout_cache:
+        layout_cache["packed_indices_o"] = build_packed_indices(sparsity_layout_tgt)
 
-    if "n_sparse_blocks" not in lut:
+    if "n_sparse_blocks" not in layout_cache:
         n_sparse_blocks = torch.sum(sparsity_layout_tgt.to(torch.int)).item()
-        lut["n_sparse_blocks"] = n_sparse_blocks
+        layout_cache["n_sparse_blocks"] = n_sparse_blocks
 
-    validate_contiguous(sparsity_layout_src, lut["sparsity_lut_x"],
-                        sparsity_layout_tgt, lut["sparsity_reverse_lut_o"])
+    validate_contiguous(sparsity_layout_src, layout_cache["layout_indices_x"],
+                        sparsity_layout_tgt, layout_cache["packed_indices_o"])
 
-    return lut
+    return layout_cache
 
 
 # noinspection PyUnusedLocal

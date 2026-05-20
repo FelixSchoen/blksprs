@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5] - 2026-05-20
+
+### Added
+
+- Add large-index regression coverage for repeat, partitioning, scatter, row-striped conversion, layout helpers, and edge tiles
+
+### Changed
+
+- Rename optional operation cache arguments to `layout_cache`
+- Rename operation cache builders to the `*_build_layout_cache()` suffix
+- Rename derived layout metadata to `layout_indices`, `packed_indices`, and attention `key_indices`/`query_indices`
+- Refactor shared shape, divisibility, and positive-integer validation helpers
+
+### Removed
+
+- Remove the former cache/key naming aliases without compatibility shims
+
+### Fixed
+
+- Fix non-divisible dense shapes being silently truncated by layout builders
+- Fix kernel edge-tile masks and masked loads to avoid cross-row and cross-batch accesses
+- Fix remaining public CUDA paths for overflow-scale indexing
+
 ## [2.4] - 2026-05-07
 
 ### Added
@@ -125,12 +148,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- Rework lookup of sparsity LUT values
+- Rework sparsity packed-index access
 - Refactor `disable_validation()` to `bs.utils`
 
 ### Fixed
 
-- Fix LUT validation for repeat functions
+- Fix layout cache validation for repeat functions
 
 ## [2.1.4] - 2025-06-27
 
@@ -164,7 +187,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- Add option to pre-build LUTs for most operations, improving performance for repeated operations with same sparsity
+- Add option to pre-build layout cache data for most operations, improving performance for repeated operations with same sparsity
   layouts
 
 ### Changed
@@ -183,7 +206,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- Add ``build_lut()`` method for most operations, allowing for faster execution when precomputing lookup tables
+- Add ``build_layout_cache()`` method for most operations, allowing for faster execution when precomputing layout cache data
 
 ### Changed
 
@@ -244,7 +267,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- Add masks for reverse block index lookup, fixing potential memory leaks
+- Add masks for packed block index access, fixing potential memory leaks
 
 ## [1.8.3] - 2024-10-31
 

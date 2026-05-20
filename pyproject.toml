@@ -1,6 +1,6 @@
 [project]
 name = "blksprs"
-version = "2.4"
+version = "2.5"
 authors = [{ name = "Felix Schön", email = "schoen@kr.tuwien.ac.at" }]
 description = "A lightweight library for operations on block-sparse matrices in PyTorch."
 readme = "README.md"
@@ -35,4 +35,5 @@ include = ["blksprs*"]
 "*" = ["*.json", "*.conf"]
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
 markers = ["benchmark: high-memory or high-runtime regression tests"]

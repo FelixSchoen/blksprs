@@ -129,16 +129,16 @@ def build_sparsity_layout_adaption(x: BlksprsTensor, sparsity_layout_from: Tenso
     validate_sparsity_block_size(sparsity_block_size_from, x)
     validate_sparsity_block_size(sparsity_block_size_to)
 
-    sparsity_lut = torch.nonzero(sparsity_layout_from).contiguous()
+    layout_indices = torch.nonzero(sparsity_layout_from).contiguous()
 
-    validate_contiguous(sparsity_layout_from, sparsity_lut)
+    validate_contiguous(sparsity_layout_from, layout_indices)
 
-    return build_sparsity_layout_adaption_operation(x, sparsity_layout_from, sparsity_lut,
+    return build_sparsity_layout_adaption_operation(x, sparsity_layout_from, layout_indices,
                                                     sparsity_block_size_from, sparsity_block_size_to)
 
 
 @triton_op("blksprs::build_sparsity_layout_adaption", mutates_args={})
-def build_sparsity_layout_adaption_operation(x: Tensor, sparsity_layout_from: Tensor, sparsity_lut: Tensor,
+def build_sparsity_layout_adaption_operation(x: Tensor, sparsity_layout_from: Tensor, layout_indices: Tensor,
                                              sparsity_block_size_from: int, sparsity_block_size_to: int) -> Tensor:
     with torch.no_grad():
         o_b = sparsity_layout_from.size(0)
@@ -149,20 +149,20 @@ def build_sparsity_layout_adaption_operation(x: Tensor, sparsity_layout_from: Te
 
         x_b, x_r, x_c = x.size()
         x_b_s, x_r_s, x_c_s = stride(x)
-        s_lut_r, s_lut_c = sparsity_lut.size()
-        s_lut_r_s, s_lut_c_s = stride(sparsity_lut)
+        lidx_r, lidx_c = layout_indices.size()
+        lidx_r_s, lidx_c_s = stride(layout_indices)
         o_b_s, o_r_s, o_c_s = stride(output)
 
         triton_grid = lambda meta: [x_b,
                                     triton.cdiv(x_r, meta["TRITON_BLOCK_SIZE"]),
                                     triton.cdiv(x_c, meta["TRITON_BLOCK_SIZE"])]
 
-        use_int64 = not can_use_int32_indexing(x, sparsity_lut, output)
+        use_int64 = not can_use_int32_indexing(x, layout_indices, output)
 
         (wrap_triton(build_sparsity_layout_adaption_kernel)[triton_grid]
          (x,
           x_b, x_r, x_c, x_b_s, x_r_s, x_c_s,
-          sparsity_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
+          layout_indices, lidx_r, lidx_r_s, lidx_c_s,
           output,
           o_b, o_r, o_c, o_b_s, o_r_s, o_c_s,
           sparsity_block_size_from,
@@ -181,7 +181,7 @@ def build_sparsity_layout_adaption_operation(x: Tensor, sparsity_layout_from: Te
 @triton.jit
 def build_sparsity_layout_adaption_kernel(x,
                                           x_b, x_r, x_c, x_b_s, x_r_s, x_c_s,
-                                          s_lut, s_lut_r, s_lut_r_s, s_lut_c_s,
+                                          lidx, lidx_r, lidx_r_s, lidx_c_s,
                                           o,
                                           o_b, o_r, o_c, o_b_s, o_r_s, o_c_s,
                                           sparsity_block_size_from,
@@ -195,20 +195,20 @@ def build_sparsity_layout_adaption_kernel(x,
     pid_col = tl.cast(tl.program_id(axis=2), index_dtype)
 
     # Get sparsity index of current output block consisting of its batch, row, and column index
-    spa_bat_idx = (pid_blk * s_lut_r_s + 0 * s_lut_c_s)
+    spa_bat_idx = (pid_blk * lidx_r_s + 0 * lidx_c_s)
     spa_bat_msk = ((spa_bat_idx >= 0) &
-                   (spa_bat_idx < tl.cast(s_lut_r, index_dtype) * s_lut_r_s))
-    spa_bat = tl.cast(tl.load(s_lut + spa_bat_idx, mask=spa_bat_msk, other=0), index_dtype)
+                   (spa_bat_idx < tl.cast(lidx_r, index_dtype) * lidx_r_s))
+    spa_bat = tl.cast(tl.load(lidx + spa_bat_idx, mask=spa_bat_msk, other=0), index_dtype)
 
-    spa_row_idx = (pid_blk * s_lut_r_s + 1 * s_lut_c_s)
+    spa_row_idx = (pid_blk * lidx_r_s + 1 * lidx_c_s)
     spa_row_msk = ((spa_row_idx >= 0) &
-                   (spa_row_idx < tl.cast(s_lut_r, index_dtype) * s_lut_r_s))
-    spa_row = tl.cast(tl.load(s_lut + spa_row_idx, mask=spa_row_msk, other=0), index_dtype)
+                   (spa_row_idx < tl.cast(lidx_r, index_dtype) * lidx_r_s))
+    spa_row = tl.cast(tl.load(lidx + spa_row_idx, mask=spa_row_msk, other=0), index_dtype)
 
-    spa_col_idx = (pid_blk * s_lut_r_s + 2 * s_lut_c_s)
+    spa_col_idx = (pid_blk * lidx_r_s + 2 * lidx_c_s)
     spa_col_msk = ((spa_col_idx >= 0) &
-                   (spa_col_idx < tl.cast(s_lut_r, index_dtype) * s_lut_r_s))
-    spa_col = tl.cast(tl.load(s_lut + spa_col_idx, mask=spa_col_msk, other=0), index_dtype)
+                   (spa_col_idx < tl.cast(lidx_r, index_dtype) * lidx_r_s))
+    spa_col = tl.cast(tl.load(lidx + spa_col_idx, mask=spa_col_msk, other=0), index_dtype)
 
     # Load x values
     row_offsets = pid_row * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)

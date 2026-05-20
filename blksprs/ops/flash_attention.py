@@ -7,7 +7,7 @@ from triton import language as tl
 
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs_exact
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import stride, build_reverse_lut, can_use_int32_indexing, cast_for_autocast
+from blksprs.utils.tools import stride, build_packed_indices, can_use_int32_indexing, cast_for_autocast
 from blksprs.utils.validation import validate_contiguous, validate_device, validate_dtype_float, \
     validate_dimensions, validate_sparsity, validate_sparsity_block_size, validate_shape, ensure_contiguous
 
@@ -21,7 +21,7 @@ def flash_attention(q: BlksprsTensor, sparsity_layout_q: Tensor,
                     scale: float = None,
                     attention_mask: BlksprsTensor = None, sparsity_layout_mask: Tensor = None,
                     attention_bias: BlksprsTensor = None, sparsity_layout_bias: Tensor = None,
-                    lut: dict = None,
+                    layout_cache: dict = None,
                     sparsity_layout_o: Tensor = None) -> BlksprsTensor:
     """Performs block-sparse flash attention on compressed tensors.
 
@@ -56,7 +56,7 @@ def flash_attention(q: BlksprsTensor, sparsity_layout_q: Tensor,
         attention_bias (BlksprsTensor, optional): Additive bias in compressed form,
             added to attention scores before softmax. Supports gradient computation (default ``None``).
         sparsity_layout_bias (Tensor, optional): The sparsity layout for the bias (default ``None``).
-        lut (dict, optional): A dictionary containing the look-up tables for the operation (default ``None``).
+        layout_cache (dict, optional): A dictionary containing the layout cache data for the operation (default ``None``).
         sparsity_layout_o (Tensor, optional): Output sparsity layout.
             Defaults to ``sparsity_layout_q`` if ``d_v == d_att`` (default ``None``).
 
@@ -109,12 +109,12 @@ def flash_attention(q: BlksprsTensor, sparsity_layout_q: Tensor,
     if scale is None:
         scale = 1.0 / math.sqrt(n_head_blocks_qk * sparsity_block_size)
 
-    lut = flash_attention_build_lut(attention_layout,
+    layout_cache = flash_attention_build_layout_cache(attention_layout,
                                     sparsity_layout_q, sparsity_layout_k, sparsity_layout_v,
                                     n_seq_blocks_q, n_seq_blocks_k, n_head_blocks_qk,
                                     sparsity_layout_o=sparsity_layout_o,
                                     n_head_blocks_v=n_head_blocks_v,
-                                    lut=lut)
+                                    layout_cache=layout_cache)
 
     # Resolve optional mask
     has_mask = attention_mask is not None
@@ -146,30 +146,30 @@ def flash_attention(q: BlksprsTensor, sparsity_layout_q: Tensor,
     else:
         attention_bias = torch.empty(0, device=q.device, dtype=q.dtype)
 
-    # Build reverse LUTs for mask and bias
-    if has_mask and "sparsity_reverse_lut_mask" not in lut:
-        lut["sparsity_reverse_lut_mask"] = build_reverse_lut(sparsity_layout_mask)
-    if has_bias and "sparsity_reverse_lut_bias" not in lut:
-        lut["sparsity_reverse_lut_bias"] = build_reverse_lut(sparsity_layout_bias)
+    # Build packed indices for mask and bias
+    if has_mask and "packed_indices_mask" not in layout_cache:
+        layout_cache["packed_indices_mask"] = build_packed_indices(sparsity_layout_mask)
+    if has_bias and "packed_indices_bias" not in layout_cache:
+        layout_cache["packed_indices_bias"] = build_packed_indices(sparsity_layout_bias)
 
-    dummy_lut = torch.empty(0, device=q.device, dtype=torch.long)
-    sparsity_reverse_lut_mask = lut["sparsity_reverse_lut_mask"] if has_mask else dummy_lut
-    sparsity_reverse_lut_bias = lut["sparsity_reverse_lut_bias"] if has_bias else dummy_lut
+    dummy_packed_indices = torch.empty(0, device=q.device, dtype=torch.long)
+    packed_indices_mask = layout_cache["packed_indices_mask"] if has_mask else dummy_packed_indices
+    packed_indices_bias = layout_cache["packed_indices_bias"] if has_bias else dummy_packed_indices
 
     return BlksprsTensor.wrap(
         _FlashAttentionAutograd.apply(
             q, k, v,
             attention_mask, attention_bias,
             sparsity_layout_q, sparsity_layout_k, sparsity_layout_v, sparsity_layout_o,
-            lut["sparsity_reverse_lut_q"], lut["sparsity_reverse_lut_k"],
-            lut["sparsity_reverse_lut_v"], lut["sparsity_reverse_lut_o"],
-            lut["attention_lut"], lut["attention_offsets"],
-            lut["reverse_attention_lut"], lut["reverse_attention_offsets"],
-            sparsity_reverse_lut_mask, sparsity_reverse_lut_bias,
+            layout_cache["packed_indices_q"], layout_cache["packed_indices_k"],
+            layout_cache["packed_indices_v"], layout_cache["packed_indices_o"],
+            layout_cache["key_indices"], layout_cache["key_offsets"],
+            layout_cache["query_indices"], layout_cache["query_offsets"],
+            packed_indices_mask, packed_indices_bias,
             sparsity_block_size, n_seq_blocks_q, n_seq_blocks_k,
             n_head_blocks_qk, n_head_blocks_v,
-            lut["max_kv_blocks"], lut["max_q_per_k"],
-            lut["n_sparse_blocks_o"],
+            layout_cache["max_keys_per_query"], layout_cache["max_queries_per_key"],
+            layout_cache["n_sparse_blocks_o"],
             scale, has_mask, has_bias,
             n_batches))
 
@@ -180,13 +180,13 @@ class _FlashAttentionAutograd(torch.autograd.Function):
     def forward(
         ctx, q, k, v, attention_mask, attention_bias,
         sparsity_layout_q, sparsity_layout_k, sparsity_layout_v, sparsity_layout_o,
-        sparsity_reverse_lut_q, sparsity_reverse_lut_k, sparsity_reverse_lut_v, sparsity_reverse_lut_o,
-        attention_lut, attention_offsets,
-        reverse_attention_lut, reverse_attention_offsets,
-        sparsity_reverse_lut_mask, sparsity_reverse_lut_bias,
+        packed_indices_q, packed_indices_k, packed_indices_v, packed_indices_o,
+        key_indices, key_offsets,
+        query_indices, query_offsets,
+        packed_indices_mask, packed_indices_bias,
         sparsity_block_size, n_seq_blocks_q, n_seq_blocks_k,
         n_head_blocks_qk, n_head_blocks_v,
-        max_kv_blocks, max_q_per_k,
+        max_keys_per_query, max_queries_per_key,
         n_sparse_blocks_o,
         scale, has_mask, has_bias,
         n_batches,
@@ -224,7 +224,7 @@ class _FlashAttentionAutograd(torch.autograd.Function):
         else:
             bias_b_s = bias_r_s = bias_c_s = 0
 
-        dummy_lut = torch.empty(0, device=q.device, dtype=torch.long)
+        dummy_packed_indices = torch.empty(0, device=q.device, dtype=torch.long)
 
         triton_grid = lambda meta: [n_batches,
                                     n_seq_blocks_q]
@@ -236,14 +236,14 @@ class _FlashAttentionAutograd(torch.autograd.Function):
             output,
             attention_mask if has_mask else None,
             attention_bias if has_bias else None,
-            sparsity_reverse_lut_q,
-            sparsity_reverse_lut_k,
-            sparsity_reverse_lut_v,
-            sparsity_reverse_lut_o,
-            sparsity_reverse_lut_mask if has_mask else None,
-            sparsity_reverse_lut_bias if has_bias else None,
-            attention_lut,
-            attention_offsets,
+            packed_indices_q,
+            packed_indices_k,
+            packed_indices_v,
+            packed_indices_o,
+            packed_indices_mask if has_mask else None,
+            packed_indices_bias if has_bias else None,
+            key_indices,
+            key_offsets,
             lse,
         )
 
@@ -260,20 +260,20 @@ class _FlashAttentionAutograd(torch.autograd.Function):
             mask_b_s, mask_r_s, mask_c_s,
             attention_bias,
             bias_b_s, bias_r_s, bias_c_s,
-            sparsity_reverse_lut_q,
+            packed_indices_q,
             s_l_q_b, s_l_q_b_s, s_l_q_r_s, s_l_q_c_s,
-            sparsity_reverse_lut_k,
+            packed_indices_k,
             s_l_k_b, s_l_k_b_s, s_l_k_r_s, s_l_k_c_s,
-            sparsity_reverse_lut_v,
+            packed_indices_v,
             s_l_v_b, s_l_v_b_s, s_l_v_r_s, s_l_v_c_s,
-            sparsity_reverse_lut_o,
+            packed_indices_o,
             s_l_o_b, s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
-            sparsity_reverse_lut_mask if has_mask else dummy_lut,
-            sparsity_reverse_lut_bias if has_bias else dummy_lut,
-            attention_lut, attention_offsets,
+            packed_indices_mask if has_mask else dummy_packed_indices,
+            packed_indices_bias if has_bias else dummy_packed_indices,
+            key_indices, key_offsets,
             lse,
             n_batches, n_seq_blocks_q, n_seq_blocks_k,
-            n_head_blocks_qk, n_head_blocks_v, max_kv_blocks,
+            n_head_blocks_qk, n_head_blocks_v, max_keys_per_query,
             attention_mask.size(0) if has_mask else 0,
             attention_bias.size(0) if has_bias else 0,
             scale,
@@ -284,21 +284,21 @@ class _FlashAttentionAutograd(torch.autograd.Function):
         ctx.save_for_backward(
             q, k, v, output, lse,
             sparsity_layout_q, sparsity_layout_k, sparsity_layout_v, sparsity_layout_o,
-            sparsity_reverse_lut_q, sparsity_reverse_lut_k, sparsity_reverse_lut_v, sparsity_reverse_lut_o,
-            attention_lut, attention_offsets,
-            reverse_attention_lut, reverse_attention_offsets,
+            packed_indices_q, packed_indices_k, packed_indices_v, packed_indices_o,
+            key_indices, key_offsets,
+            query_indices, query_offsets,
             attention_mask if has_mask else torch.empty(0, device=q.device),
             attention_bias if has_bias else torch.empty(0, device=q.device),
-            sparsity_reverse_lut_mask if has_mask else torch.empty(0, device=q.device, dtype=torch.long),
-            sparsity_reverse_lut_bias if has_bias else torch.empty(0, device=q.device, dtype=torch.long),
+            packed_indices_mask if has_mask else torch.empty(0, device=q.device, dtype=torch.long),
+            packed_indices_bias if has_bias else torch.empty(0, device=q.device, dtype=torch.long),
         )
         ctx.sparsity_block_size = sparsity_block_size
         ctx.n_seq_blocks_q = n_seq_blocks_q
         ctx.n_seq_blocks_k = n_seq_blocks_k
         ctx.n_head_blocks_qk = n_head_blocks_qk
         ctx.n_head_blocks_v = n_head_blocks_v
-        ctx.max_kv_blocks = max_kv_blocks
-        ctx.max_q_per_k = max_q_per_k
+        ctx.max_keys_per_query = max_keys_per_query
+        ctx.max_queries_per_key = max_queries_per_key
         ctx.scale = scale
         ctx.has_mask = has_mask
         ctx.has_bias = has_bias
@@ -310,11 +310,11 @@ class _FlashAttentionAutograd(torch.autograd.Function):
     def backward(ctx, grad_output):
         (q, k, v, o, lse,
          sparsity_layout_q, sparsity_layout_k, sparsity_layout_v, sparsity_layout_o,
-         sparsity_reverse_lut_q, sparsity_reverse_lut_k, sparsity_reverse_lut_v, sparsity_reverse_lut_o,
-         attention_lut, attention_offsets,
-         reverse_attention_lut, reverse_attention_offsets,
+         packed_indices_q, packed_indices_k, packed_indices_v, packed_indices_o,
+         key_indices, key_offsets,
+         query_indices, query_offsets,
          attention_mask, attention_bias,
-         sparsity_reverse_lut_mask, sparsity_reverse_lut_bias,
+         packed_indices_mask, packed_indices_bias,
          ) = ctx.saved_tensors
 
         sparsity_block_size = ctx.sparsity_block_size
@@ -357,12 +357,12 @@ class _FlashAttentionAutograd(torch.autograd.Function):
             o,
             grad_output,
             delta,
-            sparsity_reverse_lut_o,
+            packed_indices_o,
         )
 
         flash_attention_kernel_bwd_preprocess[(n_batches, n_seq_blocks_q)](
             o, grad_output, delta,
-            sparsity_reverse_lut_o,
+            packed_indices_o,
             o.size(0),
             do_b_s, do_r_s, do_c_s,
             s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
@@ -378,7 +378,7 @@ class _FlashAttentionAutograd(torch.autograd.Function):
             dbias = torch.empty(0, device=q.device, dtype=q.dtype)
             dbias_b_s = dbias_r_s = dbias_c_s = 0
 
-        dummy_lut = torch.empty(0, device=q.device, dtype=torch.long)
+        dummy_packed_indices = torch.empty(0, device=q.device, dtype=torch.long)
 
         # dK, dV kernel
         use_int64_dkdv = not can_use_int32_indexing(
@@ -393,14 +393,14 @@ class _FlashAttentionAutograd(torch.autograd.Function):
             delta,
             attention_mask if has_mask else None,
             attention_bias if has_bias else None,
-            sparsity_reverse_lut_q,
-            sparsity_reverse_lut_k,
-            sparsity_reverse_lut_v,
-            sparsity_reverse_lut_o,
-            sparsity_reverse_lut_mask if has_mask else None,
-            sparsity_reverse_lut_bias if has_bias else None,
-            reverse_attention_lut,
-            reverse_attention_offsets,
+            packed_indices_q,
+            packed_indices_k,
+            packed_indices_v,
+            packed_indices_o,
+            packed_indices_mask if has_mask else None,
+            packed_indices_bias if has_bias else None,
+            query_indices,
+            query_offsets,
         )
 
         flash_attention_kernel_bwd_dkdv[(n_batches, n_seq_blocks_k)](
@@ -413,19 +413,19 @@ class _FlashAttentionAutograd(torch.autograd.Function):
             lse, delta,
             attention_mask, mask_b_s, mask_r_s, mask_c_s,
             attention_bias, bias_b_s, bias_r_s, bias_c_s,
-            sparsity_reverse_lut_q,
+            packed_indices_q,
             s_l_q_b_s, s_l_q_r_s, s_l_q_c_s,
-            sparsity_reverse_lut_k,
+            packed_indices_k,
             s_l_k_b_s, s_l_k_r_s, s_l_k_c_s,
-            sparsity_reverse_lut_v,
+            packed_indices_v,
             s_l_v_b_s, s_l_v_r_s, s_l_v_c_s,
-            sparsity_reverse_lut_o,
+            packed_indices_o,
             s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
-            sparsity_reverse_lut_mask if has_mask else dummy_lut,
-            sparsity_reverse_lut_bias if has_bias else dummy_lut,
-            reverse_attention_lut, reverse_attention_offsets,
+            packed_indices_mask if has_mask else dummy_packed_indices,
+            packed_indices_bias if has_bias else dummy_packed_indices,
+            query_indices, query_offsets,
             n_batches, n_seq_blocks_q, n_seq_blocks_k,
-            n_head_blocks_qk, n_head_blocks_v, ctx.max_q_per_k,
+            n_head_blocks_qk, n_head_blocks_v, ctx.max_queries_per_key,
             q.size(0), k.size(0), v.size(0), grad_output.size(0),
             attention_mask.size(0) if has_mask else 0,
             attention_bias.size(0) if has_bias else 0,
@@ -445,14 +445,14 @@ class _FlashAttentionAutograd(torch.autograd.Function):
             delta,
             attention_mask if has_mask else None,
             attention_bias if has_bias else None,
-            sparsity_reverse_lut_q,
-            sparsity_reverse_lut_k,
-            sparsity_reverse_lut_v,
-            sparsity_reverse_lut_o,
-            sparsity_reverse_lut_mask if has_mask else None,
-            sparsity_reverse_lut_bias if has_bias else None,
-            attention_lut,
-            attention_offsets,
+            packed_indices_q,
+            packed_indices_k,
+            packed_indices_v,
+            packed_indices_o,
+            packed_indices_mask if has_mask else None,
+            packed_indices_bias if has_bias else None,
+            key_indices,
+            key_offsets,
         )
 
         flash_attention_kernel_bwd_dq[(n_batches, n_seq_blocks_q)](
@@ -464,19 +464,19 @@ class _FlashAttentionAutograd(torch.autograd.Function):
             lse, delta,
             attention_mask, mask_b_s, mask_r_s, mask_c_s,
             attention_bias, bias_b_s, bias_r_s, bias_c_s,
-            sparsity_reverse_lut_q,
+            packed_indices_q,
             s_l_q_b_s, s_l_q_r_s, s_l_q_c_s,
-            sparsity_reverse_lut_k,
+            packed_indices_k,
             s_l_k_b_s, s_l_k_r_s, s_l_k_c_s,
-            sparsity_reverse_lut_v,
+            packed_indices_v,
             s_l_v_b_s, s_l_v_r_s, s_l_v_c_s,
-            sparsity_reverse_lut_o,
+            packed_indices_o,
             s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
-            sparsity_reverse_lut_mask if has_mask else dummy_lut,
-            sparsity_reverse_lut_bias if has_bias else dummy_lut,
-            attention_lut, attention_offsets,
+            packed_indices_mask if has_mask else dummy_packed_indices,
+            packed_indices_bias if has_bias else dummy_packed_indices,
+            key_indices, key_offsets,
             n_batches, n_seq_blocks_q, n_seq_blocks_k,
-            n_head_blocks_qk, n_head_blocks_v, ctx.max_kv_blocks,
+            n_head_blocks_qk, n_head_blocks_v, ctx.max_keys_per_query,
             q.size(0), k.size(0), v.size(0), grad_output.size(0),
             attention_mask.size(0) if has_mask else 0,
             attention_bias.size(0) if has_bias else 0,
@@ -520,19 +520,19 @@ def flash_attention_kernel(q,
                            mask_b_s, mask_r_s, mask_c_s,
                            attention_bias,
                            bias_b_s, bias_r_s, bias_c_s,
-                           r_lut_q,
+                           pidx_q,
                            s_l_q_b, s_l_q_b_s, s_l_q_r_s, s_l_q_c_s,
-                           r_lut_k,
+                           pidx_k,
                            s_l_k_b, s_l_k_b_s, s_l_k_r_s, s_l_k_c_s,
-                           r_lut_v,
+                           pidx_v,
                            s_l_v_b, s_l_v_b_s, s_l_v_r_s, s_l_v_c_s,
-                           r_lut_o,
+                           pidx_o,
                            s_l_o_b, s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
-                           r_lut_mask, r_lut_bias,
-                           attention_lut, attention_offsets,
+                           pidx_mask, pidx_bias,
+                           key_indices, key_offsets,
                            lse,
                            n_batches, n_seq_blocks_q, n_seq_blocks_k,
-                           n_head_blocks_qk, n_head_blocks_v, max_kv_blocks,
+                           n_head_blocks_qk, n_head_blocks_v, max_keys_per_query,
                            total_mask_blocks, total_bias_blocks,
                            scale,
                            has_mask, has_bias,
@@ -549,40 +549,40 @@ def flash_attention_kernel(q,
     m_i = tl.full([TRITON_BLOCK_SIZE], float("-inf"), dtype=tl.float32)
     l_i = tl.zeros([TRITON_BLOCK_SIZE], dtype=tl.float32)
 
-    # Get attention LUT for this (batch, q_seq) pair
-    attention_offset_idx = pid_bat * n_seq_blocks_q + pid_q_seq
-    attention_start = tl.load(attention_offsets + attention_offset_idx)
-    attention_end = tl.load(attention_offsets + attention_offset_idx + 1)
-    n_kv_blocks = attention_end - attention_start
+    # Get attention layout cache for this (batch, q_seq) pair
+    key_offset_idx = pid_bat * n_seq_blocks_q + pid_q_seq
+    key_start = tl.load(key_offsets + key_offset_idx)
+    key_end = tl.load(key_offsets + key_offset_idx + 1)
+    n_key_blocks = key_end - key_start
 
     # Iterate over K sequence blocks
-    for kv_idx in range(max_kv_blocks):
-        if kv_idx < n_kv_blocks:
-            k_seq_block = tl.load(attention_lut + attention_start + kv_idx)
+    for key_idx in range(max_keys_per_query):
+        if key_idx < n_key_blocks:
+            k_seq_block = tl.load(key_indices + key_start + key_idx)
 
             # Compute S = Q @ K^T by accumulating across head_dim blocks
             buf_s = tl.zeros([TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE], dtype=tl.float32)
 
             for h in range(n_head_blocks_qk):
-                rev_idx_spa_q_idx = (pid_bat * s_l_q_b_s + pid_q_seq * s_l_q_r_s + h * s_l_q_c_s)
-                rev_idx_spa_q_msk = ((rev_idx_spa_q_idx >= 0) &
-                                     (rev_idx_spa_q_idx < tl.cast(s_l_q_b, index_dtype) * s_l_q_b_s))
-                rev_idx_spa_q = tl.cast(tl.load(r_lut_q + rev_idx_spa_q_idx, mask=rev_idx_spa_q_msk, other=-1), tl.int32)
+                packed_idx_q_idx = (pid_bat * s_l_q_b_s + pid_q_seq * s_l_q_r_s + h * s_l_q_c_s)
+                packed_idx_q_msk = ((packed_idx_q_idx >= 0) &
+                                     (packed_idx_q_idx < tl.cast(s_l_q_b, index_dtype) * s_l_q_b_s))
+                packed_idx_q = tl.cast(tl.load(pidx_q + packed_idx_q_idx, mask=packed_idx_q_msk, other=-1), tl.int32)
 
-                rev_idx_spa_k_idx = (pid_bat * s_l_k_b_s + tl.cast(k_seq_block, index_dtype) * s_l_k_r_s + h * s_l_k_c_s)
-                rev_idx_spa_k_msk = ((rev_idx_spa_k_idx >= 0) &
-                                     (rev_idx_spa_k_idx < tl.cast(s_l_k_b, index_dtype) * s_l_k_b_s))
-                rev_idx_spa_k = tl.cast(tl.load(r_lut_k + rev_idx_spa_k_idx, mask=rev_idx_spa_k_msk, other=-1), tl.int32)
+                packed_idx_k_idx = (pid_bat * s_l_k_b_s + tl.cast(k_seq_block, index_dtype) * s_l_k_r_s + h * s_l_k_c_s)
+                packed_idx_k_msk = ((packed_idx_k_idx >= 0) &
+                                     (packed_idx_k_idx < tl.cast(s_l_k_b, index_dtype) * s_l_k_b_s))
+                packed_idx_k = tl.cast(tl.load(pidx_k + packed_idx_k_idx, mask=packed_idx_k_msk, other=-1), tl.int32)
 
-                if rev_idx_spa_q >= 0 and rev_idx_spa_k >= 0:
-                    blk_q_idx = ((tl.cast(rev_idx_spa_q, index_dtype) * q_b_s) +
+                if packed_idx_q >= 0 and packed_idx_k >= 0:
+                    blk_q_idx = ((tl.cast(packed_idx_q, index_dtype) * q_b_s) +
                                  (offs_m[:, None] * q_r_s) +
                                  (offs_d[None, :] * q_c_s))
                     blk_q_msk = ((blk_q_idx >= 0) &
                                  (blk_q_idx < tl.cast(q_b, index_dtype) * q_b_s))
                     blk_q = tl.load(q + blk_q_idx, mask=blk_q_msk, other=0)
 
-                    blk_k_idx = ((tl.cast(rev_idx_spa_k, index_dtype) * k_b_s) +
+                    blk_k_idx = ((tl.cast(packed_idx_k, index_dtype) * k_b_s) +
                                  (offs_m[:, None] * k_r_s) +
                                  (offs_d[None, :] * k_c_s))
                     blk_k_msk = ((blk_k_idx >= 0) &
@@ -597,11 +597,11 @@ def flash_attention_kernel(q,
 
             # Apply mask if present
             if has_mask:
-                rev_idx_spa_mask_idx = (pid_bat * n_seq_blocks_q * n_seq_blocks_k +
+                packed_idx_mask_idx = (pid_bat * n_seq_blocks_q * n_seq_blocks_k +
                                         pid_q_seq * n_seq_blocks_k + tl.cast(k_seq_block, index_dtype))
-                rev_idx_spa_mask = tl.cast(tl.load(r_lut_mask + rev_idx_spa_mask_idx), tl.int32)
-                if rev_idx_spa_mask >= 0:
-                    blk_mask_idx = ((tl.cast(rev_idx_spa_mask, index_dtype) * mask_b_s) +
+                packed_idx_mask = tl.cast(tl.load(pidx_mask + packed_idx_mask_idx), tl.int32)
+                if packed_idx_mask >= 0:
+                    blk_mask_idx = ((tl.cast(packed_idx_mask, index_dtype) * mask_b_s) +
                                     (offs_m[:, None] * mask_r_s) +
                                     (offs_d[None, :] * mask_c_s))
                     blk_mask = tl.load(attention_mask + blk_mask_idx)
@@ -609,11 +609,11 @@ def flash_attention_kernel(q,
 
             # Apply bias if present
             if has_bias:
-                rev_idx_spa_bias_idx = (pid_bat * n_seq_blocks_q * n_seq_blocks_k +
+                packed_idx_bias_idx = (pid_bat * n_seq_blocks_q * n_seq_blocks_k +
                                         pid_q_seq * n_seq_blocks_k + tl.cast(k_seq_block, index_dtype))
-                rev_idx_spa_bias = tl.cast(tl.load(r_lut_bias + rev_idx_spa_bias_idx), tl.int32)
-                if rev_idx_spa_bias >= 0:
-                    blk_bias_idx = ((tl.cast(rev_idx_spa_bias, index_dtype) * bias_b_s) +
+                packed_idx_bias = tl.cast(tl.load(pidx_bias + packed_idx_bias_idx), tl.int32)
+                if packed_idx_bias >= 0:
+                    blk_bias_idx = ((tl.cast(packed_idx_bias, index_dtype) * bias_b_s) +
                                     (offs_m[:, None] * bias_r_s) +
                                     (offs_d[None, :] * bias_c_s))
                     blk_bias = tl.load(attention_bias + blk_bias_idx)
@@ -629,18 +629,18 @@ def flash_attention_kernel(q,
 
             # For each V head block, update the output accumulator
             for h in range(n_head_blocks_v):
-                rev_idx_spa_o_idx = (pid_bat * s_l_o_b_s + pid_q_seq * s_l_o_r_s + h * s_l_o_c_s)
-                rev_idx_spa_o_msk = ((rev_idx_spa_o_idx >= 0) &
-                                     (rev_idx_spa_o_idx < tl.cast(s_l_o_b, index_dtype) * s_l_o_b_s))
-                rev_idx_spa_o = tl.cast(tl.load(r_lut_o + rev_idx_spa_o_idx, mask=rev_idx_spa_o_msk, other=-1), tl.int32)
+                packed_idx_o_idx = (pid_bat * s_l_o_b_s + pid_q_seq * s_l_o_r_s + h * s_l_o_c_s)
+                packed_idx_o_msk = ((packed_idx_o_idx >= 0) &
+                                     (packed_idx_o_idx < tl.cast(s_l_o_b, index_dtype) * s_l_o_b_s))
+                packed_idx_o = tl.cast(tl.load(pidx_o + packed_idx_o_idx, mask=packed_idx_o_msk, other=-1), tl.int32)
 
-                rev_idx_spa_v_idx = (pid_bat * s_l_v_b_s + tl.cast(k_seq_block, index_dtype) * s_l_v_r_s + h * s_l_v_c_s)
-                rev_idx_spa_v_msk = ((rev_idx_spa_v_idx >= 0) &
-                                     (rev_idx_spa_v_idx < tl.cast(s_l_v_b, index_dtype) * s_l_v_b_s))
-                rev_idx_spa_v = tl.cast(tl.load(r_lut_v + rev_idx_spa_v_idx, mask=rev_idx_spa_v_msk, other=-1), tl.int32)
+                packed_idx_v_idx = (pid_bat * s_l_v_b_s + tl.cast(k_seq_block, index_dtype) * s_l_v_r_s + h * s_l_v_c_s)
+                packed_idx_v_msk = ((packed_idx_v_idx >= 0) &
+                                     (packed_idx_v_idx < tl.cast(s_l_v_b, index_dtype) * s_l_v_b_s))
+                packed_idx_v = tl.cast(tl.load(pidx_v + packed_idx_v_idx, mask=packed_idx_v_msk, other=-1), tl.int32)
 
-                if rev_idx_spa_o >= 0:
-                    blk_o_idx = ((tl.cast(rev_idx_spa_o, index_dtype) * o_b_s) +
+                if packed_idx_o >= 0:
+                    blk_o_idx = ((tl.cast(packed_idx_o, index_dtype) * o_b_s) +
                                  (offs_m[:, None] * o_r_s) +
                                  (offs_d[None, :] * o_c_s))
                     blk_o_msk = ((blk_o_idx >= 0) &
@@ -648,8 +648,8 @@ def flash_attention_kernel(q,
                     blk_o = tl.cast(tl.load(o + blk_o_idx, mask=blk_o_msk, other=0), tl.float32)
                     blk_o = blk_o * alpha[:, None]
 
-                    if rev_idx_spa_v >= 0:
-                        blk_v_idx = ((tl.cast(rev_idx_spa_v, index_dtype) * v_b_s) +
+                    if packed_idx_v >= 0:
+                        blk_v_idx = ((tl.cast(packed_idx_v, index_dtype) * v_b_s) +
                                      (offs_m[:, None] * v_r_s) +
                                      (offs_d[None, :] * v_c_s))
                         blk_v_msk = ((blk_v_idx >= 0) &
@@ -666,12 +666,12 @@ def flash_attention_kernel(q,
     l_safe = tl.where(has_attention, l_i, 1.0)
 
     for h in range(n_head_blocks_v):
-        rev_idx_spa_o_idx = (pid_bat * s_l_o_b_s + pid_q_seq * s_l_o_r_s + h * s_l_o_c_s)
-        rev_idx_spa_o_msk = ((rev_idx_spa_o_idx >= 0) &
-                             (rev_idx_spa_o_idx < tl.cast(s_l_o_b, index_dtype) * s_l_o_b_s))
-        rev_idx_spa_o = tl.cast(tl.load(r_lut_o + rev_idx_spa_o_idx, mask=rev_idx_spa_o_msk, other=-1), tl.int32)
-        if rev_idx_spa_o >= 0:
-            blk_o_idx = ((tl.cast(rev_idx_spa_o, index_dtype) * o_b_s) +
+        packed_idx_o_idx = (pid_bat * s_l_o_b_s + pid_q_seq * s_l_o_r_s + h * s_l_o_c_s)
+        packed_idx_o_msk = ((packed_idx_o_idx >= 0) &
+                             (packed_idx_o_idx < tl.cast(s_l_o_b, index_dtype) * s_l_o_b_s))
+        packed_idx_o = tl.cast(tl.load(pidx_o + packed_idx_o_idx, mask=packed_idx_o_msk, other=-1), tl.int32)
+        if packed_idx_o >= 0:
+            blk_o_idx = ((tl.cast(packed_idx_o, index_dtype) * o_b_s) +
                          (offs_m[:, None] * o_r_s) +
                          (offs_d[None, :] * o_c_s))
             blk_o_msk = ((blk_o_idx >= 0) &
@@ -698,7 +698,7 @@ def flash_attention_kernel(q,
 )
 @triton.jit
 def flash_attention_kernel_bwd_preprocess(o, do, delta,
-                                          r_lut_o,
+                                          pidx_o,
                                           total_o_blocks,
                                           o_b_s, o_r_s, o_c_s,
                                           s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
@@ -715,10 +715,10 @@ def flash_attention_kernel_bwd_preprocess(o, do, delta,
     delta_acc = tl.zeros([TRITON_BLOCK_SIZE], dtype=tl.float32)
 
     for h in range(n_head_blocks):
-        rev_idx_spa_o_idx = (pid_bat * s_l_o_b_s + pid_q_seq * s_l_o_r_s + h * s_l_o_c_s)
-        rev_idx_spa_o = tl.cast(tl.load(r_lut_o + rev_idx_spa_o_idx), tl.int32)
-        if rev_idx_spa_o >= 0:
-            blk_idx = ((tl.cast(rev_idx_spa_o, index_dtype) * o_b_s) +
+        packed_idx_o_idx = (pid_bat * s_l_o_b_s + pid_q_seq * s_l_o_r_s + h * s_l_o_c_s)
+        packed_idx_o = tl.cast(tl.load(pidx_o + packed_idx_o_idx), tl.int32)
+        if packed_idx_o >= 0:
+            blk_idx = ((tl.cast(packed_idx_o, index_dtype) * o_b_s) +
                        (offs_m[:, None] * o_r_s) +
                        (offs_d[None, :] * o_c_s))
             blk_msk = ((blk_idx >= 0) & (blk_idx < tl.cast(total_o_blocks, index_dtype) * o_b_s))
@@ -748,18 +748,18 @@ def flash_attention_kernel_bwd_dkdv(q, q_b_s, q_r_s, q_c_s,
                                     lse, delta,
                                     attention_mask, mask_b_s, mask_r_s, mask_c_s,
                                     attention_bias, bias_b_s, bias_r_s, bias_c_s,
-                                    r_lut_q,
+                                    pidx_q,
                                     s_l_q_b_s, s_l_q_r_s, s_l_q_c_s,
-                                    r_lut_k,
+                                    pidx_k,
                                     s_l_k_b_s, s_l_k_r_s, s_l_k_c_s,
-                                    r_lut_v,
+                                    pidx_v,
                                     s_l_v_b_s, s_l_v_r_s, s_l_v_c_s,
-                                    r_lut_o,
+                                    pidx_o,
                                     s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
-                                    r_lut_mask, r_lut_bias,
-                                    reverse_attention_lut, reverse_attention_offsets,
+                                    pidx_mask, pidx_bias,
+                                    query_indices, query_offsets,
                                     n_batches, n_seq_blocks_q, n_seq_blocks_k,
-                                    n_head_blocks_qk, n_head_blocks_v, max_q_per_k,
+                                    n_head_blocks_qk, n_head_blocks_v, max_queries_per_key,
                                     total_q_blocks, total_k_blocks,
                                     total_v_blocks, total_o_blocks,
                                     total_mask_blocks, total_bias_blocks,
@@ -776,27 +776,27 @@ def flash_attention_kernel_bwd_dkdv(q, q_b_s, q_r_s, q_c_s,
     offs_d = tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)
     qk_scale = scale * 1.4426950408889634
 
-    # Get reverse attention LUT: which Q blocks attend to this K block
-    reverse_offset_idx = pid_bat * n_seq_blocks_k + pid_k_seq
-    reverse_start = tl.load(reverse_attention_offsets + reverse_offset_idx)
-    reverse_end = tl.load(reverse_attention_offsets + reverse_offset_idx + 1)
-    n_q_blocks = reverse_end - reverse_start
+    # Get query adjacency: which Q blocks attend to this K block
+    query_offset_idx = pid_bat * n_seq_blocks_k + pid_k_seq
+    query_start = tl.load(query_offsets + query_offset_idx)
+    query_end = tl.load(query_offsets + query_offset_idx + 1)
+    n_q_blocks = query_end - query_start
 
-    for q_idx in range(max_q_per_k):
+    for q_idx in range(max_queries_per_key):
         if q_idx < n_q_blocks:
-            q_seq_block = tl.load(reverse_attention_lut + reverse_start + q_idx)
+            q_seq_block = tl.load(query_indices + query_start + q_idx)
 
             # Recompute S = Q @ K^T across head blocks
             buf_s = tl.zeros([TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE], dtype=tl.float32)
             for h in range(n_head_blocks_qk):
-                rev_idx_spa_q = tl.cast(tl.load(r_lut_q + (pid_bat * s_l_q_b_s + tl.cast(q_seq_block, index_dtype) * s_l_q_r_s + h * s_l_q_c_s)), tl.int32)
-                rev_idx_spa_k = tl.cast(tl.load(r_lut_k + (pid_bat * s_l_k_b_s + pid_k_seq * s_l_k_r_s + h * s_l_k_c_s)), tl.int32)
-                if rev_idx_spa_q >= 0 and rev_idx_spa_k >= 0:
-                    blk_q_idx = ((tl.cast(rev_idx_spa_q, index_dtype) * q_b_s) +
+                packed_idx_q = tl.cast(tl.load(pidx_q + (pid_bat * s_l_q_b_s + tl.cast(q_seq_block, index_dtype) * s_l_q_r_s + h * s_l_q_c_s)), tl.int32)
+                packed_idx_k = tl.cast(tl.load(pidx_k + (pid_bat * s_l_k_b_s + pid_k_seq * s_l_k_r_s + h * s_l_k_c_s)), tl.int32)
+                if packed_idx_q >= 0 and packed_idx_k >= 0:
+                    blk_q_idx = ((tl.cast(packed_idx_q, index_dtype) * q_b_s) +
                                  (offs_m[:, None] * q_r_s) +
                                  (offs_d[None, :] * q_c_s))
                     blk_q = tl.load(q + blk_q_idx, mask=((blk_q_idx >= 0) & (blk_q_idx < tl.cast(total_q_blocks, index_dtype) * q_b_s)), other=0)
-                    blk_k_idx = ((tl.cast(rev_idx_spa_k, index_dtype) * k_b_s) +
+                    blk_k_idx = ((tl.cast(packed_idx_k, index_dtype) * k_b_s) +
                                  (offs_m[:, None] * k_r_s) +
                                  (offs_d[None, :] * k_c_s))
                     blk_k = tl.load(k + blk_k_idx, mask=((blk_k_idx >= 0) & (blk_k_idx < tl.cast(total_k_blocks, index_dtype) * k_b_s)), other=0)
@@ -806,9 +806,9 @@ def flash_attention_kernel_bwd_dkdv(q, q_b_s, q_r_s, q_c_s,
 
             # Apply mask
             if has_mask:
-                rev_idx_spa_mask = tl.cast(tl.load(r_lut_mask + (pid_bat * n_seq_blocks_q * n_seq_blocks_k + tl.cast(q_seq_block, index_dtype) * n_seq_blocks_k + pid_k_seq)), tl.int32)
-                if rev_idx_spa_mask >= 0:
-                    blk_mask_idx = ((tl.cast(rev_idx_spa_mask, index_dtype) * mask_b_s) +
+                packed_idx_mask = tl.cast(tl.load(pidx_mask + (pid_bat * n_seq_blocks_q * n_seq_blocks_k + tl.cast(q_seq_block, index_dtype) * n_seq_blocks_k + pid_k_seq)), tl.int32)
+                if packed_idx_mask >= 0:
+                    blk_mask_idx = ((tl.cast(packed_idx_mask, index_dtype) * mask_b_s) +
                                     (offs_m[:, None] * mask_r_s) +
                                     (offs_d[None, :] * mask_c_s))
                     blk_mask = tl.load(attention_mask + blk_mask_idx)
@@ -816,9 +816,9 @@ def flash_attention_kernel_bwd_dkdv(q, q_b_s, q_r_s, q_c_s,
 
             # Apply bias
             if has_bias:
-                rev_idx_spa_bias = tl.cast(tl.load(r_lut_bias + (pid_bat * n_seq_blocks_q * n_seq_blocks_k + tl.cast(q_seq_block, index_dtype) * n_seq_blocks_k + pid_k_seq)), tl.int32)
-                if rev_idx_spa_bias >= 0:
-                    blk_bias_idx = ((tl.cast(rev_idx_spa_bias, index_dtype) * bias_b_s) +
+                packed_idx_bias = tl.cast(tl.load(pidx_bias + (pid_bat * n_seq_blocks_q * n_seq_blocks_k + tl.cast(q_seq_block, index_dtype) * n_seq_blocks_k + pid_k_seq)), tl.int32)
+                if packed_idx_bias >= 0:
+                    blk_bias_idx = ((tl.cast(packed_idx_bias, index_dtype) * bias_b_s) +
                                     (offs_m[:, None] * bias_r_s) +
                                     (offs_d[None, :] * bias_c_s))
                     blk_bias = tl.load(attention_bias + blk_bias_idx)
@@ -838,14 +838,14 @@ def flash_attention_kernel_bwd_dkdv(q, q_b_s, q_r_s, q_c_s,
             # Compute dp = sum_h dO_h @ V_h^T
             dp = tl.zeros([TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE], dtype=tl.float32)
             for h in range(n_head_blocks_v):
-                rev_idx_spa_o_h = tl.cast(tl.load(r_lut_o + (pid_bat * s_l_o_b_s + tl.cast(q_seq_block, index_dtype) * s_l_o_r_s + h * s_l_o_c_s)), tl.int32)
-                rev_idx_spa_v_h = tl.cast(tl.load(r_lut_v + (pid_bat * s_l_v_b_s + pid_k_seq * s_l_v_r_s + h * s_l_v_c_s)), tl.int32)
-                if rev_idx_spa_o_h >= 0 and rev_idx_spa_v_h >= 0:
-                    blk_do_idx = ((tl.cast(rev_idx_spa_o_h, index_dtype) * do_b_s) +
+                packed_idx_o_h = tl.cast(tl.load(pidx_o + (pid_bat * s_l_o_b_s + tl.cast(q_seq_block, index_dtype) * s_l_o_r_s + h * s_l_o_c_s)), tl.int32)
+                packed_idx_v_h = tl.cast(tl.load(pidx_v + (pid_bat * s_l_v_b_s + pid_k_seq * s_l_v_r_s + h * s_l_v_c_s)), tl.int32)
+                if packed_idx_o_h >= 0 and packed_idx_v_h >= 0:
+                    blk_do_idx = ((tl.cast(packed_idx_o_h, index_dtype) * do_b_s) +
                                   (offs_m[:, None] * do_r_s) +
                                   (offs_d[None, :] * do_c_s))
                     blk_do = tl.load(do + blk_do_idx, mask=((blk_do_idx >= 0) & (blk_do_idx < tl.cast(total_o_blocks, index_dtype) * do_b_s)), other=0)
-                    blk_v_idx = ((tl.cast(rev_idx_spa_v_h, index_dtype) * v_b_s) +
+                    blk_v_idx = ((tl.cast(packed_idx_v_h, index_dtype) * v_b_s) +
                                  (offs_m[:, None] * v_r_s) +
                                  (offs_d[None, :] * v_c_s))
                     blk_v = tl.load(v + blk_v_idx, mask=((blk_v_idx >= 0) & (blk_v_idx < tl.cast(total_v_blocks, index_dtype) * v_b_s)), other=0)
@@ -856,15 +856,15 @@ def flash_attention_kernel_bwd_dkdv(q, q_b_s, q_r_s, q_c_s,
 
             # Accumulate dK across Q/K head blocks
             for h in range(n_head_blocks_qk):
-                rev_idx_spa_q_h = tl.cast(tl.load(r_lut_q + (pid_bat * s_l_q_b_s + tl.cast(q_seq_block, index_dtype) * s_l_q_r_s + h * s_l_q_c_s)), tl.int32)
-                rev_idx_spa_k_h = tl.cast(tl.load(r_lut_k + (pid_bat * s_l_k_b_s + pid_k_seq * s_l_k_r_s + h * s_l_k_c_s)), tl.int32)
+                packed_idx_q_h = tl.cast(tl.load(pidx_q + (pid_bat * s_l_q_b_s + tl.cast(q_seq_block, index_dtype) * s_l_q_r_s + h * s_l_q_c_s)), tl.int32)
+                packed_idx_k_h = tl.cast(tl.load(pidx_k + (pid_bat * s_l_k_b_s + pid_k_seq * s_l_k_r_s + h * s_l_k_c_s)), tl.int32)
 
-                if rev_idx_spa_q_h >= 0 and rev_idx_spa_k_h >= 0:
-                    blk_q_idx = ((tl.cast(rev_idx_spa_q_h, index_dtype) * q_b_s) +
+                if packed_idx_q_h >= 0 and packed_idx_k_h >= 0:
+                    blk_q_idx = ((tl.cast(packed_idx_q_h, index_dtype) * q_b_s) +
                                  (offs_m[:, None] * q_r_s) +
                                  (offs_d[None, :] * q_c_s))
                     blk_q = tl.load(q + blk_q_idx, mask=((blk_q_idx >= 0) & (blk_q_idx < tl.cast(total_q_blocks, index_dtype) * q_b_s)), other=0)
-                    blk_dk_idx = ((tl.cast(rev_idx_spa_k_h, index_dtype) * k_b_s) +
+                    blk_dk_idx = ((tl.cast(packed_idx_k_h, index_dtype) * k_b_s) +
                                   (offs_m[:, None] * k_r_s) +
                                   (offs_d[None, :] * k_c_s))
                     blk_dk = tl.cast(tl.load(dk + blk_dk_idx, mask=((blk_dk_idx >= 0) & (blk_dk_idx < tl.cast(total_k_blocks, index_dtype) * k_b_s)), other=0), tl.float32)
@@ -873,14 +873,14 @@ def flash_attention_kernel_bwd_dkdv(q, q_b_s, q_r_s, q_c_s,
 
             # Accumulate dV across V/output head blocks
             for h in range(n_head_blocks_v):
-                rev_idx_spa_o_h = tl.cast(tl.load(r_lut_o + (pid_bat * s_l_o_b_s + tl.cast(q_seq_block, index_dtype) * s_l_o_r_s + h * s_l_o_c_s)), tl.int32)
-                rev_idx_spa_v_h = tl.cast(tl.load(r_lut_v + (pid_bat * s_l_v_b_s + pid_k_seq * s_l_v_r_s + h * s_l_v_c_s)), tl.int32)
-                if rev_idx_spa_o_h >= 0 and rev_idx_spa_v_h >= 0:
-                    blk_do_idx = ((tl.cast(rev_idx_spa_o_h, index_dtype) * do_b_s) +
+                packed_idx_o_h = tl.cast(tl.load(pidx_o + (pid_bat * s_l_o_b_s + tl.cast(q_seq_block, index_dtype) * s_l_o_r_s + h * s_l_o_c_s)), tl.int32)
+                packed_idx_v_h = tl.cast(tl.load(pidx_v + (pid_bat * s_l_v_b_s + pid_k_seq * s_l_v_r_s + h * s_l_v_c_s)), tl.int32)
+                if packed_idx_o_h >= 0 and packed_idx_v_h >= 0:
+                    blk_do_idx = ((tl.cast(packed_idx_o_h, index_dtype) * do_b_s) +
                                   (offs_m[:, None] * do_r_s) +
                                   (offs_d[None, :] * do_c_s))
                     blk_do = tl.load(do + blk_do_idx, mask=((blk_do_idx >= 0) & (blk_do_idx < tl.cast(total_o_blocks, index_dtype) * do_b_s)), other=0)
-                    blk_dv_idx = ((tl.cast(rev_idx_spa_v_h, index_dtype) * v_b_s) +
+                    blk_dv_idx = ((tl.cast(packed_idx_v_h, index_dtype) * v_b_s) +
                                   (offs_m[:, None] * v_r_s) +
                                   (offs_d[None, :] * v_c_s))
                     blk_dv = tl.cast(tl.load(dv + blk_dv_idx, mask=((blk_dv_idx >= 0) & (blk_dv_idx < tl.cast(total_v_blocks, index_dtype) * v_b_s)), other=0), tl.float32)
@@ -889,9 +889,9 @@ def flash_attention_kernel_bwd_dkdv(q, q_b_s, q_r_s, q_c_s,
 
             # dBias
             if has_bias:
-                rev_idx_spa_bias = tl.cast(tl.load(r_lut_bias + (pid_bat * n_seq_blocks_q * n_seq_blocks_k + tl.cast(q_seq_block, index_dtype) * n_seq_blocks_k + pid_k_seq)), tl.int32)
-                if rev_idx_spa_bias >= 0:
-                    blk_dbias_idx = ((tl.cast(rev_idx_spa_bias, index_dtype) * dbias_b_s) +
+                packed_idx_bias = tl.cast(tl.load(pidx_bias + (pid_bat * n_seq_blocks_q * n_seq_blocks_k + tl.cast(q_seq_block, index_dtype) * n_seq_blocks_k + pid_k_seq)), tl.int32)
+                if packed_idx_bias >= 0:
+                    blk_dbias_idx = ((tl.cast(packed_idx_bias, index_dtype) * dbias_b_s) +
                                      (offs_m[:, None] * dbias_r_s) +
                                      (offs_d[None, :] * dbias_c_s))
                     blk_dbias = tl.cast(tl.load(dbias + blk_dbias_idx, mask=((blk_dbias_idx >= 0) & (blk_dbias_idx < tl.cast(total_bias_blocks, index_dtype) * dbias_b_s)), other=0), tl.float32)
@@ -915,18 +915,18 @@ def flash_attention_kernel_bwd_dq(q, q_b_s, q_r_s, q_c_s,
                                   lse, delta,
                                   attention_mask, mask_b_s, mask_r_s, mask_c_s,
                                   attention_bias, bias_b_s, bias_r_s, bias_c_s,
-                                  r_lut_q,
+                                  pidx_q,
                                   s_l_q_b_s, s_l_q_r_s, s_l_q_c_s,
-                                  r_lut_k,
+                                  pidx_k,
                                   s_l_k_b_s, s_l_k_r_s, s_l_k_c_s,
-                                  r_lut_v,
+                                  pidx_v,
                                   s_l_v_b_s, s_l_v_r_s, s_l_v_c_s,
-                                  r_lut_o,
+                                  pidx_o,
                                   s_l_o_b_s, s_l_o_r_s, s_l_o_c_s,
-                                  r_lut_mask, r_lut_bias,
-                                  attention_lut, attention_offsets,
+                                  pidx_mask, pidx_bias,
+                                  key_indices, key_offsets,
                                   n_batches, n_seq_blocks_q, n_seq_blocks_k,
-                                  n_head_blocks_qk, n_head_blocks_v, max_kv_blocks,
+                                  n_head_blocks_qk, n_head_blocks_v, max_keys_per_query,
                                   total_q_blocks, total_k_blocks,
                                   total_v_blocks, total_o_blocks,
                                   total_mask_blocks, total_bias_blocks,
@@ -946,26 +946,26 @@ def flash_attention_kernel_bwd_dq(q, q_b_s, q_r_s, q_c_s,
     m = tl.load(lse + pid_bat * n_seq_blocks_q * TRITON_BLOCK_SIZE + pid_q_seq * TRITON_BLOCK_SIZE + offs_m)
     Di = tl.load(delta + pid_bat * n_seq_blocks_q * TRITON_BLOCK_SIZE + pid_q_seq * TRITON_BLOCK_SIZE + offs_m)
 
-    attention_offset_idx = pid_bat * n_seq_blocks_q + pid_q_seq
-    attention_start = tl.load(attention_offsets + attention_offset_idx)
-    attention_end = tl.load(attention_offsets + attention_offset_idx + 1)
-    n_kv_blocks = attention_end - attention_start
+    key_offset_idx = pid_bat * n_seq_blocks_q + pid_q_seq
+    key_start = tl.load(key_offsets + key_offset_idx)
+    key_end = tl.load(key_offsets + key_offset_idx + 1)
+    n_key_blocks = key_end - key_start
 
-    for kv_idx in range(max_kv_blocks):
-        if kv_idx < n_kv_blocks:
-            k_seq_block = tl.load(attention_lut + attention_start + kv_idx)
+    for key_idx in range(max_keys_per_query):
+        if key_idx < n_key_blocks:
+            k_seq_block = tl.load(key_indices + key_start + key_idx)
 
             # Recompute S = Q @ K^T across head blocks
             buf_s = tl.zeros([TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE], dtype=tl.float32)
             for h in range(n_head_blocks_qk):
-                rev_idx_spa_q = tl.cast(tl.load(r_lut_q + (pid_bat * s_l_q_b_s + pid_q_seq * s_l_q_r_s + h * s_l_q_c_s)), tl.int32)
-                rev_idx_spa_k = tl.cast(tl.load(r_lut_k + (pid_bat * s_l_k_b_s + tl.cast(k_seq_block, index_dtype) * s_l_k_r_s + h * s_l_k_c_s)), tl.int32)
-                if rev_idx_spa_q >= 0 and rev_idx_spa_k >= 0:
-                    blk_q_idx = ((tl.cast(rev_idx_spa_q, index_dtype) * q_b_s) +
+                packed_idx_q = tl.cast(tl.load(pidx_q + (pid_bat * s_l_q_b_s + pid_q_seq * s_l_q_r_s + h * s_l_q_c_s)), tl.int32)
+                packed_idx_k = tl.cast(tl.load(pidx_k + (pid_bat * s_l_k_b_s + tl.cast(k_seq_block, index_dtype) * s_l_k_r_s + h * s_l_k_c_s)), tl.int32)
+                if packed_idx_q >= 0 and packed_idx_k >= 0:
+                    blk_q_idx = ((tl.cast(packed_idx_q, index_dtype) * q_b_s) +
                                  (offs_m[:, None] * q_r_s) +
                                  (offs_d[None, :] * q_c_s))
                     blk_q = tl.load(q + blk_q_idx, mask=((blk_q_idx >= 0) & (blk_q_idx < tl.cast(total_q_blocks, index_dtype) * q_b_s)), other=0)
-                    blk_k_idx = ((tl.cast(rev_idx_spa_k, index_dtype) * k_b_s) +
+                    blk_k_idx = ((tl.cast(packed_idx_k, index_dtype) * k_b_s) +
                                  (offs_m[:, None] * k_r_s) +
                                  (offs_d[None, :] * k_c_s))
                     blk_k = tl.load(k + blk_k_idx, mask=((blk_k_idx >= 0) & (blk_k_idx < tl.cast(total_k_blocks, index_dtype) * k_b_s)), other=0)
@@ -974,18 +974,18 @@ def flash_attention_kernel_bwd_dq(q, q_b_s, q_r_s, q_c_s,
             buf_s = buf_s * qk_scale
 
             if has_mask:
-                rev_idx_spa_mask = tl.cast(tl.load(r_lut_mask + (pid_bat * n_seq_blocks_q * n_seq_blocks_k + pid_q_seq * n_seq_blocks_k + tl.cast(k_seq_block, index_dtype))), tl.int32)
-                if rev_idx_spa_mask >= 0:
-                    blk_mask_idx = ((tl.cast(rev_idx_spa_mask, index_dtype) * mask_b_s) +
+                packed_idx_mask = tl.cast(tl.load(pidx_mask + (pid_bat * n_seq_blocks_q * n_seq_blocks_k + pid_q_seq * n_seq_blocks_k + tl.cast(k_seq_block, index_dtype))), tl.int32)
+                if packed_idx_mask >= 0:
+                    blk_mask_idx = ((tl.cast(packed_idx_mask, index_dtype) * mask_b_s) +
                                     (offs_m[:, None] * mask_r_s) +
                                     (offs_d[None, :] * mask_c_s))
                     blk_mask = tl.load(attention_mask + blk_mask_idx)
                     buf_s = tl.where(blk_mask != 0, float("-inf") * 1.4426950408889634, buf_s)
 
             if has_bias:
-                rev_idx_spa_bias = tl.cast(tl.load(r_lut_bias + (pid_bat * n_seq_blocks_q * n_seq_blocks_k + pid_q_seq * n_seq_blocks_k + tl.cast(k_seq_block, index_dtype))), tl.int32)
-                if rev_idx_spa_bias >= 0:
-                    blk_bias_idx = ((tl.cast(rev_idx_spa_bias, index_dtype) * bias_b_s) +
+                packed_idx_bias = tl.cast(tl.load(pidx_bias + (pid_bat * n_seq_blocks_q * n_seq_blocks_k + pid_q_seq * n_seq_blocks_k + tl.cast(k_seq_block, index_dtype))), tl.int32)
+                if packed_idx_bias >= 0:
+                    blk_bias_idx = ((tl.cast(packed_idx_bias, index_dtype) * bias_b_s) +
                                     (offs_m[:, None] * bias_r_s) +
                                     (offs_d[None, :] * bias_c_s))
                     blk_bias = tl.load(attention_bias + blk_bias_idx)
@@ -999,14 +999,14 @@ def flash_attention_kernel_bwd_dq(q, q_b_s, q_r_s, q_c_s,
             # dp = sum_h dO_h @ V_h^T
             dp = tl.zeros([TRITON_BLOCK_SIZE, TRITON_BLOCK_SIZE], dtype=tl.float32)
             for h in range(n_head_blocks_v):
-                rev_idx_spa_o_h = tl.cast(tl.load(r_lut_o + (pid_bat * s_l_o_b_s + pid_q_seq * s_l_o_r_s + h * s_l_o_c_s)), tl.int32)
-                rev_idx_spa_v_h = tl.cast(tl.load(r_lut_v + (pid_bat * s_l_v_b_s + tl.cast(k_seq_block, index_dtype) * s_l_v_r_s + h * s_l_v_c_s)), tl.int32)
-                if rev_idx_spa_o_h >= 0 and rev_idx_spa_v_h >= 0:
-                    blk_do_idx = ((tl.cast(rev_idx_spa_o_h, index_dtype) * do_b_s) +
+                packed_idx_o_h = tl.cast(tl.load(pidx_o + (pid_bat * s_l_o_b_s + pid_q_seq * s_l_o_r_s + h * s_l_o_c_s)), tl.int32)
+                packed_idx_v_h = tl.cast(tl.load(pidx_v + (pid_bat * s_l_v_b_s + tl.cast(k_seq_block, index_dtype) * s_l_v_r_s + h * s_l_v_c_s)), tl.int32)
+                if packed_idx_o_h >= 0 and packed_idx_v_h >= 0:
+                    blk_do_idx = ((tl.cast(packed_idx_o_h, index_dtype) * do_b_s) +
                                   (offs_m[:, None] * do_r_s) +
                                   (offs_d[None, :] * do_c_s))
                     blk_do = tl.load(do + blk_do_idx, mask=((blk_do_idx >= 0) & (blk_do_idx < tl.cast(total_o_blocks, index_dtype) * do_b_s)), other=0)
-                    blk_v_idx = ((tl.cast(rev_idx_spa_v_h, index_dtype) * v_b_s) +
+                    blk_v_idx = ((tl.cast(packed_idx_v_h, index_dtype) * v_b_s) +
                                  (offs_m[:, None] * v_r_s) +
                                  (offs_d[None, :] * v_c_s))
                     blk_v = tl.load(v + blk_v_idx, mask=((blk_v_idx >= 0) & (blk_v_idx < tl.cast(total_v_blocks, index_dtype) * v_b_s)), other=0)
@@ -1017,14 +1017,14 @@ def flash_attention_kernel_bwd_dq(q, q_b_s, q_r_s, q_c_s,
 
             # dQ += ds @ K * scale
             for h in range(n_head_blocks_qk):
-                rev_idx_spa_q_h = tl.cast(tl.load(r_lut_q + (pid_bat * s_l_q_b_s + pid_q_seq * s_l_q_r_s + h * s_l_q_c_s)), tl.int32)
-                rev_idx_spa_k_h = tl.cast(tl.load(r_lut_k + (pid_bat * s_l_k_b_s + tl.cast(k_seq_block, index_dtype) * s_l_k_r_s + h * s_l_k_c_s)), tl.int32)
-                if rev_idx_spa_q_h >= 0 and rev_idx_spa_k_h >= 0:
-                    blk_k_idx = ((tl.cast(rev_idx_spa_k_h, index_dtype) * k_b_s) +
+                packed_idx_q_h = tl.cast(tl.load(pidx_q + (pid_bat * s_l_q_b_s + pid_q_seq * s_l_q_r_s + h * s_l_q_c_s)), tl.int32)
+                packed_idx_k_h = tl.cast(tl.load(pidx_k + (pid_bat * s_l_k_b_s + tl.cast(k_seq_block, index_dtype) * s_l_k_r_s + h * s_l_k_c_s)), tl.int32)
+                if packed_idx_q_h >= 0 and packed_idx_k_h >= 0:
+                    blk_k_idx = ((tl.cast(packed_idx_k_h, index_dtype) * k_b_s) +
                                  (offs_m[:, None] * k_r_s) +
                                  (offs_d[None, :] * k_c_s))
                     blk_k = tl.load(k + blk_k_idx, mask=((blk_k_idx >= 0) & (blk_k_idx < tl.cast(total_k_blocks, index_dtype) * k_b_s)), other=0)
-                    blk_dq_idx = ((tl.cast(rev_idx_spa_q_h, index_dtype) * q_b_s) +
+                    blk_dq_idx = ((tl.cast(packed_idx_q_h, index_dtype) * q_b_s) +
                                   (offs_m[:, None] * q_r_s) +
                                   (offs_d[None, :] * q_c_s))
                     blk_dq = tl.cast(tl.load(dq + blk_dq_idx, mask=((blk_dq_idx >= 0) & (blk_dq_idx < tl.cast(total_q_blocks, index_dtype) * q_b_s)), other=0), tl.float32)
@@ -1032,7 +1032,7 @@ def flash_attention_kernel_bwd_dq(q, q_b_s, q_r_s, q_c_s,
                     tl.store(dq + blk_dq_idx, tl.cast(blk_dq, dq.dtype.element_ty))
 
 
-def flash_attention_build_lut(attention_layout: Tensor,
+def flash_attention_build_layout_cache(attention_layout: Tensor,
                               sparsity_layout_q: Tensor = None,
                               sparsity_layout_k: Tensor = None,
                               sparsity_layout_v: Tensor = None,
@@ -1041,8 +1041,8 @@ def flash_attention_build_lut(attention_layout: Tensor,
                               n_head_blocks: int = None,
                               sparsity_layout_o: Tensor = None,
                               n_head_blocks_v: int = None,
-                              lut: dict = None) -> dict:
-    """Builds the look-up tables for block-sparse flash attention.
+                              layout_cache: dict = None) -> dict:
+    """Builds the layout cache data for block-sparse flash attention.
 
     Args:
         attention_layout (Tensor): Block attention pattern ``(n_batches, n_seq_blocks_q, n_seq_blocks_k)``.
@@ -1054,14 +1054,14 @@ def flash_attention_build_lut(attention_layout: Tensor,
         n_head_blocks (int, optional): Number of Q/K head dimension blocks (default ``None``).
         sparsity_layout_o (Tensor, optional): Output sparsity layout (default ``None``).
         n_head_blocks_v (int, optional): Number of V/output head dimension blocks (default ``None``).
-        lut (dict, optional): Existing look-up table dictionary to extend (default ``None``).
+        layout_cache (dict, optional): Existing layout cache dictionary to extend (default ``None``).
 
     Returns:
-        dict: A dictionary containing the look-up tables for the operation.
+        dict: A dictionary containing the layout cache data for the operation.
 
     """
-    if lut is None:
-        lut = dict()
+    if layout_cache is None:
+        layout_cache = dict()
 
     n_batches = attention_layout.shape[0]
     if n_seq_blocks_q is None:
@@ -1069,47 +1069,47 @@ def flash_attention_build_lut(attention_layout: Tensor,
     if n_seq_blocks_k is None:
         n_seq_blocks_k = attention_layout.shape[2]
 
-    if "attention_lut" not in lut:
-        attention_lut, attention_offsets, max_kv_blocks = _build_attention_lut(
+    if "key_indices" not in layout_cache:
+        key_indices, key_offsets, max_keys_per_query = _build_segmented_indices(
             attention_layout, n_batches, n_seq_blocks_q, n_seq_blocks_k)
-        lut["attention_lut"] = attention_lut
-        lut["attention_offsets"] = attention_offsets
-        lut["max_kv_blocks"] = max_kv_blocks
+        layout_cache["key_indices"] = key_indices
+        layout_cache["key_offsets"] = key_offsets
+        layout_cache["max_keys_per_query"] = max_keys_per_query
 
-    if "reverse_attention_lut" not in lut:
+    if "query_indices" not in layout_cache:
         attention_layout_t = attention_layout.transpose(1, 2).contiguous()
-        reverse_attention_lut, reverse_attention_offsets, max_q_per_k = _build_attention_lut(
+        query_indices, query_offsets, max_queries_per_key = _build_segmented_indices(
             attention_layout_t, n_batches, n_seq_blocks_k, n_seq_blocks_q)
-        lut["reverse_attention_lut"] = reverse_attention_lut
-        lut["reverse_attention_offsets"] = reverse_attention_offsets
-        lut["max_q_per_k"] = max_q_per_k
+        layout_cache["query_indices"] = query_indices
+        layout_cache["query_offsets"] = query_offsets
+        layout_cache["max_queries_per_key"] = max_queries_per_key
 
-    if sparsity_layout_q is not None and "sparsity_reverse_lut_q" not in lut:
-        lut["sparsity_reverse_lut_q"] = build_reverse_lut(sparsity_layout_q)
-        lut["n_sparse_blocks_q"] = int(sparsity_layout_q.sum().item())
+    if sparsity_layout_q is not None and "packed_indices_q" not in layout_cache:
+        layout_cache["packed_indices_q"] = build_packed_indices(sparsity_layout_q)
+        layout_cache["n_sparse_blocks_q"] = int(sparsity_layout_q.sum().item())
 
-    if sparsity_layout_k is not None and "sparsity_reverse_lut_k" not in lut:
-        lut["sparsity_reverse_lut_k"] = build_reverse_lut(sparsity_layout_k)
+    if sparsity_layout_k is not None and "packed_indices_k" not in layout_cache:
+        layout_cache["packed_indices_k"] = build_packed_indices(sparsity_layout_k)
 
-    if sparsity_layout_v is not None and "sparsity_reverse_lut_v" not in lut:
-        lut["sparsity_reverse_lut_v"] = build_reverse_lut(sparsity_layout_v)
+    if sparsity_layout_v is not None and "packed_indices_v" not in layout_cache:
+        layout_cache["packed_indices_v"] = build_packed_indices(sparsity_layout_v)
 
-    if "sparsity_reverse_lut_o" not in lut:
+    if "packed_indices_o" not in layout_cache:
         if sparsity_layout_o is not None:
-            lut["sparsity_reverse_lut_o"] = build_reverse_lut(sparsity_layout_o)
-            lut["n_sparse_blocks_o"] = int(sparsity_layout_o.sum().item())
+            layout_cache["packed_indices_o"] = build_packed_indices(sparsity_layout_o)
+            layout_cache["n_sparse_blocks_o"] = int(sparsity_layout_o.sum().item())
         elif sparsity_layout_q is not None and (n_head_blocks_v is None or n_head_blocks_v == sparsity_layout_q.size(2)):
-            lut["sparsity_reverse_lut_o"] = lut["sparsity_reverse_lut_q"]
-            lut["n_sparse_blocks_o"] = lut["n_sparse_blocks_q"]
+            layout_cache["packed_indices_o"] = layout_cache["packed_indices_q"]
+            layout_cache["n_sparse_blocks_o"] = layout_cache["n_sparse_blocks_q"]
 
-    lut_tensors = [v for v in lut.values() if isinstance(v, Tensor)]
-    if lut_tensors:
-        validate_contiguous(*lut_tensors)
+    layout_cache_tensors = [v for v in layout_cache.values() if isinstance(v, Tensor)]
+    if layout_cache_tensors:
+        validate_contiguous(*layout_cache_tensors)
 
-    return lut
+    return layout_cache
 
 
-def _build_attention_lut(attention_layout: Tensor, n_batches: int,
+def _build_segmented_indices(attention_layout: Tensor, n_batches: int,
                          n_blocks_row: int, n_blocks_col: int) -> tuple[Tensor, Tensor, int]:
     device = attention_layout.device
 
@@ -1118,13 +1118,13 @@ def _build_attention_lut(attention_layout: Tensor, n_batches: int,
 
     if max_blocks_per_row == 0:
         offsets = torch.zeros(n_batches * n_blocks_row + 1, dtype=torch.int32, device=device)
-        attention_lut = torch.empty(0, dtype=torch.int32, device=device)
-        return attention_lut, offsets, 1
+        key_indices = torch.empty(0, dtype=torch.int32, device=device)
+        return key_indices, offsets, 1
 
     offsets = torch.zeros(n_batches * n_blocks_row + 1, dtype=torch.int32, device=device)
     offsets[1:] = counts.cumsum(0).to(torch.int32)
 
     indices = attention_layout.reshape(n_batches * n_blocks_row, n_blocks_col).nonzero(as_tuple=False)
-    attention_lut = indices[:, 1].to(torch.int32)
+    key_indices = indices[:, 1].to(torch.int32)
 
-    return attention_lut, offsets, max_blocks_per_row
+    return key_indices, offsets, max_blocks_per_row
