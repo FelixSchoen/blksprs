@@ -4,34 +4,32 @@ from torch._library import triton_op
 
 from blksprs.ops.flow import flow_pull_forward
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import build_packed_indices
+from blksprs.utils.tools import as_base_tensor, build_layout_indices, build_packed_indices, \
+    prepare_layout_cache, finalize_layout_cache
 from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_device, \
-    validate_sparsity, validate_sparsity_block_size, ensure_contiguous
+    validate_sparsity, validate_sparsity_block_size, ensure_contiguous, validate_dtype_supported
 
 
 @torch.amp.custom_fwd(device_type="cuda")
 def transpose(x: BlksprsTensor, sparsity_layout: Tensor,
-              sparsity_block_size: int, layout_cache: dict = None) -> (BlksprsTensor, Tensor):
+              sparsity_block_size: int, layout_cache: dict | None = None) -> tuple[BlksprsTensor, Tensor]:
     """Transposes a block-sparse tensor in compressed form.
 
-    Note:
-         Returns the transposed tensor and the sparsity layout of the transposed tensor.
-
     Args:
-        x (BlksprsTensor): A block-sparse tensor in compressed form.
-        sparsity_layout (Tensor): The sparsity layout of the block-sparse tensor.
+        x (BlksprsTensor): The compressed input tensor.
+        sparsity_layout (Tensor): The sparsity layout of ``x``.
         sparsity_block_size (int): The size of the sparsity blocks.
-        layout_cache (dict, optional): A dictionary containing the layout cache data for the operation (default ``None``).
+        layout_cache (dict, optional): Reusable layout metadata cache (default ``None``).
 
     Returns:
-        BlksprsTensor: The transposed block-sparse tensor in compressed form.
-        Tensor: The sparsity layout of the transposed tensor.
+        tuple[BlksprsTensor, Tensor]: The transposed tensor in compressed form and its sparsity layout.
 
     """
     x = ensure_contiguous(x)
 
     validate_dimensions(x)
     validate_contiguous(x)
+    validate_dtype_supported(x)
     validate_device(x)
     validate_sparsity(sparsity_block_size, (x, sparsity_layout))
     validate_sparsity_block_size(sparsity_block_size, x)
@@ -54,6 +52,7 @@ def transpose_forward(x: Tensor, sparsity_layout_o: Tensor,
 
 
 def transpose_wrapper_backward(ctx, grad_output):
+    grad_output = grad_output.contiguous()
     sparsity_layout = ctx.saved_tensors[0]
     sparsity_block_size = ctx.sparsity_block_size
 
@@ -61,16 +60,18 @@ def transpose_wrapper_backward(ctx, grad_output):
         0], None, None, None, None, None
 
 
-def transpose_build_layout_cache(layout_cache: dict, sparsity_layout: Tensor):
-    if layout_cache is None:
-        layout_cache = dict()
+def transpose_build_layout_cache(layout_cache: dict | None, sparsity_layout: Tensor):
+    layout_cache = prepare_layout_cache(layout_cache, "transpose", sparsity_layout)
 
     if "sparsity_layout_t" not in layout_cache:
-        sparsity_layout_t = sparsity_layout.transpose(-1, -2).contiguous()
+        sparsity_layout_t = as_base_tensor(
+            sparsity_layout.transpose(-1, -2).contiguous())
+        if sparsity_layout_t.data_ptr() == sparsity_layout.data_ptr():
+            sparsity_layout_t = sparsity_layout_t.clone()
         layout_cache["sparsity_layout_t"] = sparsity_layout_t
 
     if "layout_indices" not in layout_cache:
-        layout_indices = torch.nonzero(layout_cache["sparsity_layout_t"]).contiguous()
+        layout_indices = build_layout_indices(layout_cache["sparsity_layout_t"])
         layout_cache["layout_indices"] = layout_indices
 
     if "packed_indices" not in layout_cache:
@@ -84,7 +85,7 @@ def transpose_build_layout_cache(layout_cache: dict, sparsity_layout: Tensor):
 
     validate_contiguous(layout_cache["sparsity_layout_t"], layout_cache["layout_indices"], layout_cache["packed_indices"])
 
-    return layout_cache
+    return finalize_layout_cache(layout_cache)
 
 
 # noinspection PyUnusedLocal

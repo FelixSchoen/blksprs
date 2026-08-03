@@ -8,29 +8,33 @@ from triton import language as tl
 
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs, prune_autotune_configs_conversion
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import stride, can_use_int32_indexing
+from blksprs.utils.tools import build_layout_indices, stride, can_use_int32_indexing
 from blksprs.utils.validation import validate_dimensions, validate_device, \
-    validate_contiguous, validate_sparsity, validate_sparsity_block_size
+    validate_contiguous, validate_sparsity, validate_sparsity_block_size, \
+    validate_sparsity_layout, validate_dtype_supported, ensure_contiguous
 
 
 @torch.amp.custom_fwd(device_type="cuda")
 def build_sparsity_layout(x: Tensor, sparsity_block_size: int) -> Tensor:
-    """Builds the sparsity layout of a dense tensor in regular form covering its sparse blocks.
+    """Builds the sparsity layout of a three-dimensional dense tensor.
 
     Args:
-        x (Tensor): A block-sparse (or dense) tensor in regular form.
+        x (Tensor): The dense tensor whose active blocks are represented by the layout.
         sparsity_block_size (int): The size of the sparsity blocks.
 
     Returns:
-        Tensor: The sparsity layout of the input block-sparse (or dense) tensor.
+        Tensor: A Boolean sparsity layout marking every block containing a non-zero or NaN value.
 
     """
+    x = ensure_contiguous(x)
+
     validate_dimensions(x)
     validate_contiguous(x)
     validate_device(x)
+    validate_dtype_supported(x)
     validate_sparsity_block_size(sparsity_block_size, x)
 
-    return build_sparsity_layout_operation(x, sparsity_block_size)
+    return Tensor(build_sparsity_layout_operation(x, sparsity_block_size))
 
 
 @triton_op("blksprs::build_sparsity_layout", mutates_args={})
@@ -93,7 +97,7 @@ def build_sparsity_layout_kernel(x,
     blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk, other=0)
 
     # Store sparsity layout value
-    if tl.min(blk_x) != 0 or tl.max(blk_x) != 0:
+    if tl.max(blk_x != 0):
         out_row = (pid_row * TRITON_BLOCK_SIZE) // sparsity_block_size
         out_col = (pid_col * TRITON_BLOCK_SIZE) // sparsity_block_size
         blk_o_idx = (pid_bat * o_b_s +
@@ -108,33 +112,34 @@ def build_sparsity_layout_kernel(x,
 @torch.amp.custom_fwd(device_type="cuda")
 def build_sparsity_layout_adaption(x: BlksprsTensor, sparsity_layout_from: Tensor,
                                    sparsity_block_size_from: int, sparsity_block_size_to: int) -> Tensor:
-    """Builds the sparsity layout of a block-sparse tensor in compressed form if a different sparsity block size were
-        used.
-        
+    """Builds the sparsity layout for a compressed tensor at a different block size.
+
     Args:
-        x (BlksprsTensor): A block-sparse tensor in compressed form.
-        sparsity_layout_from (Tensor): The sparsity layout of the input block-sparse tensor.
-        sparsity_block_size_from (int): The size of the sparsity blocks of the input tensor.
-        sparsity_block_size_to (int): The desired size of the sparsity blocks for the resulting layout.
+        x (BlksprsTensor): The compressed input tensor.
+        sparsity_layout_from (Tensor): The sparsity layout of ``x``.
+        sparsity_block_size_from (int): The current size of the sparsity blocks.
+        sparsity_block_size_to (int): The desired size of the sparsity blocks.
 
     Returns:
-        Tensor: The sparsity layout in regular form using the new sparsity block size of the input block-sparse tensor
-            in compressed form.
-    
+        Tensor: The sparsity layout of ``x`` at the target block size.
+
     """
+    x = ensure_contiguous(x)
+
     validate_dimensions(x)
     validate_contiguous(x, sparsity_layout_from)
+    validate_dtype_supported(x)
     validate_device(x)
     validate_sparsity(sparsity_block_size_from, (x, sparsity_layout_from))
     validate_sparsity_block_size(sparsity_block_size_from, x)
     validate_sparsity_block_size(sparsity_block_size_to)
 
-    layout_indices = torch.nonzero(sparsity_layout_from).contiguous()
+    layout_indices = build_layout_indices(sparsity_layout_from)
 
     validate_contiguous(sparsity_layout_from, layout_indices)
 
-    return build_sparsity_layout_adaption_operation(x, sparsity_layout_from, layout_indices,
-                                                    sparsity_block_size_from, sparsity_block_size_to)
+    return Tensor(build_sparsity_layout_adaption_operation(
+        x, sparsity_layout_from, layout_indices, sparsity_block_size_from, sparsity_block_size_to))
 
 
 @triton_op("blksprs::build_sparsity_layout_adaption", mutates_args={})
@@ -222,7 +227,7 @@ def build_sparsity_layout_adaption_kernel(x,
     blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk, other=0)
 
     # Store sparsity layout value
-    if tl.min(blk_x) != 0 or tl.max(blk_x) != 0:
+    if tl.max(blk_x != 0):
         out_row = ((pid_row * TRITON_BLOCK_SIZE + spa_row * sparsity_block_size_from)
                    // sparsity_block_size_to)
         out_col = ((pid_col * TRITON_BLOCK_SIZE + spa_col * sparsity_block_size_from)
@@ -238,73 +243,95 @@ def build_sparsity_layout_adaption_kernel(x,
 
 @torch.amp.custom_fwd(device_type="cuda")
 def build_sparsity_layout_matmul(sparsity_layout_x: Tensor, sparsity_layout_y: Tensor) -> Tensor:
-    """Builds the precise sparsity layout of the result of a matrix multiplication between the two input tensors.
+    """Builds the exact structural layout product for matrix multiplication.
 
     Args:
-        sparsity_layout_x (Tensor): The sparsity layout of the first block-sparse tensor.
-        sparsity_layout_y (Tensor): The sparsity layout of the second block-sparse tensor.
+        sparsity_layout_x (Tensor): The sparsity layout of the left operand.
+        sparsity_layout_y (Tensor): The sparsity layout of the right operand.
 
     Returns:
-        Tensor: The precise sparsity layout of the result of a matrix multiplication between the two input tensors.
+        Tensor: A layout marking blocks with at least one structurally active multiplication path.
 
     """
-    return torch.matmul(sparsity_layout_x.to(torch.float), sparsity_layout_y.to(torch.float)).to(torch.bool)
+    _validate_sparsity_layout_matmul_inputs(sparsity_layout_x, sparsity_layout_y)
+    return Tensor(torch.matmul(
+        sparsity_layout_x.to(torch.float), sparsity_layout_y.to(torch.float)).to(torch.bool))
 
 
 @torch.amp.custom_fwd(device_type="cuda")
-def build_sparsity_layout_matmul_fast(sparsity_layout_x: Tensor, sparsity_layout_y: Tensor):
-    """Builds the approximate sparsity layout of the result of a matrix multiplication between the two input tensors.
+def build_sparsity_layout_matmul_fast(sparsity_layout_x: Tensor, sparsity_layout_y: Tensor) -> Tensor:
+    """Builds a fast conservative layout approximation for matrix multiplication.
 
     Note:
-        This function is faster than the ``build_sparsity_layout_matmul`` function due to the fact that it only checks
-            whether at least one of the blocks in either of the row/column vectors participating in the matmul is
-            non-sparse. A block in the output layout is marked as non-sparse only if row ``i`` of the first layout and
-            column ``j`` of the second layout both contain at least one non-sparse block. The resulting sparsity layout
-            may thus overestimate the actual sparsity of the result, but provides a tighter bound than a simple union.
+        A block at ``(i, j)`` is active when row ``i`` of the left layout and column ``j`` of the right layout each
+        contain at least one active block. The active blocks do not need to share an inner-dimension position, so the
+        result may contain blocks that the exact structural product would omit.
 
     Args:
-        sparsity_layout_x (Tensor): The sparsity layout of the first block-sparse tensor.
-        sparsity_layout_y (Tensor): The sparsity layout of the second block-sparse tensor.
+        sparsity_layout_x (Tensor): The sparsity layout of the left operand.
+        sparsity_layout_y (Tensor): The sparsity layout of the right operand.
 
     Returns:
-        Tensor: The approximate sparsity layout of the result of a matrix multiplication between the two input tensors.
+        Tensor: A conservative approximation of the output sparsity layout.
 
     """
-    sparsity_layout_x_slice = torch.max(sparsity_layout_x, dim=-1).values.unsqueeze(-1)
-    sparsity_layout_y_slice = torch.max(sparsity_layout_y, dim=-2).values.unsqueeze(1)
+    _validate_sparsity_layout_matmul_inputs(sparsity_layout_x, sparsity_layout_y)
+    sparsity_layout_x_slice = torch.any(sparsity_layout_x, dim=-1, keepdim=True)
+    sparsity_layout_y_slice = torch.any(sparsity_layout_y, dim=-2).unsqueeze(1)
 
-    return torch.logical_and(sparsity_layout_x_slice, sparsity_layout_y_slice)
+    return Tensor(torch.logical_and(sparsity_layout_x_slice, sparsity_layout_y_slice))
 
 
 @torch.amp.custom_fwd(device_type="cuda")
 def build_sparsity_layout_matmul_outer(sparsity_layout_x: Tensor, sparsity_layout_y: Tensor) -> Tensor:
-    """Builds the outer-bound sparsity layout of the result of a matrix multiplication between the two input tensors.
+    """Builds an outer layout approximation for matrix multiplication.
 
-    This function computes a conservative (outer) approximation of the matmul sparsity layout. A block in the output
-    layout is marked as non-sparse if row ``i`` of the first layout OR column ``j`` of the second layout contains at
-    least one non-sparse block. This provides a looser but safer bound than ``build_sparsity_layout_matmul_fast``,
-    useful when the output may have contributions from operations beyond the matmul itself (e.g., adding a bias term).
+    A block at ``(i, j)`` is active when row ``i`` of the left layout or column ``j`` of the right layout contains an
+    active block. This is useful when operations beyond the matrix multiplication, such as bias addition, may populate
+    additional output blocks.
 
     Note:
-        This function is faster than ``build_sparsity_layout_matmul`` but provides a looser approximation than
-        ``build_sparsity_layout_matmul_fast``. The resulting sparsity layout will overestimate the actual sparsity
-        of the result more than the "fast" variant, but ensures all potentially non-zero blocks are included.
+        This approximation is looser than :func:`build_sparsity_layout_matmul_fast` and may therefore include more
+        blocks than the exact structural product.
 
     Args:
-        sparsity_layout_x (Tensor): The sparsity layout of the first block-sparse tensor.
-        sparsity_layout_y (Tensor): The sparsity layout of the second block-sparse tensor.
+        sparsity_layout_x (Tensor): The sparsity layout of the left operand.
+        sparsity_layout_y (Tensor): The sparsity layout of the right operand.
 
     Returns:
-        Tensor: The outer-bound approximate sparsity layout of the matrix multiplication result.
+        Tensor: An outer approximation of the output sparsity layout.
 
     """
-    sparsity_layout_x_slice = torch.max(sparsity_layout_x, dim=-1).values.unsqueeze(-1)
-    sparsity_layout_y_slice = torch.max(sparsity_layout_y, dim=-2).values.unsqueeze(1)
+    _validate_sparsity_layout_matmul_inputs(sparsity_layout_x, sparsity_layout_y)
+    sparsity_layout_x_slice = torch.any(sparsity_layout_x, dim=-1, keepdim=True)
+    sparsity_layout_y_slice = torch.any(sparsity_layout_y, dim=-2).unsqueeze(1)
 
-    return torch.logical_or(sparsity_layout_x_slice, sparsity_layout_y_slice)
+    return Tensor(torch.logical_or(sparsity_layout_x_slice, sparsity_layout_y_slice))
+
+
+def _validate_sparsity_layout_matmul_inputs(sparsity_layout_x: Tensor, sparsity_layout_y: Tensor) -> None:
+    validate_sparsity_layout(sparsity_layout_x, sparsity_layout_y)
+    validate_device(sparsity_layout_x, sparsity_layout_y)
+
+    if sparsity_layout_x.size(0) != sparsity_layout_y.size(0):
+        raise ValueError("Batch dimensions of sparsity layouts must match")
+    if sparsity_layout_x.size(-1) != sparsity_layout_y.size(-2):
+        raise ValueError("Inner dimensions of sparsity layouts must match")
 
 
 def build_sparsity_layout_full(x: Tensor, sparsity_block_size: int) -> Tensor:
+    """Builds a fully populated sparsity layout for a dense tensor.
+
+    Args:
+        x (Tensor): A three-dimensional dense tensor.
+        sparsity_block_size (int): The size of the sparsity blocks.
+
+    Returns:
+        Tensor: A boolean sparsity layout in which every block is active.
+
+    """
+    validate_dimensions(x)
+    validate_device(x)
     validate_sparsity_block_size(sparsity_block_size, x)
     return torch.ones(size=(x.size(0), x.size(1) // sparsity_block_size, x.size(2) // sparsity_block_size),
                       dtype=torch.bool, device=x.device)

@@ -7,54 +7,71 @@ from triton import language as tl
 from blksprs.layouting.sparsity_layout import build_sparsity_layout_adaption
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs, prune_autotune_configs_conversion
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import stride, build_packed_indices, can_use_int32_indexing
+from blksprs.utils.tools import as_base_tensor, build_layout_indices, stride, build_packed_indices, \
+    can_use_int32_indexing, prepare_layout_cache, finalize_layout_cache
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
-    validate_sparsity, validate_sparsity_block_size, validate_sparsity_dense, ensure_contiguous
+    validate_sparsity, validate_sparsity_block_size, validate_sparsity_dense, ensure_contiguous, \
+    validate_sparsity_layout, validate_shape, validate_dtype_supported
 
 
-def to_blksprs(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int) -> BlksprsTensor:
-    """Wrapper for :func:`to_sparse`.
+def to_blksprs(x: Tensor, sparsity_layout: Tensor, sparsity_block_size: int,
+               layout_cache: dict | None = None) -> BlksprsTensor:
+    """Converts a three-dimensional dense tensor to compressed form.
+
+    This is an alias of :func:`to_sparse`.
+
+    Args:
+        x (Tensor): The dense input tensor.
+        sparsity_layout (Tensor): The sparsity layout of ``x``.
+        sparsity_block_size (int): The size of the sparsity blocks.
+        layout_cache (dict, optional): Reusable layout metadata cache (default ``None``).
+
+    Returns:
+        BlksprsTensor: ``x`` in compressed form.
 
     """
-    return to_sparse(x, sparsity_layout, sparsity_block_size)
+    return to_sparse(x, sparsity_layout, sparsity_block_size, layout_cache=layout_cache)
 
 
 def to_sparse_shaped(x: Tensor,
                      sparsity_layout: Tensor,
                      sparsity_block_size: int,
-                     layout_cache: dict = None) -> BlksprsTensor:
-    """Converts an already block-shaped dense tensor to compressed form.
+                     layout_cache: dict | None = None) -> BlksprsTensor:
+    """Converts a three-dimensional dense tensor to compressed form.
 
-    This is a named convenience wrapper around :func:`to_sparse` for call sites
-    that already operate on ``(B, rows, cols)`` tensors and therefore do not
-    need a preceding ``do_shape_blocksparse`` step.
+    This convenience alias of :func:`to_sparse` makes it explicit that ``x`` already has shape ``(B, rows, cols)`` and
+    does not need a preceding :func:`blksprs.utils.do_shape_blocksparse` call.
 
     Args:
-        x (Tensor): Dense tensor in block-shaped form.
-        sparsity_layout (Tensor): Sparsity layout for ``x``.
-        sparsity_block_size (int): Size of the sparsity blocks.
-        layout_cache (dict, optional): Optional conversion layout cache.
+        x (Tensor): The dense input tensor.
+        sparsity_layout (Tensor): The sparsity layout of ``x``.
+        sparsity_block_size (int): The size of the sparsity blocks.
+        layout_cache (dict, optional): Reusable layout metadata cache (default ``None``).
 
     Returns:
-        BlksprsTensor: ``x`` converted to compressed block-sparse form.
+        BlksprsTensor: ``x`` in compressed form.
+
     """
     return to_sparse(x, sparsity_layout, sparsity_block_size, layout_cache=layout_cache)
 
 
-def is_row_striped_layout(sparsity_layout: Tensor, layout_cache: dict = None) -> bool:
-    """Check whether a sparsity layout is dense along columns for active rows.
+def is_row_striped_layout(sparsity_layout: Tensor, layout_cache: dict | None = None) -> bool:
+    """Checks whether a sparsity layout is dense along columns for active rows.
 
     A row-striped layout marks either all blocks or no blocks in a given row.
     This pattern appears in sequence-feature tensors where only selected
     sequence rows are active while the feature dimension stays dense.
 
     Args:
-        sparsity_layout (Tensor): Layout to inspect.
-        layout_cache (dict, optional): Optional mutable cache for derived row metadata.
+        sparsity_layout (Tensor): The sparsity layout to inspect.
+        layout_cache (dict, optional): Reusable layout metadata cache (default ``None``).
 
     Returns:
         bool: ``True`` if the layout is row-striped, ``False`` otherwise.
+
     """
+    validate_sparsity_layout(sparsity_layout)
+
     if layout_cache is None:
         layout_cache = dict()
 
@@ -65,8 +82,8 @@ def is_row_striped_layout(sparsity_layout: Tensor, layout_cache: dict = None) ->
 def to_sparse_row_striped(x: Tensor,
                           sparsity_layout: Tensor,
                           sparsity_block_size: int,
-                          layout_cache: dict = None) -> BlksprsTensor:
-    """Convert a block-shaped dense tensor with row-striped sparsity to compressed form.
+                          layout_cache: dict | None = None) -> BlksprsTensor:
+    """Converts a three-dimensional dense tensor with row-striped sparsity to compressed form.
 
     This specialised path is faster than :func:`to_sparse` when the sparsity
     layout activates complete feature rows, because it can gather contiguous
@@ -74,19 +91,21 @@ def to_sparse_row_striped(x: Tensor,
     kernel.
 
     Args:
-        x (Tensor): Dense tensor in block-shaped form.
-        sparsity_layout (Tensor): Row-striped sparsity layout for ``x``.
-        sparsity_block_size (int): Size of the sparsity blocks.
-        layout_cache (dict, optional): Optional conversion layout cache.
+        x (Tensor): The dense input tensor.
+        sparsity_layout (Tensor): The row-striped sparsity layout of ``x``.
+        sparsity_block_size (int): The size of the sparsity blocks.
+        layout_cache (dict, optional): Reusable layout metadata cache (default ``None``).
 
     Returns:
-        BlksprsTensor: ``x`` converted to compressed block-sparse form.
+        BlksprsTensor: ``x`` in compressed form.
+
     """
     x = ensure_contiguous(x)
 
     validate_dimensions(x)
     validate_contiguous(x)
     validate_device(x)
+    validate_dtype_supported(x)
     validate_sparsity_dense(sparsity_block_size, (x, sparsity_layout))
     validate_sparsity_block_size(sparsity_block_size, x)
 
@@ -97,11 +116,12 @@ def to_sparse_row_striped(x: Tensor,
             "to_sparse_row_striped requires a row-striped sparsity layout.")
 
     if layout_cache["n_sparse_blocks"] == 0:
-        return BlksprsTensor.wrap(torch.empty(
-            (0, sparsity_block_size, sparsity_block_size),
-            dtype=x.dtype,
-            device=x.device,
-        ))
+        # Keep the empty result connected to ``x``. Constructing an unrelated
+        # empty tensor would drop autograd for valid all-sparse and
+        # zero-dimensional layouts.
+        output = x.reshape(-1)[:0].reshape(
+            0, sparsity_block_size, sparsity_block_size)
+        return BlksprsTensor.wrap(output)
 
     if layout_cache["n_active_row_blocks"] == layout_cache["n_total_row_blocks"]:
         x_blocks = (
@@ -137,18 +157,17 @@ def to_sparse_row_striped(x: Tensor,
 
 @torch.amp.custom_fwd(device_type="cuda")
 def to_sparse(x: Tensor, sparsity_layout: Tensor,
-              sparsity_block_size: int, layout_cache: dict = None) -> BlksprsTensor:
-    """Converts a block-sparse tensor in regular form to a block-sparse tensor in compressed form based on the given
-    sparsity layout.
+              sparsity_block_size: int, layout_cache: dict | None = None) -> BlksprsTensor:
+    """Converts a three-dimensional dense tensor to compressed block-sparse form.
 
-        Args:
-        x (Tensor): A block-sparse tensor in regular form.
-        sparsity_layout (Tensor): The sparsity layout of the block-sparse tensor.
+    Args:
+        x (Tensor): The dense input tensor.
+        sparsity_layout (Tensor): The sparsity layout of ``x``.
         sparsity_block_size (int): The size of the sparsity blocks.
-        layout_cache (dict, optional): A dictionary containing the layout cache data for the operation (default ``None``).
+        layout_cache (dict, optional): Reusable layout metadata cache (default ``None``).
 
     Returns:
-        BlksprsTensor: The block-sparse tensor converted to compressed form.
+        BlksprsTensor: ``x`` in compressed form.
 
     """
     x = ensure_contiguous(x)
@@ -156,6 +175,7 @@ def to_sparse(x: Tensor, sparsity_layout: Tensor,
     validate_dimensions(x)
     validate_contiguous(x)
     validate_device(x)
+    validate_dtype_supported(x)
     validate_sparsity_dense(sparsity_block_size, (x, sparsity_layout))
     validate_sparsity_block_size(sparsity_block_size, x)
 
@@ -200,6 +220,7 @@ def to_sparse_forward(x: Tensor, _: Tensor,
 
 
 def to_sparse_wrapper_backward(ctx, grad_output):
+    grad_output = grad_output.contiguous()
     sparsity_layout = ctx.saved_tensors[0]
     sparsity_block_size = ctx.sparsity_block_size
 
@@ -255,21 +276,20 @@ def to_sparse_kernel(x,
     tl.store(o + blk_o_idx, blk_d, mask=blk_o_msk)
 
 
-def to_sparse_build_layout_cache(layout_cache: dict, sparsity_layout: Tensor):
-    if layout_cache is None:
-        layout_cache = dict()
+def to_sparse_build_layout_cache(layout_cache: dict | None, sparsity_layout: Tensor):
+    layout_cache = prepare_layout_cache(layout_cache, "to_sparse", sparsity_layout)
 
     if "layout_indices" not in layout_cache:
-        layout_indices = torch.nonzero(sparsity_layout).contiguous()
+        layout_indices = build_layout_indices(sparsity_layout)
         layout_cache["layout_indices"] = layout_indices
 
     if "n_sparse_blocks" not in layout_cache:
-        n_sparse_blocks = int(sparsity_layout.sum().item())
+        n_sparse_blocks = int(sparsity_layout.to(torch.int64).sum().item())
         layout_cache["n_sparse_blocks"] = n_sparse_blocks
 
     validate_contiguous(sparsity_layout, layout_cache["layout_indices"])
 
-    return layout_cache
+    return finalize_layout_cache(layout_cache)
 
 
 # noinspection PyUnusedLocal
@@ -285,8 +305,20 @@ to_sparse_forward.register_autograd(
 
 
 def from_blksprs(x: BlksprsTensor, sparsity_layout: Tensor,
-                 sparsity_block_size: int, fill_value: float = 0, layout_cache: dict = None) -> Tensor:
-    """Wrapper for :func:`to_dense`.
+                 sparsity_block_size: int, fill_value: float = 0, layout_cache: dict | None = None) -> Tensor:
+    """Converts a compressed block-sparse tensor to three-dimensional dense form.
+
+    This is an alias of :func:`to_dense`.
+
+    Args:
+        x (BlksprsTensor): The compressed input tensor.
+        sparsity_layout (Tensor): The sparsity layout of ``x``.
+        sparsity_block_size (int): The size of the sparsity blocks.
+        fill_value (float, optional): The value used for inactive blocks (default ``0``).
+        layout_cache (dict, optional): Reusable layout metadata cache (default ``None``).
+
+    Returns:
+        Tensor: ``x`` in three-dimensional dense form.
 
     """
     return to_dense(x, sparsity_layout, sparsity_block_size, fill_value=fill_value, layout_cache=layout_cache)
@@ -296,22 +328,22 @@ def to_dense_shaped(x: BlksprsTensor,
                     sparsity_layout: Tensor,
                     sparsity_block_size: int,
                     fill_value: float = 0,
-                    layout_cache: dict = None) -> Tensor:
-    """Converts a compressed tensor back to an already block-shaped dense tensor.
+                    layout_cache: dict | None = None) -> Tensor:
+    """Converts a compressed block-sparse tensor to three-dimensional dense form.
 
-    This is a named convenience wrapper around :func:`to_dense` for call sites
-    that want the dense ``(B, rows, cols)`` tensor directly and do not need an
-    ``undo_shape_blocksparse`` step afterwards.
+    This convenience alias of :func:`to_dense` makes it explicit that the result retains shape ``(B, rows, cols)`` and
+    does not need a subsequent :func:`blksprs.utils.undo_shape_blocksparse` call.
 
     Args:
-        x (BlksprsTensor): Tensor in compressed block-sparse form.
-        sparsity_layout (Tensor): Sparsity layout for ``x``.
-        sparsity_block_size (int): Size of the sparsity blocks.
-        fill_value (float): Fill value for sparse regions.
-        layout_cache (dict, optional): Optional conversion layout cache.
+        x (BlksprsTensor): The compressed input tensor.
+        sparsity_layout (Tensor): The sparsity layout of ``x``.
+        sparsity_block_size (int): The size of the sparsity blocks.
+        fill_value (float, optional): The value used for inactive blocks (default ``0``).
+        layout_cache (dict, optional): Reusable layout metadata cache (default ``None``).
 
     Returns:
-        Tensor: Dense tensor in block-shaped form.
+        Tensor: ``x`` in three-dimensional dense form.
+
     """
     return to_dense(x, sparsity_layout, sparsity_block_size, fill_value=fill_value, layout_cache=layout_cache)
 
@@ -320,26 +352,28 @@ def to_dense_row_striped(x: BlksprsTensor,
                          sparsity_layout: Tensor,
                          sparsity_block_size: int,
                          fill_value: float = 0,
-                         layout_cache: dict = None) -> Tensor:
-    """Convert a compressed row-striped tensor back to block-shaped dense form.
+                         layout_cache: dict | None = None) -> Tensor:
+    """Converts a compressed row-striped tensor to three-dimensional dense form.
 
     This is the inverse of :func:`to_sparse_row_striped`.
 
     Args:
-        x (BlksprsTensor): Tensor in compressed block-sparse form.
-        sparsity_layout (Tensor): Row-striped sparsity layout for ``x``.
-        sparsity_block_size (int): Size of the sparsity blocks.
-        fill_value (float): Fill value for sparse regions.
-        layout_cache (dict, optional): Optional conversion layout cache.
+        x (BlksprsTensor): The compressed input tensor.
+        sparsity_layout (Tensor): The row-striped sparsity layout of ``x``.
+        sparsity_block_size (int): The size of the sparsity blocks.
+        fill_value (float, optional): The value used for inactive blocks (default ``0``).
+        layout_cache (dict, optional): Reusable layout metadata cache (default ``None``).
 
     Returns:
-        Tensor: Dense tensor in block-shaped form.
+        Tensor: ``x`` in three-dimensional dense form.
+
     """
     x = ensure_contiguous(x)
 
     validate_dimensions(x)
     validate_contiguous(x, sparsity_layout)
     validate_device(x)
+    validate_dtype_supported(x)
     validate_sparsity(sparsity_block_size, (x, sparsity_layout))
     validate_sparsity_block_size(sparsity_block_size, x)
 
@@ -361,15 +395,18 @@ def to_dense_row_striped(x: BlksprsTensor,
         device=x.device,
     )
 
-    if layout_cache["n_sparse_blocks"] > 0:
-        source_rows = x.reshape(
-            layout_cache["n_active_row_blocks"],
-            sparsity_layout.size(2),
-            sparsity_block_size,
-            sparsity_block_size,
-        )
-        output_blocks_flat.index_copy_(
-            0, layout_cache["active_row_flat_indices"], source_rows)
+    # ``index_copy_`` also establishes the autograd edge for empty sources.
+    # Skipping it when no sparse blocks are active would turn the dense result
+    # into a constant and prevent callers from backpropagating through a valid
+    # empty compressed tensor.
+    source_rows = x.reshape(
+        layout_cache["n_active_row_blocks"],
+        sparsity_layout.size(2),
+        sparsity_block_size,
+        sparsity_block_size,
+    )
+    output_blocks_flat.index_copy_(
+        0, layout_cache["active_row_flat_indices"], source_rows)
 
     return (
         output_blocks_flat.reshape(
@@ -391,20 +428,18 @@ def to_dense_row_striped(x: BlksprsTensor,
 
 @torch.amp.custom_fwd(device_type="cuda")
 def to_dense(x: BlksprsTensor, sparsity_layout: Tensor,
-             sparsity_block_size: int, fill_value: float = 0, layout_cache: dict = None) -> Tensor:
-    """Converts a block-sparse tensor in compressed form to a block-sparse tensor in regular form based on the given
-        sparsity layout.
+             sparsity_block_size: int, fill_value: float = 0, layout_cache: dict | None = None) -> Tensor:
+    """Converts a compressed block-sparse tensor to three-dimensional dense form.
 
     Args:
-        x (BlksprsTensor): A block-sparse tensor in compressed form.
-        sparsity_layout (Tensor): The sparsity layout of the block-sparse tensor.
+        x (BlksprsTensor): The compressed input tensor.
+        sparsity_layout (Tensor): The sparsity layout of ``x``.
         sparsity_block_size (int): The size of the sparsity blocks.
-        fill_value (float): The value to fill the resulting dense tensor with where the block-sparse tensor is not
-            present (default ``0``).
-        layout_cache (dict, optional): A dictionary containing the layout cache data for the operation (default ``None``).
+        fill_value (float, optional): The value used for inactive blocks (default ``0``).
+        layout_cache (dict, optional): Reusable layout metadata cache (default ``None``).
 
     Returns:
-        Tensor: The block-sparse tensor converted to regular form.
+        Tensor: ``x`` in three-dimensional dense form.
 
     """
     x = ensure_contiguous(x)
@@ -412,13 +447,14 @@ def to_dense(x: BlksprsTensor, sparsity_layout: Tensor,
     validate_dimensions(x)
     validate_contiguous(x, sparsity_layout)
     validate_device(x)
+    validate_dtype_supported(x)
     validate_sparsity(sparsity_block_size, (x, sparsity_layout))
     validate_sparsity_block_size(sparsity_block_size, x)
 
     layout_cache = to_dense_build_layout_cache(layout_cache, sparsity_layout)
 
     if sparsity_layout.size(1) == 1 and sparsity_layout.size(2) == 1 and torch.all(sparsity_layout):
-        return x
+        return Tensor(x)
 
     return Tensor(to_dense_forward(x, sparsity_layout,
                                    layout_cache["packed_indices"], sparsity_block_size, fill_value))
@@ -461,6 +497,7 @@ def to_dense_forward(x: Tensor, sparsity_layout: Tensor,
 
 
 def to_dense_wrapper_backward(ctx, grad_output):
+    grad_output = grad_output.contiguous()
     sparsity_layout = ctx.saved_tensors[0]
     sparsity_block_size = ctx.sparsity_block_size
 
@@ -499,7 +536,7 @@ def to_dense_kernel(x,
     packed_idx_msk = ((packed_idx_idx >= 0) &
                        (packed_idx_idx < tl.cast(s_l_b, index_dtype) * s_l_b_s))
     packed_idx = tl.cast(tl.load(packed_indices +
-                          packed_idx_idx, mask=packed_idx_msk, other=-1), tl.int32)
+                          packed_idx_idx, mask=packed_idx_msk, other=-1), index_dtype)
 
     # If block is present commence operations
     if packed_idx >= 0:
@@ -520,24 +557,23 @@ def to_dense_kernel(x,
         tl.store(o + o_idx, blk, o_msk)
 
 
-def to_dense_build_layout_cache(layout_cache: dict, sparsity_layout: Tensor):
-    if layout_cache is None:
-        layout_cache = dict()
+def to_dense_build_layout_cache(layout_cache: dict | None, sparsity_layout: Tensor):
+    layout_cache = prepare_layout_cache(layout_cache, "to_dense", sparsity_layout)
 
     if "packed_indices" not in layout_cache:
         layout_cache["packed_indices"] = build_packed_indices(sparsity_layout)
 
     validate_contiguous(layout_cache["packed_indices"])
 
-    return layout_cache
+    return finalize_layout_cache(layout_cache)
 
 
-def row_striped_build_layout_cache(layout_cache: dict, sparsity_layout: Tensor):
-    if layout_cache is None:
-        layout_cache = dict()
+def row_striped_build_layout_cache(layout_cache: dict | None, sparsity_layout: Tensor):
+    layout_cache = prepare_layout_cache(layout_cache, "row_striped", sparsity_layout)
 
     if "active_row_mask" not in layout_cache:
-        active_row_mask = torch.all(sparsity_layout, dim=-1).contiguous()
+        active_row_mask = as_base_tensor(
+            torch.all(sparsity_layout, dim=-1).contiguous())
         layout_cache["active_row_mask"] = active_row_mask
 
     if "is_row_striped" not in layout_cache:
@@ -546,12 +582,12 @@ def row_striped_build_layout_cache(layout_cache: dict, sparsity_layout: Tensor):
         layout_cache["is_row_striped"] = bool(torch.equal(sparsity_layout, dense_rows))
 
     if not layout_cache["is_row_striped"]:
-        return layout_cache
+        return finalize_layout_cache(layout_cache)
 
     if "active_row_flat_indices" not in layout_cache:
-        active_row_flat_indices = torch.nonzero(
+        active_row_flat_indices = as_base_tensor(torch.nonzero(
             layout_cache["active_row_mask"].reshape(-1), as_tuple=False
-        ).squeeze(-1).contiguous()
+        ).squeeze(-1).contiguous())
         layout_cache["active_row_flat_indices"] = active_row_flat_indices
 
     if "n_active_row_blocks" not in layout_cache:
@@ -570,7 +606,7 @@ def row_striped_build_layout_cache(layout_cache: dict, sparsity_layout: Tensor):
     if layout_cache["n_active_row_blocks"] > 0:
         validate_contiguous(layout_cache["active_row_flat_indices"])
 
-    return layout_cache
+    return finalize_layout_cache(layout_cache)
 
 
 # noinspection PyUnusedLocal
@@ -587,20 +623,24 @@ to_dense_forward.register_autograd(
 
 @torch.amp.custom_fwd(device_type="cuda")
 def adapt_layout(x: BlksprsTensor, sparsity_layout_from: Tensor, sparsity_block_size_from: int,
-                 sparsity_block_size_to: int, sparsity_layout_to: Tensor = None) -> (BlksprsTensor, Tensor):
-    """Adapts the sparsity layout of a block-sparse tensor, resulting in a new block-sparse tensor in compressed form
-        conforming to the new sparsity layout (and sparsity block size) definition.
+                 sparsity_block_size_to: int, sparsity_layout_to: Tensor | None = None) -> tuple[BlksprsTensor, Tensor]:
+    """Converts a compressed tensor to a different sparsity layout or block size.
+
+    When the logical row or column extent is not divisible by a larger target
+    block size, the output is extended to the next complete block and the
+    trailing values are zero-padded. Gradient computation maps only the
+    original logical extent back to ``x``.
 
     Args:
-        x (BlksprsTensor): A block-sparse tensor in compressed form.
-        sparsity_layout_from (Tensor): The sparsity layout of the input block-sparse tensor.
-        sparsity_block_size_from (int): The size of the sparsity blocks of the input sparsity layout.
-        sparsity_block_size_to (int): The size of the sparsity blocks of the output sparsity layout.
-        sparsity_layout_to (Tensor): The sparsity layout of the output block-sparse tensor (default ``None``).
+        x (BlksprsTensor): The compressed input tensor.
+        sparsity_layout_from (Tensor): The sparsity layout of ``x``.
+        sparsity_block_size_from (int): The current size of the sparsity blocks.
+        sparsity_block_size_to (int): The target size of the sparsity blocks.
+        sparsity_layout_to (Tensor, optional): The target sparsity layout. When omitted, it is derived from ``x``
+            (default ``None``).
 
     Returns:
-        BlksprsTensor: The block-sparse tensor in compressed form with the adapted sparsity layout and sparsity block size.
-        Tensor: The sparsity layout of the resulting output tensor.
+        tuple[BlksprsTensor, Tensor]: The adapted compressed tensor and its sparsity layout.
 
     """
     x = ensure_contiguous(x)
@@ -608,6 +648,7 @@ def adapt_layout(x: BlksprsTensor, sparsity_layout_from: Tensor, sparsity_block_
     validate_dimensions(x)
     validate_contiguous(x, sparsity_layout_from)
     validate_device(x)
+    validate_dtype_supported(x)
     validate_sparsity(sparsity_block_size_from, (x, sparsity_layout_from))
     validate_sparsity_block_size(sparsity_block_size_from, x)
     validate_sparsity_block_size(sparsity_block_size_to)
@@ -617,8 +658,21 @@ def adapt_layout(x: BlksprsTensor, sparsity_layout_from: Tensor, sparsity_block_
     if sparsity_layout_to is None:
         sparsity_layout_to = build_sparsity_layout_adaption(x, sparsity_layout_from,
                                                             sparsity_block_size_from, sparsity_block_size_to)
+    else:
+        sparsity_layout_to = as_base_tensor(ensure_contiguous(sparsity_layout_to))
 
-    layout_indices_to = torch.nonzero(sparsity_layout_to).contiguous()
+    validate_sparsity_layout(sparsity_layout_to)
+    validate_device(sparsity_layout_to, x)
+    expected_shape = (
+        sparsity_layout_from.size(0),
+        (sparsity_layout_from.size(1) * sparsity_block_size_from + sparsity_block_size_to - 1)
+        // sparsity_block_size_to,
+        (sparsity_layout_from.size(2) * sparsity_block_size_from + sparsity_block_size_to - 1)
+        // sparsity_block_size_to,
+    )
+    validate_shape(sparsity_layout_to, expected_shape, "Target sparsity layout")
+
+    layout_indices_to = build_layout_indices(sparsity_layout_to)
 
     n_sparse_blocks_to = torch.sum(sparsity_layout_to.to(torch.int)).item()
 
@@ -685,9 +739,37 @@ def adapt_layout_forward(x: Tensor,
 
 
 def adapt_layout_wrapper_backward(ctx, grad_output):
-    x, sparsity_layout_from, sparsity_layout_to = ctx.saved_tensors
+    grad_output = grad_output.contiguous()
+    sparsity_layout_from, sparsity_layout_to = ctx.saved_tensors
     sparsity_block_size_from = ctx.sparsity_block_size_from
     sparsity_block_size_to = ctx.sparsity_block_size_to
+
+    # A coarser target block can extend the physical output beyond the source
+    # extent. The reverse adaptation therefore expects the source layout on
+    # that padded physical grid. Trailing inactive blocks retain the original
+    # compressed ordering while allowing the reverse kernel to discard the
+    # padded rows and columns correctly.
+    reverse_layout_shape = (
+        sparsity_layout_from.size(0),
+        (sparsity_layout_to.size(1) * sparsity_block_size_to + sparsity_block_size_from - 1)
+        // sparsity_block_size_from,
+        (sparsity_layout_to.size(2) * sparsity_block_size_to + sparsity_block_size_from - 1)
+        // sparsity_block_size_from,
+    )
+    padding_rows = reverse_layout_shape[1] - sparsity_layout_from.size(1)
+    padding_columns = reverse_layout_shape[2] - sparsity_layout_from.size(2)
+    if padding_rows > 0 or padding_columns > 0:
+        padded_sparsity_layout_from = torch.zeros(
+            reverse_layout_shape,
+            dtype=sparsity_layout_from.dtype,
+            device=sparsity_layout_from.device,
+        )
+        padded_sparsity_layout_from[
+            :,
+            :sparsity_layout_from.size(1),
+            :sparsity_layout_from.size(2),
+        ] = sparsity_layout_from
+        sparsity_layout_from = padded_sparsity_layout_from
 
     return adapt_layout(
         grad_output, sparsity_layout_to, sparsity_block_size_to, sparsity_block_size_from,
@@ -745,7 +827,7 @@ def adapt_layout_kernel(x,
                          (spa_col_x >= 0) &
                          (spa_col_x < tl.cast(s_l_x_c, index_dtype)))
     packed_idx_x = tl.cast(
-        tl.load(pidx_x + packed_idx_x_idx, mask=packed_idx_x_msk, other=-1), tl.int32)
+        tl.load(pidx_x + packed_idx_x_idx, mask=packed_idx_x_msk, other=-1), index_dtype)
 
     # If block is present commence operations
     if packed_idx_x >= 0:
@@ -774,10 +856,10 @@ def adapt_layout_kernel(x,
 
 # noinspection PyUnusedLocal
 def adapt_layout_setup_context(ctx, inputs, output):
-    (x, sparsity_layout_from, _, sparsity_block_size_from,
+    (_, sparsity_layout_from, _, sparsity_block_size_from,
      sparsity_layout_to, _, sparsity_block_size_to, _) = inputs
 
-    ctx.save_for_backward(x, sparsity_layout_from, sparsity_layout_to)
+    ctx.save_for_backward(sparsity_layout_from, sparsity_layout_to)
     ctx.sparsity_block_size_from = sparsity_block_size_from
     ctx.sparsity_block_size_to = sparsity_block_size_to
 

@@ -7,43 +7,43 @@ from triton import language as tl
 
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import stride, can_use_int32_indexing
+from blksprs.utils.tools import build_layout_indices, stride, can_use_int32_indexing, cast_for_autocast
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
-    validate_sparsity_layout, validate_sparsity_block_size, validate_shape, validate_divisible, ensure_contiguous
+    validate_sparsity_layout, validate_sparsity_block_size, validate_shape, validate_divisible, ensure_contiguous, \
+    validate_same_dtype, validate_dtype_supported
 
 
 @torch.amp.custom_fwd(device_type="cuda")
 def broadcast_add(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
                   sparsity_block_size: int) -> BlksprsTensor:
-    """Performs a broadcast and subsequent addition of two dense tensors x and y. Returns a block-sparse tensor in
-        compressed form.
+    """Adds two dense row slices and returns selected output blocks in compressed form.
 
     Note:
         This operation does not support gradient computation.
 
     Args:
-        x (Tensor): A dense input tensor.
-        y (Tensor): A dense input tensor.
+        x (Tensor): The dense input tensor with shape ``(B, M)``.
+        y (Tensor): The dense input tensor with shape ``(B, N)``.
         sparsity_layout_output (Tensor): The sparsity layout of the output tensor.
         sparsity_block_size (int): The size of the sparsity blocks.
 
     Returns:
-        BlksprsTensor: The result of the operation as a block-sparse tensor in compressed form. Each element o(i, j) of the
-            output tensor corresponds to x(i) + y(j).
+        BlksprsTensor: The selected blocks of ``x[:, :, None] + y[:, None, :]`` in compressed form.
 
     """
     x, y = ensure_contiguous(x, y)
+    x, y = cast_for_autocast(x, y)
 
     validate_dimensions(x, dims=2)
     validate_dimensions(y, dims=2)
+    validate_same_dtype(x, y)
+    validate_dtype_supported(x, y)
     validate_dimensions(sparsity_layout_output)
     validate_sparsity_layout(sparsity_layout_output)
     validate_device(x, y, sparsity_layout_output)
     validate_contiguous(x, y, sparsity_layout_output)
     if x.size(0) != y.size(0):
         raise ValueError("Batch dimensions of tensors must match")
-    if x.size(-1) != y.size(-1):
-        raise ValueError("Dimensions of tensors must match")
     validate_sparsity_block_size(sparsity_block_size)
     validate_divisible(x.size(-1), sparsity_block_size, "Tensor sizes", "sparsity block size")
     validate_divisible(y.size(-1), sparsity_block_size, "Tensor sizes", "sparsity block size")
@@ -53,7 +53,7 @@ def broadcast_add(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
         "Output sparsity layout",
     )
 
-    layout_indices_o = torch.nonzero(sparsity_layout_output).contiguous()
+    layout_indices_o = build_layout_indices(sparsity_layout_output)
 
     n_sparse_blocks = torch.sum(sparsity_layout_output.to(torch.int)).item()
 
@@ -64,9 +64,22 @@ def broadcast_add(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
 
 def broadcast_sub(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
                   sparsity_block_size: int) -> BlksprsTensor:
-    """Wrapper for ``broadcast_add`` with negated y.
+    """Subtracts two dense row slices and returns selected output blocks in compressed form.
+
+    This is a convenience wrapper around :func:`broadcast_add` with ``y`` negated.
+
+    Args:
+        x (Tensor): The dense input tensor with shape ``(B, M)``.
+        y (Tensor): The dense input tensor with shape ``(B, N)``.
+        sparsity_layout_output (Tensor): The sparsity layout of the output tensor.
+        sparsity_block_size (int): The size of the sparsity blocks.
+
+    Returns:
+        BlksprsTensor: The selected blocks of ``x[:, :, None] - y[:, None, :]`` in compressed form.
 
     """
+    if y.dtype == torch.bool:
+        raise ValueError("Broadcast subtraction does not support bool tensors")
     return broadcast_add(x, torch.neg(y), sparsity_layout_output, sparsity_block_size)
 
 

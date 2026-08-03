@@ -1,48 +1,9 @@
-# Settings
+"""Block-sparse tensor operations for PyTorch and Triton."""
+
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-import torch
 
-# Capture scalar outputs for torch.compile / Dynamo tracing
-torch._dynamo.config.capture_scalar_outputs = True
-# Set version
-__version__ = "2.5"
+from . import layouting, ops, utils
 
-# Imports
+__version__ = "2.6.0"
 
-
-class ops:
-    from blksprs.ops.conversion import to_dense, to_sparse, to_dense_shaped, to_sparse_shaped, \
-        to_dense_row_striped, to_sparse_row_striped, is_row_striped_layout, \
-        from_blksprs, to_blksprs, adapt_layout
-    from blksprs.ops.distribution import gather, scatter, scatter_reduce
-    from blksprs.ops.flash_attention import flash_attention, flash_attention_build_layout_cache
-    from blksprs.ops.matmul import matmul
-    from blksprs.ops.softmax import softmax, softmax_fused
-    from blksprs.ops.transpose import transpose
-    from blksprs.ops.repeat import repeat, repeat_interleave
-    from blksprs.ops.partitioning import split, merge
-
-    class misc:
-        from blksprs.ops.misc.row_wise import row_wise_sum, row_wise_max, row_wise_add, row_wise_sub
-        from blksprs.ops.misc.broadcast_ops import broadcast_add, broadcast_sub
-
-
-class layouting:
-    from blksprs.layouting.distribution_layout import build_distribution_layout
-    from blksprs.layouting.sparsity_layout import build_sparsity_layout, build_sparsity_layout_adaption, \
-        build_sparsity_layout_matmul, build_sparsity_layout_matmul_fast, build_sparsity_layout_matmul_outer, \
-        build_sparsity_layout_full
-
-
-class utils:
-    from blksprs.utils.processing import apply_torch_linear, apply_torch_linear_cached, \
-        apply_torch_normalisation, apply_torch_dropout, apply_function_applicable_row_wise
-    from blksprs.utils.tools import do_shape_blocksparse, undo_shape_blocksparse
-    from blksprs.utils.validation import disable_contiguous, disable_validation, \
-        enable_contiguous, enable_validation
-
-    class validation:
-        from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_dtype_float, \
-            validate_dtype_int, validate_device, validate_sparsity, validate_sparsity_dense, \
-            validate_shape, validate_positive_integer, validate_positive_integer_tuple, validate_divisible, \
-            validate_sparsity_layout, validate_sparsity_block_size
+__all__ = ["BlksprsTensor", "layouting", "ops", "utils", "__version__"]

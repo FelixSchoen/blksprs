@@ -9,39 +9,55 @@ from triton import language as tl
 
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import stride, can_use_int32_indexing
+from blksprs.utils.tools import build_layout_indices, stride, can_use_int32_indexing
 from blksprs.utils.validation import validate_dimensions, validate_device, \
-    validate_contiguous, validate_sparsity, validate_sparsity_block_size
+    validate_contiguous, validate_sparsity, validate_sparsity_block_size, \
+    validate_dimension, validate_dtype_integral, validate_indices, validate_distribution_shape, ensure_contiguous, \
+    validate_non_negative_integer_tuple
 
 
 @torch.amp.custom_fwd(device_type="cuda")
 def build_distribution_layout(indices: BlksprsTensor, sparsity_layout_indices: Tensor,
                               dim: int, size_target: torch.Size,
                               sparsity_block_size: int) -> Tensor:
-    """Builds the sparsity layout of either the source of a gather or the target of a scatter operation.
+    """Builds the source or target sparsity layout for a distribution operation.
 
     Args:
-        indices (BlksprsTensor): The block-sparse indices tensor in compressed form used for the gather or scatter operation.
-        sparsity_layout_indices (Tensor): The sparsity layout of the indices block-sparse tensor.
-        dim (int): The dimension along which the operation is conducted.
-        size_target (torch.Size): The size of the block-sparse target tensor in regular form.
+        indices (BlksprsTensor): The compressed indices tensor used by the gather or scatter operation.
+        sparsity_layout_indices (Tensor): The sparsity layout of ``indices``.
+        dim (int): The dimension along which the operation is performed.
+        size_target (torch.Size): The dense shape of the source or target tensor.
         sparsity_block_size (int): The size of the sparsity blocks.
 
     Returns:
-        Tensor: The sparsity layout of the source or target tensor.
+        Tensor: The source or target sparsity layout.
 
     """
+    indices = ensure_contiguous(indices)
+
     validate_dimensions(indices)
     validate_contiguous(indices, sparsity_layout_indices)
+    validate_dtype_integral(indices)
     validate_device(indices, sparsity_layout_indices)
     validate_sparsity(sparsity_block_size, (indices, sparsity_layout_indices))
+
+    validate_non_negative_integer_tuple(size_target, 3, "size_target")
+    size_target = torch.Size(size_target)
+    adjusted_dim = validate_dimension(dim)
+    size_indices = torch.Size((
+        sparsity_layout_indices.size(0),
+        sparsity_layout_indices.size(1) * sparsity_block_size,
+        sparsity_layout_indices.size(2) * sparsity_block_size,
+    ))
+    validate_distribution_shape(size_indices, size_target, adjusted_dim)
     validate_sparsity_block_size(sparsity_block_size, indices, size_target)
 
-    layout_indices_i = torch.nonzero(sparsity_layout_indices).contiguous()
+    layout_indices_i = build_layout_indices(sparsity_layout_indices)
 
-    adjusted_dim = dim % 3
+    validate_indices(indices, adjusted_dim, size_target)
 
-    return build_distribution_layout_operation(indices, layout_indices_i, adjusted_dim, size_target, sparsity_block_size)
+    return Tensor(build_distribution_layout_operation(
+        indices, layout_indices_i, adjusted_dim, size_target, sparsity_block_size))
 
 
 @triton_op("blksprs::build_distribution_layout", mutates_args={})
@@ -64,7 +80,8 @@ def build_distribution_layout_operation(indices: Tensor, layout_indices_i: Tenso
                                     triton.cdiv(i_r, meta["TRITON_BLOCK_SIZE"]),
                                     triton.cdiv(i_c, meta["TRITON_BLOCK_SIZE"])]
 
-        use_int64 = not can_use_int32_indexing(indices, layout_indices_i, output)
+        use_int64 = indices.dtype == torch.int64 or not can_use_int32_indexing(
+            indices, layout_indices_i, output)
 
         (wrap_triton(build_distribution_layout_kernel)[triton_grid]
          (indices,

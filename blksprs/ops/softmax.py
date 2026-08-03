@@ -1,3 +1,5 @@
+from typing import cast
+
 import torch
 import triton
 from torch import Tensor
@@ -8,41 +10,64 @@ from triton import language as tl
 from blksprs.ops.misc.row_wise import row_wise_sum, row_wise_max, row_wise_sub
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import stride, ceil_pow2, build_packed_indices, can_use_int32_indexing
+from blksprs.utils.tools import build_layout_indices, stride, ceil_pow2, build_packed_indices, \
+    can_use_int32_indexing, prepare_layout_cache, finalize_layout_cache
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity, validate_sparsity_block_size, validate_dtype_float_32, ensure_contiguous
 
 
-def softmax(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int, flag_fused: bool = True,
-            layout_cache: dict = None) -> BlksprsTensor:
-    """Wrapper for :func:`softmax_regular` and :func:`softmax_fused` based on the ``flag_fused`` parameter.
+_FUSED_SOFTMAX_MAX_ROW_ELEMENTS = 131_072
+_REGULAR_SOFTMAX_TILE_SIZE = 32
+
+
+@torch.amp.custom_fwd(device_type="cuda")
+def softmax(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
+            flag_fused: bool = True, layout_cache: dict | None = None) -> BlksprsTensor:
+    """Computes a row-wise block-sparse softmax.
+
+    Fused execution is used by default for rows whose power-of-two-padded work
+    vector contains at most 131,072 elements. Larger rows automatically use
+    :func:`softmax_regular` to avoid pathological Triton compilation and
+    execution costs.
+
+    Args:
+        x (BlksprsTensor): The compressed input tensor.
+        sparsity_layout (Tensor): The sparsity layout of ``x``.
+        sparsity_block_size (int): The size of the sparsity blocks.
+        flag_fused (bool, optional): Whether to prefer the fused implementation when the row size is supported
+            (default ``True``).
+        layout_cache (dict, optional): Reusable layout metadata cache (default ``None``).
+
+    Returns:
+        BlksprsTensor: The row-wise softmax in compressed form.
 
     """
     if flag_fused:
-        return softmax_fused(x, sparsity_layout, sparsity_block_size, layout_cache)
-    else:
-        return softmax_regular(x, sparsity_layout, sparsity_block_size, layout_cache)
+        return _softmax_fused(
+            x, sparsity_layout, sparsity_block_size, layout_cache,
+            fallback_to_regular=True,
+        )
+    return softmax_regular(x, sparsity_layout, sparsity_block_size, layout_cache)
 
 
 @torch.amp.custom_fwd(device_type="cuda")
 def softmax_regular(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
-                    layout_cache: dict = None) -> BlksprsTensor:
+                    layout_cache: dict | None = None) -> BlksprsTensor:
     """Computes the row-wise softmax of a block-sparse tensor in compressed form.
 
-    Operates across all blocks within each row to compute the softmax, correctly handling the row-wise
-    maximum and sum across block boundaries.
+    The maximum and sum are computed across all active blocks in each row.
 
     Note:
-        Sparse blocks are not considered for the calculation of the softmax, i.e., all values are assumed to be ``-inf``.
+        Inactive blocks do not participate in the softmax and are equivalent to values of ``-inf``.
 
     Args:
-        x (BlksprsTensor): A block-sparse tensor in compressed form.
-        sparsity_layout (Tensor): The sparsity layout of the block-sparse tensor.
+        x (BlksprsTensor): The compressed input tensor.
+        sparsity_layout (Tensor): The sparsity layout of ``x``.
         sparsity_block_size (int): The size of the sparsity blocks.
-        layout_cache (dict, optional): A dictionary containing the layout cache data for the operation (default ``None``).
+        layout_cache (dict, optional): Reusable layout metadata cache (default ``None``).
 
     Returns:
-        BlksprsTensor: The result of the softmax operation as a block-sparse tensor in compressed form.
+        BlksprsTensor: The row-wise softmax in compressed form.
 
     """
     x = ensure_contiguous(x)
@@ -53,6 +78,9 @@ def softmax_regular(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_si
     validate_device(x)
     validate_sparsity(sparsity_block_size, (x, sparsity_layout))
     validate_sparsity_block_size(sparsity_block_size, x)
+
+    if x.size(0) == 0:
+        return BlksprsTensor.wrap(x)
 
     layout_cache = softmax_build_layout_cache(layout_cache, sparsity_layout)
 
@@ -67,29 +95,31 @@ def softmax_forward(x: Tensor, sparsity_layout: Tensor,
                     layout_indices: Tensor,
                     packed_indices_rws: Tensor,
                     sparsity_block_size: int) -> Tensor:
-    output = torch.zeros_like(x)
+    x_blksprs = cast(BlksprsTensor, x)
 
-    x_row_wise_max, sparsity_layout_rwm = row_wise_max(x, sparsity_layout, sparsity_block_size,
-                                                       flag_slice_only=True)
-    x_scaled = row_wise_sub(
-        x, sparsity_layout, x_row_wise_max, sparsity_block_size)
-    x_exp = torch.exp(x_scaled)
-    x_exp_row_wise_sum, sparsity_layout_rws = row_wise_sum(x_exp, sparsity_layout, sparsity_block_size,
+    x_row_wise_max, _ = row_wise_max(
+        x_blksprs, sparsity_layout, sparsity_block_size,
+        flag_slice_only=True)
+    x_exp = Tensor(row_wise_sub(
+        x_blksprs, sparsity_layout, x_row_wise_max, sparsity_block_size))
+    x_exp.exp_()
+    x_exp_row_wise_sum, sparsity_layout_rws = row_wise_sum(cast(BlksprsTensor, x_exp), sparsity_layout, sparsity_block_size,
                                                            flag_slice_only=True)
 
     x_b, x_r, x_c = x.size()
     x_b_s, x_r_s, x_c_s = stride(x)
     lidx_r, lidx_c = layout_indices.size()
     lidx_r_s, lidx_c_s = stride(layout_indices)
-    o_b, o_r, o_c = output.size()
+    o_b, o_r, o_c = x_exp.size()
     s_b, s_r, s_c = x_exp_row_wise_sum.shape
     s_b_s, s_r_s, s_c_s = stride(x_exp_row_wise_sum)
     s_l_s_b, s_l_s_r, s_l_s_c = sparsity_layout_rws.shape
     s_l_s_b_s, s_l_s_r_s, s_l_s_c_s = stride(sparsity_layout_rws)
 
-    def triton_grid(meta): return [o_b,
-                                   triton.cdiv(o_r, meta["TRITON_BLOCK_SIZE"]),
-                                   triton.cdiv(o_c, meta["TRITON_BLOCK_SIZE"])]
+    triton_block_size = min(sparsity_block_size, _REGULAR_SOFTMAX_TILE_SIZE)
+    triton_grid = [o_b,
+                   triton.cdiv(o_r, triton_block_size),
+                   triton.cdiv(o_c, triton_block_size)]
 
     use_int64 = not can_use_int32_indexing(
         x_exp,
@@ -97,7 +127,6 @@ def softmax_forward(x: Tensor, sparsity_layout: Tensor,
         x_exp_row_wise_sum,
         sparsity_layout_rws,
         packed_indices_rws,
-        output,
     )
 
     (wrap_triton(softmax_kernel)[triton_grid]
@@ -107,14 +136,16 @@ def softmax_forward(x: Tensor, sparsity_layout: Tensor,
       x_exp_row_wise_sum, s_b, s_b_s, s_r_s, s_c_s,
       s_l_s_b, s_l_s_b_s, s_l_s_r_s,
       packed_indices_rws,
-      output,
+      x_exp,
       sparsity_block_size,
-      USE_INT64=use_int64))
+      USE_INT64=use_int64,
+      TRITON_BLOCK_SIZE=triton_block_size))
 
-    return output
+    return x_exp
 
 
 def softmax_backward_wrapper(ctx, grad_output):
+    grad_output = grad_output.contiguous()
     o, sparsity_layout, layout_indices = ctx.saved_tensors
     sparsity_block_size = ctx.sparsity_block_size
 
@@ -129,7 +160,8 @@ def softmax_backward(grad_output: Tensor, o: Tensor, layout_indices: Tensor, spa
         grad_x = torch.empty_like(o, dtype=torch.float)
 
         s, sparsity_layout_s = row_wise_sum(
-            grad_output * o, sparsity_layout, sparsity_block_size, flag_slice_only=True)
+            cast(BlksprsTensor, grad_output * o), sparsity_layout,
+            sparsity_block_size, flag_slice_only=True)
 
         packed_indices_s = build_packed_indices(sparsity_layout_s)
 
@@ -175,13 +207,6 @@ def softmax_backward(grad_output: Tensor, o: Tensor, layout_indices: Tensor, spa
         return grad_x
 
 
-# noinspection PyUnusedLocal
-@triton.autotune(
-    configs=get_autotune_configs("softmax"),
-    key=["sparsity_block_size"],
-    prune_configs_by={"early_config_prune": prune_autotune_configs},
-    reset_to_zero=["o"]
-)
 @triton.jit
 def softmax_kernel(x,
                    x_b, x_b_s, x_r_s, x_c_s,
@@ -213,7 +238,7 @@ def softmax_kernel(x,
     packed_idx_s_msk = ((packed_idx_s_idx >= 0) &
                          (packed_idx_s_idx < tl.cast(s_l_s_b, index_dtype) * s_l_s_b_s))
     packed_idx_s = tl.cast(
-        tl.load(pidx_s + packed_idx_s_idx, mask=packed_idx_s_msk, other=-1), tl.int32)
+        tl.load(pidx_s + packed_idx_s_idx, mask=packed_idx_s_msk, other=-1), index_dtype)
 
     if packed_idx_s >= 0:
         # Load x block
@@ -280,7 +305,7 @@ def softmax_kernel_grad(g,
     packed_idx_s_msk = ((packed_idx_s_idx >= 0) &
                          (packed_idx_s_idx < tl.cast(s_l_s_b, index_dtype) * s_l_s_b_s))
     packed_idx_s = tl.cast(
-        tl.load(pidx_s + packed_idx_s_idx, mask=packed_idx_s_msk, other=-1), tl.int32)
+        tl.load(pidx_s + packed_idx_s_idx, mask=packed_idx_s_msk, other=-1), index_dtype)
 
     if packed_idx_s >= 0:
         blk_s_idx = (tl.cast(packed_idx_s, index_dtype) * s_b_s +
@@ -314,12 +339,11 @@ def softmax_kernel_grad(g,
         tl.store(o + blk_o_idx, buf, mask=blk_o_msk)
 
 
-def softmax_build_layout_cache(layout_cache: dict, sparsity_layout: Tensor):
-    if layout_cache is None:
-        layout_cache = dict()
+def softmax_build_layout_cache(layout_cache: dict | None, sparsity_layout: Tensor):
+    layout_cache = prepare_layout_cache(layout_cache, "softmax", sparsity_layout)
 
     if "layout_indices" not in layout_cache:
-        layout_indices = torch.nonzero(sparsity_layout).contiguous()
+        layout_indices = build_layout_indices(sparsity_layout)
         layout_cache["layout_indices"] = layout_indices
 
     if "packed_indices_rws" not in layout_cache:
@@ -331,7 +355,7 @@ def softmax_build_layout_cache(layout_cache: dict, sparsity_layout: Tensor):
     validate_contiguous(
         sparsity_layout, layout_cache["layout_indices"], layout_cache["packed_indices_rws"])
 
-    return layout_cache
+    return finalize_layout_cache(layout_cache)
 
 
 # noinspection PyUnusedLocal
@@ -348,22 +372,36 @@ softmax_forward.register_autograd(
 
 @torch.amp.custom_fwd(device_type="cuda")
 def softmax_fused(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
-                  layout_cache: dict = None) -> BlksprsTensor:
+                  layout_cache: dict | None = None) -> BlksprsTensor:
     """Computes the row-wise softmax of a block-sparse tensor in compressed form using a fused kernel.
 
-    This implementation loads all blocks of each row into memory simultaneously, enabling a single-pass
-    softmax computation. Faster than :func:`softmax_regular` but requires that each row fits in GPU shared memory.
+    This implementation processes all active blocks in a row with one
+    power-of-two-padded work vector. It supports padded vectors of at most
+    131,072 elements; call :func:`softmax` for automatic fallback on larger
+    rows.
 
     Args:
-        x (BlksprsTensor): A block-sparse tensor in compressed form.
-        sparsity_layout (Tensor): The sparsity layout of the block-sparse tensor.
+        x (BlksprsTensor): The compressed input tensor.
+        sparsity_layout (Tensor): The sparsity layout of ``x``.
         sparsity_block_size (int): The size of the sparsity blocks.
-        layout_cache (dict, optional): A dictionary containing the layout cache data for the operation (default ``None``).
+        layout_cache (dict, optional): Reusable layout metadata cache (default ``None``).
 
     Returns:
-        BlksprsTensor: The result of the softmax operation as a block-sparse tensor in compressed form.
+        BlksprsTensor: The row-wise softmax in compressed form.
+
+    Raises:
+        ValueError: If the padded row exceeds the fused implementation limit.
 
     """
+    return _softmax_fused(
+        x, sparsity_layout, sparsity_block_size, layout_cache,
+        fallback_to_regular=False,
+    )
+
+
+def _softmax_fused(x: BlksprsTensor, sparsity_layout: Tensor,
+                   sparsity_block_size: int, layout_cache: dict | None,
+                   fallback_to_regular: bool) -> BlksprsTensor:
     x = ensure_contiguous(x)
 
     validate_dimensions(x)
@@ -373,7 +411,22 @@ def softmax_fused(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size
     validate_sparsity(sparsity_block_size, (x, sparsity_layout))
     validate_sparsity_block_size(sparsity_block_size, x)
 
+    if x.size(0) == 0:
+        return BlksprsTensor.wrap(x)
+
     layout_cache = softmax_fused_build_layout_cache(layout_cache, sparsity_layout)
+
+    padded_row_elements = layout_cache["max_blocks_line"] * sparsity_block_size
+    if padded_row_elements > _FUSED_SOFTMAX_MAX_ROW_ELEMENTS:
+        if fallback_to_regular:
+            return softmax_regular(
+                x, sparsity_layout, sparsity_block_size, layout_cache)
+        raise ValueError(
+            "Fused softmax supports power-of-two-padded rows of at most "
+            f"{_FUSED_SOFTMAX_MAX_ROW_ELEMENTS} elements, but this layout "
+            f"requires {padded_row_elements}. Use softmax() for automatic "
+            "fallback or softmax(..., flag_fused=False) explicitly."
+        )
 
     return BlksprsTensor.wrap(softmax_fused_forward(x, sparsity_layout,
                                                     layout_cache["packed_indices_sorted"],
@@ -413,6 +466,7 @@ def softmax_fused_forward(x: Tensor, sparsity_layout: Tensor,
 
 
 def softmax_fused_backward_wrapper(ctx, grad_output):
+    grad_output = grad_output.contiguous()
     o, sparsity_layout, packed_indices_sorted = ctx.saved_tensors
     max_blocks_line = ctx.max_blocks_line
     sparsity_block_size = ctx.sparsity_block_size
@@ -492,7 +546,7 @@ def softmax_fused_kernel(x,
                     (packed_idx_idx < tl.cast(s_l_b, index_dtype) * s_l_b_s)) &
                    (line_offsets < s_l_c))
     packed_idx = tl.cast(tl.load(pidx_s + packed_idx_idx,
-                      mask=packed_idx_msk, other=-1), tl.int32)
+                      mask=packed_idx_msk, other=-1), index_dtype)
 
     if (not (tl.min(packed_idx) == -1 and
              tl.max(packed_idx) == -1)):
@@ -551,7 +605,7 @@ def softmax_fused_kernel_grad(g,
                     (packed_idx_idx < tl.cast(s_l_b, index_dtype) * s_l_b_s)) &
                    (line_offsets < s_l_c))
     packed_idx = tl.cast(tl.load(pidx_s + packed_idx_idx,
-                      mask=packed_idx_msk, other=-1), tl.int32)
+                      mask=packed_idx_msk, other=-1), index_dtype)
 
     if (not (tl.min(packed_idx) == -1 and
              tl.max(packed_idx) == -1)):
@@ -584,15 +638,16 @@ def softmax_fused_kernel_grad(g,
         tl.store(o + blk_x_idx, blk_grad, mask=blk_x_mask)
 
 
-def softmax_fused_build_layout_cache(layout_cache: dict, sparsity_layout: Tensor):
+def softmax_fused_build_layout_cache(layout_cache: dict | None, sparsity_layout: Tensor):
     """Builds layout cache data for the fused softmax operation.
 
     Note:
-        The ``max_blocks_line`` value is rounded up to the nearest power of 2, as required by the Triton kernel.
+        The ``max_blocks_line`` value is rounded up to the nearest power of two, as required by the Triton kernel.
 
     """
-    if layout_cache is None:
-        layout_cache = dict()
+    # Regular and fused metadata intentionally share a cache key so that an
+    # oversized default call can retain both metadata sets across fallbacks.
+    layout_cache = prepare_layout_cache(layout_cache, "softmax", sparsity_layout)
 
     if "packed_indices_sorted" not in layout_cache:
         packed_indices_sorted = (build_packed_indices(sparsity_layout)
@@ -608,11 +663,11 @@ def softmax_fused_build_layout_cache(layout_cache: dict, sparsity_layout: Tensor
                            .sum(dim=-1)
                            .max()
                            .item())
-        layout_cache["max_blocks_line"] = ceil_pow2(max(max_blocks_line, 2))
+        layout_cache["max_blocks_line"] = ceil_pow2(int(max(max_blocks_line, 2)))
 
     validate_contiguous(sparsity_layout, layout_cache["packed_indices_sorted"])
 
-    return layout_cache
+    return finalize_layout_cache(layout_cache)
 
 
 # noinspection PyUnusedLocal

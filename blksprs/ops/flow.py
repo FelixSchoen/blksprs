@@ -93,7 +93,7 @@ def flow_pull_kernel(x,
     packed_idx_msk = ((packed_idx_idx >= 0) &
                        (packed_idx_idx < tl.cast(s_l_o_b, index_dtype) * s_l_o_b_s))
     packed_idx = tl.cast(tl.load(pidx + packed_idx_idx,
-                          mask=packed_idx_msk, other=-1), tl.int32)
+                          mask=packed_idx_msk, other=-1), index_dtype)
 
     if packed_idx >= 0:
         blk_x_idx = (tl.cast(packed_idx, index_dtype) * x_b_s +
@@ -115,8 +115,16 @@ def flow_pull_kernel(x,
 def flow_push_forward(x: Tensor, sparsity_layout_x: Tensor, layout_indices: Tensor, packed_indices: Tensor,
                       sparsity_block_size: int, n_sparse_blocks: int) -> Tensor:
     with torch.no_grad():
-        output = torch.zeros(size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
-                             dtype=x.dtype, device=x.device)
+        accumulator_dtype = (
+            torch.float32
+            if x.dtype in (torch.float16, torch.bfloat16)
+            else x.dtype
+        )
+        output_accumulator = torch.zeros(
+            size=(n_sparse_blocks, sparsity_block_size, sparsity_block_size),
+            dtype=accumulator_dtype,
+            device=x.device,
+        )
 
         x_b, x_r, x_c = x.size()
         x_b_s, x_r_s, x_c_s = stride(x)
@@ -124,8 +132,8 @@ def flow_push_forward(x: Tensor, sparsity_layout_x: Tensor, layout_indices: Tens
         s_l_x_b_s, s_l_x_r_s, s_l_x_c_s = stride(sparsity_layout_x)
         lidx_r, lidx_c = layout_indices.size()
         lidx_r_s, lidx_c_s = stride(layout_indices)
-        o_b, o_r, o_c = output.size()
-        o_b_s, o_r_s, o_c_s = stride(output)
+        o_b, o_r, o_c = output_accumulator.size()
+        o_b_s, o_r_s, o_c_s = stride(output_accumulator)
 
         def triton_grid(meta): return [x_b,
                                        triton.cdiv(
@@ -137,7 +145,7 @@ def flow_push_forward(x: Tensor, sparsity_layout_x: Tensor, layout_indices: Tens
             sparsity_layout_x,
             layout_indices,
             packed_indices,
-            output,
+            output_accumulator,
         )
 
         (wrap_triton(flow_push_kernel)[triton_grid]
@@ -146,12 +154,12 @@ def flow_push_forward(x: Tensor, sparsity_layout_x: Tensor, layout_indices: Tens
           s_l_x_b, s_l_x_b_s, s_l_x_r_s, s_l_x_c_s,
           layout_indices, lidx_r, lidx_r_s, lidx_c_s,
           packed_indices,
-          output,
+          output_accumulator,
           o_b, o_b_s, o_r_s, o_c_s,
           sparsity_block_size,
           USE_INT64=use_int64))
 
-        return output
+        return output_accumulator.to(x.dtype)
 
 
 # noinspection PyUnusedLocal
@@ -194,7 +202,7 @@ def flow_push_kernel(x,
     packed_idx_msk = ((packed_idx_idx >= 0) &
                        (packed_idx_idx < tl.cast(s_l_x_b, index_dtype) * s_l_x_b_s))
     packed_idx = tl.cast(tl.load(pidx + packed_idx_idx,
-                          mask=packed_idx_msk, other=-1), tl.int32)
+                          mask=packed_idx_msk, other=-1), index_dtype)
 
     if packed_idx >= 0:
         blk_x_idx = (pid_blk * x_b_s +

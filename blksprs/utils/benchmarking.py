@@ -6,9 +6,14 @@ from matplotlib import pyplot as plt
 
 def benchmark(method_labels: list[str], func_input_generator: Callable,
               matrix_sizes: list[int], sparsity_block_sizes: list[int],
-              *funcs_test_subject: Callable, y_lim_top: int = None):
+              *funcs_test_subject: Callable, y_lim_top: int | None = None) -> None:
+    if len(matrix_sizes) != len(sparsity_block_sizes):
+        raise ValueError("Matrix sizes and sparsity block sizes must have the same length")
+    if len(method_labels) != len(funcs_test_subject):
+        raise ValueError("Method labels and benchmark functions must have the same length")
+
     quantiles = [0.5, 0.2, 0.8]
-    results = {}
+    results: dict[int, list[tuple[float, float, float]]] = {}
 
     for matrix_size, sparsity_block_size in zip(matrix_sizes, sparsity_block_sizes):
         arguments = func_input_generator(matrix_size, sparsity_block_size)

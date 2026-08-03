@@ -1,30 +1,102 @@
-name: blksprs Publish
+name: BLK-SPRS Publish
 
 on:
   release:
     types: [ published ]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: blksprs-publish-${{ github.event.release.id }}
+  cancel-in-progress: false
+
 jobs:
-  deploy:
+  validate:
+    name: Validate release
+    uses: ./.github/workflows/blksprs_test.yml
+    permissions:
+      contents: read
+
+  verify-release:
+    name: Verify release metadata
+    needs: validate
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          python-version: '3.12'
+          persist-credentials: false
 
-      - name: Install dependencies
+      - name: Set up Python 3.11
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+
+      - name: Verify release tag matches package version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          python -m pip install --upgrade pip
-          pip install build
+          python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
 
-      - name: Build package
-        run: python -m build
+          version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          tag = os.environ["RELEASE_TAG"].removeprefix("v")
+          if tag != version:
+              raise SystemExit(f"release tag {tag!r} does not match project version {version!r}")
+          PY
+
+      - name: Download validated distributions
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: distributions
+          path: dist
+
+      - name: Verify release tag matches built wheel
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          python - <<'PY'
+          import email
+          import os
+          import zipfile
+          from pathlib import Path
+
+          tag = os.environ["RELEASE_TAG"].removeprefix("v")
+          wheels = list(Path("dist").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"expected one wheel, found {len(wheels)}")
+
+          with zipfile.ZipFile(wheels[0]) as wheel:
+              metadata_files = [name for name in wheel.namelist() if name.endswith(".dist-info/METADATA")]
+              if len(metadata_files) != 1:
+                  raise SystemExit(f"expected one metadata file, found {len(metadata_files)}")
+              metadata = email.message_from_bytes(wheel.read(metadata_files[0]))
+
+          built_version = metadata["Version"]
+          if built_version != tag:
+              raise SystemExit(
+                  f"built metadata version {built_version!r} does not match release tag {tag!r}"
+              )
+          PY
+
+  publish:
+    name: Publish distributions
+    needs: verify-release
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write # Required for PyPI trusted publishing.
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: distributions
+          path: dist
 
       - name: Publish package
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          password: ${{ secrets.PYPI_TOKEN }}
+        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # release/v1

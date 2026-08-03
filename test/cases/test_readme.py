@@ -1,5 +1,5 @@
-import torch
 import blksprs as bs
+import torch
 
 
 def test_readme():
@@ -16,9 +16,9 @@ def test_readme():
     x = torch.randn(size=(b, h, m, k), device="cuda")
     y = torch.randn(size=(b, h, n, k), device="cuda").transpose(-1, -2).contiguous()
 
-    # Convert tensors to three-dimensional (dense) tensors since Triton can only handle tensors of exactly three dimensions
+    # Flatten leading dimensions because BLK-SPRS operations accept three-dimensional tensors
     x_dense, x_shape_original = bs.utils.do_shape_blocksparse(x)
-    y_dense, y_shape_original = bs.utils.do_shape_blocksparse(y)
+    y_dense, _ = bs.utils.do_shape_blocksparse(y)
 
     # Create sparsity layouts from existing tensors
     sparsity_layout_x = bs.layouting.build_sparsity_layout(x_dense, sparsity_block_size)
@@ -31,7 +31,8 @@ def test_readme():
     x_sparse = bs.ops.to_sparse(x_dense, sparsity_layout_x, sparsity_block_size)
     y_sparse = bs.ops.to_sparse(y_dense, sparsity_layout_y, sparsity_block_size)
 
-    # blksprs works with torch.compile
+    # Default torch.compile mode is supported for correctness. Public wrapper
+    # validation and cache preparation may graph-break, so benchmark the full workload.
     matmul_compiled = torch.compile(bs.ops.matmul)
 
     # Perform matrix multiplication
@@ -58,16 +59,19 @@ def test_readme():
 
     # Assert that the output has the correct sparsity layout
     actual_sparsity_layout_o = bs.layouting.build_sparsity_layout(o_dense, sparsity_block_size)
-    assert torch.allclose(actual_sparsity_layout_o.to(torch.int), sparsity_layout_o)
+    assert torch.equal(actual_sparsity_layout_o, sparsity_layout_o)
 
     # Convert output tensor back to original shape
     o = bs.utils.undo_shape_blocksparse(o_dense, x_shape_original)
+    assert o.shape == (b, h, m, n)
 
     # Other available functions
     bs.ops.transpose(o_sparse, sparsity_layout_o, sparsity_block_size)
     bs.ops.softmax(o_sparse, sparsity_layout_o, sparsity_block_size, flag_fused=False)
     bs.ops.softmax_fused(o_sparse, sparsity_layout_o,
-                         sparsity_block_size)  # Significantly faster version that requires that rows of matrix fit into memory (default if flag is not set)
+                         sparsity_block_size)  # Explicit fused execution; raises above 131,072 padded row elements
+    bs.ops.softmax(o_sparse, sparsity_layout_o,
+                   sparsity_block_size)  # Fused by default with automatic fallback for oversized rows
     bs.ops.misc.row_wise_sum(o_sparse, sparsity_layout_o, sparsity_block_size)
     bs.ops.misc.row_wise_max(o_sparse, sparsity_layout_o, sparsity_block_size)
 
@@ -79,7 +83,7 @@ def test_readme():
     k = torch.randn(b, seq_len, h, head_dim, device="cuda")
     v = torch.randn(b, seq_len, h, head_dim, device="cuda")
 
-    # Flash attention expects (batch * heads, seq_len, head_dim)
+    # Flash Attention expects (batch * heads, seq_len, head_dim)
     q_dense = q.transpose(1, 2).reshape(-1, seq_len, head_dim).contiguous()
     k_dense = k.transpose(1, 2).reshape(-1, seq_len, head_dim).contiguous()
     v_dense = v.transpose(1, 2).reshape(-1, seq_len, head_dim).contiguous()
@@ -92,7 +96,11 @@ def test_readme():
         n_batches_attn, n_seq_blocks, n_head_blocks,
         device="cuda", dtype=torch.bool,
     )
-    attention_layout = torch.tril(torch.ones(n_batches_attn, n_seq_blocks, n_seq_blocks, device="cuda", dtype=torch.bool))
+    attention_layout = torch.tril(torch.ones(
+        n_batches_attn, n_seq_blocks, n_seq_blocks,
+        device="cuda", dtype=torch.bool,
+    ))
+    sparsity_layout_o = bs.layouting.build_sparsity_layout_matmul(attention_layout, sparsity_layout_qkv)
 
     q_sparse = bs.ops.to_sparse(q_dense, sparsity_layout_qkv, sparsity_block_size_attn)
     k_sparse = bs.ops.to_sparse(k_dense, sparsity_layout_qkv, sparsity_block_size_attn)
@@ -107,6 +115,7 @@ def test_readme():
         n_seq_blocks_q=n_seq_blocks,
         n_seq_blocks_k=n_seq_blocks,
         n_head_blocks=n_head_blocks,
+        sparsity_layout_o=sparsity_layout_o,
     )
 
     attn_out_sparse = bs.ops.flash_attention(
@@ -115,37 +124,24 @@ def test_readme():
         v_sparse, sparsity_layout_qkv,
         attention_layout, sparsity_block_size_attn,
         layout_cache=flash_layout_cache,
+        sparsity_layout_o=sparsity_layout_o,
     )
-    attn_out_dense = bs.ops.to_dense(attn_out_sparse, sparsity_layout_qkv, sparsity_block_size_attn)
+    attn_out_dense = bs.ops.to_dense(attn_out_sparse, sparsity_layout_o, sparsity_block_size_attn)
     attn_out = attn_out_dense.reshape(b, h, seq_len, head_dim).transpose(1, 2).contiguous()
 
     assert attn_out.shape == (b, seq_len, h, head_dim)
 
 
-
 def _get_random_sparsity_layout(b, m, n, sparsity_block_size, sparsity_percentage):
-    """Helper function, creates a random sparsity layout for a given shape with a given percentage of blocks marked as sparse.
-
-    """
+    """Creates a random sparsity layout with the requested percentage of inactive blocks."""
     m_s = m // sparsity_block_size
     n_s = n // sparsity_block_size
 
-    sparsity_layout = torch.ones(size=(b, m_s, n_s), device="cuda", dtype=torch.int)
+    sparsity_layout = torch.ones(size=(b, m_s, n_s), device="cuda", dtype=torch.bool)
 
     num_zero_elements = int(m_s * n_s * (sparsity_percentage / 100))
     for b_i in range(b):
         indices = torch.randperm(m_s * n_s)[:num_zero_elements]
-        sparsity_layout[b_i, indices // n_s, indices % n_s] = 0
+        sparsity_layout[b_i, indices // n_s, indices % n_s] = False
 
     return sparsity_layout
-
-
-import pytest
-
-
-@pytest.fixture(scope="session", autouse=True)
-def setup():
-    torch.manual_seed(0)
-    torch.set_printoptions(edgeitems=64, linewidth=10000)
-    normal_repr = torch.Tensor.__repr__
-    torch.Tensor.__repr__ = lambda self, *args, **kwargs: f"{self.shape}, {self.dtype}:\n{normal_repr(self)}"

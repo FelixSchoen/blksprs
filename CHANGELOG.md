@@ -4,6 +4,80 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.0] - 2026-08-03
+
+### Added
+
+- Add package namespace exports, deterministic regression tests, and installed-artifact validation
+
+### Changed
+
+- Harden public shape, device, dtype, dimension, index, layout, and contiguity validation
+- Invalidate conversion, linear, and Flash Attention layout caches after input changes while retaining source tensors to
+  prevent allocator identity reuse
+- Preserve 64-bit indices throughout kernels and dynamically use 64-bit Flash Attention adjacency metadata when required
+- Limit Flash Attention sparsity blocks to the portable supported range of 16 to 64 elements
+- Publish packages through pinned GitHub Actions and PyPI trusted publishing
+- Gate PyPI publication on static checks, minimum-PyTorch compatibility, and installed distribution tests across all
+  supported Python versions, and publish the exact artifacts that passed those checks
+- Expand API, cache, mask, dtype, installation, and safety documentation
+- Clarify that public wrappers support graph-break-tolerant ``torch.compile`` execution rather than ``fullgraph=True``
+- Test compatibility with the declared minimum PyTorch release and verify versions from built release artifacts
+- Benchmark repeated attention calls with reusable layout caches and skip overflow tests unless sufficient memory is free
+- Reduce regular-softmax peak storage by normalising its exponentiated output in place
+- Preserve positional compatibility for the existing Flash Attention cache argument while extending optional metadata
+- Make the Ruff rule selection explicit so release linting remains stable across tooling updates
+- Polish README, package metadata, and API documentation wording and formatting
+
+### Fixed
+
+- Preserve float32 Flash Attention accumulators across key/query blocks to prevent long-sequence reduced-precision
+  forward corruption and gradient saturation
+- Preserve float32 accumulators for row-wise sums, scatter reductions, and repeated-tensor gradients to prevent
+  reduced-precision saturation on large reductions
+- Preserve autograd through row-striped conversions with no active blocks
+- Ensure Flash Attention masks remain authoritative over non-finite additive bias values
+- Rebuild cached sparse linear parameters when switching between gradient-disabled evaluation and training
+- Match ``torch.nn.Linear`` mixed-dtype behavior outside autocast and clarify compiled compressed-tensor return types
+- Preserve ``float64`` and unsupported floating dtypes at the autocast boundary instead of silently downcasting them
+- Apply automatic contiguous conversion to public layout-builder data operands and document structural-layout requirements
+- Document that non-reducing scatter does not support a backward pass
+- Fix stale layout metadata after in-place mutations or cache reuse across operations
+- Invalidate cached sparse linear parameters when their gradient requirements change
+- Fix stale cache metadata after mutating derived layouts and prevent transformed output layouts from aliasing inputs
+- Fix non-contiguous output gradients across differentiable operations
+- Fix Flash Attention mask, bias, sparse Q/K/V, mixed-dimension, and empty-row forward and backward behavior
+- Fix the default Flash Attention output layout silently discarding V blocks that are absent from the Q layout
+- Fix scatter compilation for non-reducing Boolean and compact-integer inputs and reject unsupported summation dtypes clearly
+- Fix gather and scatter silently accepting oversized non-indexed dimensions
+- Reject negative distribution-layout target dimensions before kernel allocation
+- Fix inference-created tensors failing layout-cache preparation and rebuild their metadata safely
+- Fix large numeric layouts overflowing block counts in conversion and Flash Attention caches
+- Reject complex-valued sparsity layouts explicitly instead of warning during metadata conversion
+- Fix sparse linear bias addition promoting autocast output back to full precision
+- Fix row-wise maxima for all-negative-infinity rows and reject silent mixed-dtype row-wise arithmetic
+- Fall back to regular softmax before fused row sizes cause pathological Triton compilation
+- Fix softmax for empty compressed inputs and dense conversion returning the compressed tensor subclass
+- Fix layout matmul, row-wise reductions, and default Flash Attention scaling for empty logical dimensions
+- Fix layout-matmul helpers silently broadcasting incompatible batches or accepting invalid layouts
+- Fix public layout and shape helpers accepting malformed dimensions or CPU layouts, failing incidentally, or rejecting
+  empty leading dimensions
+- Fix zero-count sparse repeats and their backward passes
+- Fix biased sparse linear projections with empty input features, rows, or batches
+- Fix row-wise arithmetic on layouts with no column blocks and support rectangular broadcast outputs
+- Ensure public layout builders, transformations, reductions, and cache metadata return regular tensors when passed
+  block-sparse tensor subclasses
+- Forward optional layout caches through ``to_blksprs()``
+- Fix the Nix GPU shell overriding PyTorch's bundled CUDA libraries and claiming stale virtual environments were active
+- Preserve NaN-bearing blocks when building or adapting sparsity layouts and propagate NaNs through row-wise maxima
+- Propagate non-finite Flash Attention inputs and scales instead of silently replacing failed rows with zeros, and reject
+  non-real scales at the public boundary
+- Validate row-wise callable inputs and outputs and reject inconsistent benchmark argument lengths before execution
+- Preserve gradients when layout coarsening zero-pads non-divisible logical extents
+- Return slice-only row-wise reductions as regular tensors rather than marking their non-square auxiliary representation
+  as a general block-sparse tensor
+- Allow an explicitly selected production autotuning profile to pass through the test configuration
+
 ## [2.5] - 2026-05-20
 
 ### Added
@@ -193,7 +267,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - Rework all operations to use new `torch.library.triton_op()` approach, allowing for JIT compilation and better
-  compatability
+  compatibility
 - Rework kernels to work with triton block sizes larger than sparsity block sizes via masking
 - Rework kernels to use automatic tuning of triton block sizes rather than fixed block sizes
 - Rework operations to support dtype autocasting

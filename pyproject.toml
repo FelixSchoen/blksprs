@@ -1,19 +1,34 @@
 [project]
 name = "blksprs"
-version = "2.5"
+version = "2.6.0"
 authors = [{ name = "Felix Schön", email = "schoen@kr.tuwien.ac.at" }]
-description = "A lightweight library for operations on block-sparse matrices in PyTorch."
+description = "A lightweight Triton library for block-sparse operations in PyTorch."
 readme = "README.md"
 requires-python = ">=3.11"
+keywords = ["pytorch", "triton", "cuda", "block sparse", "flash attention", "machine learning"]
 license = "MIT"
 license-files = ["LICENSE.md"]
 dependencies = ["torch >= 2.8.0"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
 
 [project.urls]
 "Homepage" = "https://github.com/FelixSchoen/blksprs"
-"Bugtracker" = "https://github.com/FelixSchoen/blksprs/issues"
+"Changelog" = "https://github.com/FelixSchoen/blksprs/blob/main/CHANGELOG.md"
+"Issues" = "https://github.com/FelixSchoen/blksprs/issues"
 
 [project.optional-dependencies]
+benchmark = ["matplotlib"]
 test = [
     "pytest",
     "pytest-xdist",
@@ -21,18 +36,41 @@ test = [
     "coverage",
     "build",
     "matplotlib",
+    "mypy",
     "numpy",
+    "ruff",
+    "twine",
 ]
 
 [build-system]
-requires = ["setuptools", "wheel"]
+requires = ["setuptools>=77", "wheel>=0.45"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["blksprs*"]
 
 [tool.setuptools.package-data]
-"*" = ["*.json", "*.conf"]
+blksprs = ["py.typed"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+ignore = ["E731"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["blksprs"]
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = ["triton", "triton.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

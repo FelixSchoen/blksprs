@@ -7,7 +7,8 @@ from triton import language as tl
 from blksprs.ops.transpose import transpose
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import stride, build_packed_indices, can_use_int32_indexing, cast_for_autocast
+from blksprs.utils.tools import build_layout_indices, stride, build_packed_indices, can_use_int32_indexing, \
+    cast_for_autocast, prepare_layout_cache, finalize_layout_cache
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity, validate_sparsity_layout, validate_sparsity_block_size, validate_dtype_float, \
     validate_shape, ensure_contiguous
@@ -17,22 +18,22 @@ from blksprs.utils.validation import validate_contiguous, validate_dimensions, v
 def matmul(x: BlksprsTensor, sparsity_layout_x: Tensor,
            y: BlksprsTensor, sparsity_layout_y: Tensor,
            sparsity_layout_output: Tensor,
-           sparsity_block_size: int, layout_cache: dict = None) -> BlksprsTensor:
-    """Performs matrix multiplication between two block-sparse tensors.
+           sparsity_block_size: int, layout_cache: dict | None = None) -> BlksprsTensor:
+    """Multiplies two compressed block-sparse tensors.
 
-    The sparsity layout of the output tensor is used to only calculate blocks that will be present in the output.
+    Only blocks marked active by ``sparsity_layout_output`` are calculated.
 
     Args:
-        x (BlksprsTensor): A block-sparse tensor in compressed form.
-        sparsity_layout_x (Tensor): The sparsity layout of the first block-sparse tensor.
-        y (BlksprsTensor): A block-sparse tensor in compressed form.
-        sparsity_layout_y (Tensor): The sparsity layout of the second block-sparse tensor.
+        x (BlksprsTensor): The compressed left operand.
+        sparsity_layout_x (Tensor): The sparsity layout of ``x``.
+        y (BlksprsTensor): The compressed right operand.
+        sparsity_layout_y (Tensor): The sparsity layout of ``y``.
         sparsity_layout_output (Tensor): The sparsity layout of the output tensor.
         sparsity_block_size (int): The size of the sparsity blocks.
-        layout_cache (dict, optional): A dictionary containing the layout cache data for the operation (default ``None``).
+        layout_cache (dict, optional): Reusable layout metadata cache (default ``None``).
 
     Returns:
-        BlksprsTensor: The result of the matrix multiplication as a block-sparse tensor in compressed form.
+        BlksprsTensor: The matrix product in compressed form.
 
     """
     x, y = ensure_contiguous(x, y)
@@ -127,6 +128,7 @@ def matmul_forward(x: Tensor, y: Tensor,
 
 
 def matmul_wrapper_backward(ctx, grad_output):
+    grad_output = grad_output.contiguous()
     x, sparsity_layout_x, y, sparsity_layout_y, sparsity_layout_o = ctx.saved_tensors
     sparsity_block_size = ctx.sparsity_block_size
 
@@ -206,7 +208,7 @@ def matmul_kernel(x,
                              (i_seg_spa >= 0) &
                              (i_seg_spa < tl.cast(s_l_x_c, index_dtype)))
         packed_idx_x = tl.cast(
-            tl.load(pidx_x + packed_idx_x_idx, mask=packed_idx_x_msk, other=-1), tl.int32)
+            tl.load(pidx_x + packed_idx_x_idx, mask=packed_idx_x_msk, other=-1), index_dtype)
 
         # Get packed indices for y
         packed_idx_y_idx = (spa_bat_o * s_l_y_b_s +
@@ -218,7 +220,7 @@ def matmul_kernel(x,
                              (spa_col_o >= 0) &
                              (spa_col_o < tl.cast(s_l_y_c, index_dtype)))
         packed_idx_y = tl.cast(
-            tl.load(pidx_y + packed_idx_y_idx, mask=packed_idx_y_msk, other=-1), tl.int32)
+            tl.load(pidx_y + packed_idx_y_idx, mask=packed_idx_y_msk, other=-1), index_dtype)
 
         # If both blocks are present commence calculation
         if packed_idx_x >= 0 and packed_idx_y >= 0:
@@ -251,9 +253,9 @@ def matmul_kernel(x,
     tl.store(o + blk_o_idx, buf, mask=blk_o_msk)
 
 
-def matmul_build_layout_cache(layout_cache: dict, sparsity_layout_x: Tensor, sparsity_layout_y: Tensor, sparsity_layout_output: Tensor):
-    if layout_cache is None:
-        layout_cache = dict()
+def matmul_build_layout_cache(layout_cache: dict | None, sparsity_layout_x: Tensor, sparsity_layout_y: Tensor, sparsity_layout_output: Tensor):
+    layout_cache = prepare_layout_cache(
+        layout_cache, "matmul", sparsity_layout_x, sparsity_layout_y, sparsity_layout_output)
 
     if "packed_indices_x" not in layout_cache:
         layout_cache["packed_indices_x"] = build_packed_indices(sparsity_layout_x)
@@ -262,7 +264,7 @@ def matmul_build_layout_cache(layout_cache: dict, sparsity_layout_x: Tensor, spa
         layout_cache["packed_indices_y"] = build_packed_indices(sparsity_layout_y)
 
     if "layout_indices_o" not in layout_cache:
-        layout_indices_o = torch.nonzero(sparsity_layout_output).contiguous()
+        layout_indices_o = build_layout_indices(sparsity_layout_output)
         layout_cache["layout_indices_o"] = layout_indices_o
 
     if "n_sparse_blocks" not in layout_cache:
@@ -274,7 +276,7 @@ def matmul_build_layout_cache(layout_cache: dict, sparsity_layout_x: Tensor, spa
                         sparsity_layout_y, layout_cache["packed_indices_y"],
                         sparsity_layout_output, layout_cache["layout_indices_o"])
 
-    return layout_cache
+    return finalize_layout_cache(layout_cache)
 
 
 # noinspection PyUnusedLocal

@@ -1,9 +1,5 @@
-import os
 import tomllib
 
-os.environ["BLKSPRS_AUTOTUNE"] = "TEST"
-
-import random
 from pathlib import Path
 
 import numpy as np
@@ -123,39 +119,6 @@ OVERFLOW_BROADCAST_CONFIGURATIONS = [
 # Tolerances
 ATOL = 2e-2
 RTOL = 1.5e-2
-
-# Seed
-SEED = 0
-RANDOM_SEED = True
-
-
-@pytest.fixture(scope="session", autouse=True)
-def setup():
-    global SEED
-    global RANDOM_SEED
-
-    if RANDOM_SEED:
-        seed = random.randint(0, 2 ** 32 - 1)
-        SEED = seed
-        print("Using randomly generated seed...")
-    else:
-        seed = SEED
-        print("Notice: Not using randomly generated seed!")
-
-    print("Seed:", seed)
-    torch.manual_seed(seed)
-    torch.set_printoptions(edgeitems=64, linewidth=10000)
-    override_pytorch_repr()
-
-    yield
-
-    print("Seed:", seed)
-
-
-def override_pytorch_repr():
-    normal_repr = torch.Tensor.__repr__
-    torch.Tensor.__repr__ = lambda self, *args, **kwargs: f"{self.shape}, {self.dtype}:\n{normal_repr(self)}"
-
 
 # Ops
 
@@ -360,14 +323,18 @@ def test_gather_kernel_masks_packed_indices_per_axis(dim: int):
         device=DEVICE,
     )
 
-    actual = bs.ops.gather(
-        BlksprsTensor.wrap(src),
-        sparsity_layout_src,
-        dim,
-        BlksprsTensor.wrap(idx),
-        sparsity_layout_idx,
-        sparsity_block_size,
-    )
+    bs.utils.disable_validation()
+    try:
+        actual = bs.ops.gather(
+            BlksprsTensor.wrap(src),
+            sparsity_layout_src,
+            dim,
+            BlksprsTensor.wrap(idx),
+            sparsity_layout_idx,
+            sparsity_block_size,
+        )
+    finally:
+        bs.utils.enable_validation()
     torch.cuda.synchronize()
 
     assert torch.equal(actual, torch.zeros_like(actual))
@@ -461,15 +428,19 @@ def test_scatter_reduce_kernel_masks_packed_indices_per_axis(dim: int):
         device=DEVICE,
     )
 
-    actual = bs.ops.scatter_reduce(
-        BlksprsTensor.wrap(src),
-        sparsity_layout_src,
-        dim,
-        BlksprsTensor.wrap(idx),
-        sparsity_layout_tgt,
-        sparsity_block_size,
-        reduce_op="sum",
-    )
+    bs.utils.disable_validation()
+    try:
+        actual = bs.ops.scatter_reduce(
+            BlksprsTensor.wrap(src),
+            sparsity_layout_src,
+            dim,
+            BlksprsTensor.wrap(idx),
+            sparsity_layout_tgt,
+            sparsity_block_size,
+            reduce_op="sum",
+        )
+    finally:
+        bs.utils.enable_validation()
     torch.cuda.synchronize()
 
     assert torch.equal(actual, torch.zeros_like(actual))
@@ -992,6 +963,7 @@ def test_adapt_layout_zero_pads_larger_non_divisible_output_blocks():
     )
     x_sparse[0] = 1
     x_sparse[1] = 2
+    x_sparse.requires_grad_()
 
     out_sparse, sparsity_layout_to = bs.ops.adapt_layout(
         BlksprsTensor.wrap(x_sparse),
@@ -1007,6 +979,8 @@ def test_adapt_layout_zero_pads_larger_non_divisible_output_blocks():
 
     assert torch.equal(sparsity_layout_to, torch.ones((2, 1, 1), dtype=torch.bool, device=DEVICE))
     assert torch.equal(out_dense, expected)
+    out_dense.sum().backward()
+    assert torch.equal(x_sparse.grad, torch.ones_like(x_sparse))
 
 
 # Layouting
@@ -1044,6 +1018,8 @@ def test_build_sparsity_layout_matmul(config: list):
     sparsity_layout_matmul = bs.layouting.build_sparsity_layout_matmul(sparsity_layout_x_bs, sparsity_layout_y_bs)
     sparsity_layout_matmul_fast = bs.layouting.build_sparsity_layout_matmul_fast(sparsity_layout_x_bs,
                                                                                  sparsity_layout_y_bs)
+
+    assert torch.all(torch.logical_or(torch.logical_not(sparsity_layout_matmul), sparsity_layout_matmul_fast))
 
 
 @pytest.mark.parametrize("config", TEST_CONFIGURATIONS)
@@ -1276,15 +1252,13 @@ def test_apply_torch_dropout(config: list, use_amp: bool):
                                                        sparsity_block_size)
             stock_dtype = stock_dropout_out.dtype
 
-            global SEED
-            torch.manual_seed(SEED)
-            blksprs_normalisation_out = bs.utils.apply_torch_normalisation(
+            blksprs_dropout_out = bs.utils.apply_torch_dropout(
                 bs.ops.to_sparse(x_blksprs, sparsity_layout_x, sparsity_block_size),
                 sparsity_layout_x, sparsity_block_size, dropout)
-            blksprs_normalisation_dense_out = bs.ops.to_dense(blksprs_normalisation_out, sparsity_layout_x,
-                                                              sparsity_block_size)
+            blksprs_dropout_dense_out = bs.ops.to_dense(blksprs_dropout_out, sparsity_layout_x,
+                                                        sparsity_block_size)
 
-            assert torch.allclose(blksprs_normalisation_dense_out.to(stock_dtype), stock_dropout_out, atol=ATOL,
+            assert torch.allclose(blksprs_dropout_dense_out.to(stock_dtype), stock_dropout_out, atol=ATOL,
                                   rtol=RTOL)
 
 
@@ -1505,68 +1479,76 @@ def test_blksprs_scatter_none(config: list):
 # Flash attention performance benchmark
 
 @pytest.mark.benchmark
-@pytest.mark.parametrize("seq_len", [512, 1024, 2048])
-def test_flash_attention_performance(seq_len: int):
-    """Tests that flash attention is faster than regular attention for larger sequence lengths."""
-    n_batches = 2
-    n_heads = 4
-    head_dim = 64
-    sbs = 32
+@pytest.mark.parametrize("m", [512, 1024, 2048])
+def test_flash_attention_performance(m: int):
+    b = 2
+    h = 4
+    k = 64
+    sparsity_block_size = 32
     sparsity_percentage = 0.5
 
-    n_seq_blocks = seq_len // sbs
-    n_head_blocks = head_dim // sbs
-    total_batches = n_batches * n_heads
+    m_s = m // sparsity_block_size
+    k_s = k // sparsity_block_size
+    b_h = b * h
 
-    q = torch.randn(total_batches, seq_len, head_dim, device=DEVICE)
-    k = torch.randn(total_batches, seq_len, head_dim, device=DEVICE)
-    v = torch.randn(total_batches, seq_len, head_dim, device=DEVICE)
+    q = torch.randn(b_h, m, k, device=DEVICE)
+    key = torch.randn(b_h, m, k, device=DEVICE)
+    v = torch.randn(b_h, m, k, device=DEVICE)
 
-    sparsity_layout_qkv = torch.ones(total_batches, n_seq_blocks, n_head_blocks, dtype=torch.bool, device=DEVICE)
+    sparsity_layout_qkv = torch.ones(b_h, m_s, k_s, dtype=torch.bool, device=DEVICE)
 
-    attention_layout = _get_flash_attention_layout(total_batches, n_seq_blocks, n_seq_blocks, sparsity_percentage)
+    attention_layout = _get_flash_attention_layout(b_h, m_s, m_s, sparsity_percentage)
     _ensure_flash_attention_rows(attention_layout)
 
-    q_sparse = bs.ops.to_sparse(q, sparsity_layout_qkv, sbs)
-    k_sparse = bs.ops.to_sparse(k, sparsity_layout_qkv, sbs)
-    v_sparse = bs.ops.to_sparse(v, sparsity_layout_qkv, sbs)
+    q_sparse = bs.ops.to_sparse(q, sparsity_layout_qkv, sparsity_block_size)
+    k_sparse = bs.ops.to_sparse(key, sparsity_layout_qkv, sparsity_block_size)
+    v_sparse = bs.ops.to_sparse(v, sparsity_layout_qkv, sparsity_block_size)
 
-    # Pre-compute transpose and layouts for regular attention
-    k_t, sparsity_layout_kt = bs.ops.transpose(k_sparse, sparsity_layout_qkv, sbs)
-    sparsity_layout_attn = bs.layouting.build_sparsity_layout_matmul(sparsity_layout_qkv, sparsity_layout_kt)
+    k_t, sparsity_layout_kt = bs.ops.transpose(k_sparse, sparsity_layout_qkv, sparsity_block_size)
+    sparsity_layout_attn = attention_layout
     sparsity_layout_o = bs.layouting.build_sparsity_layout_matmul(sparsity_layout_attn, sparsity_layout_qkv)
+    scale = 1.0 / (k ** 0.5)
 
-    # --- Regular (matmul-based) attention ---
+    qk_layout_cache = {}
+    softmax_layout_cache = {}
+    av_layout_cache = {}
+    flash_layout_cache = {}
+
     def regular_attention():
         attn_scores = bs.ops.matmul(q_sparse, sparsity_layout_qkv,
                                     k_t, sparsity_layout_kt,
-                                    sparsity_layout_attn, sbs)
-        attn_probs = bs.ops.softmax(attn_scores, sparsity_layout_attn, sbs)
+                                    sparsity_layout_attn, sparsity_block_size,
+                                    layout_cache=qk_layout_cache)
+        attn_scores = attn_scores * scale
+        attn_probs = bs.ops.softmax(attn_scores, sparsity_layout_attn, sparsity_block_size,
+                                    layout_cache=softmax_layout_cache)
         output = bs.ops.matmul(attn_probs, sparsity_layout_attn,
                                v_sparse, sparsity_layout_qkv,
-                               sparsity_layout_o, sbs)
+                               sparsity_layout_o, sparsity_block_size,
+                               layout_cache=av_layout_cache)
         return output
 
-    # --- Flash attention ---
     def flash_attention():
         output = bs.ops.flash_attention(
             q_sparse, sparsity_layout_qkv,
             k_sparse, sparsity_layout_qkv,
             v_sparse, sparsity_layout_qkv,
-            attention_layout, sbs,
+            attention_layout, sparsity_block_size,
+            scale=scale,
+            layout_cache=flash_layout_cache,
         )
         return output
 
-    # Warmup
     n_warmup = 3
     n_runs = 10
 
     for _ in range(n_warmup):
-        regular_attention()
-        flash_attention()
+        regular_output = regular_attention()
+        flash_output = flash_attention()
     torch.cuda.synchronize()
 
-    # Time regular attention
+    assert torch.allclose(regular_output, flash_output, atol=ATOL, rtol=RTOL)
+
     start_events_reg = [torch.cuda.Event(enable_timing=True) for _ in range(n_runs)]
     end_events_reg = [torch.cuda.Event(enable_timing=True) for _ in range(n_runs)]
     for i in range(n_runs):
@@ -1577,7 +1559,6 @@ def test_flash_attention_performance(seq_len: int):
     regular_times = [s.elapsed_time(e) for s, e in zip(start_events_reg, end_events_reg)]
     median_regular = sorted(regular_times)[n_runs // 2]
 
-    # Time flash attention
     start_events_flash = [torch.cuda.Event(enable_timing=True) for _ in range(n_runs)]
     end_events_flash = [torch.cuda.Event(enable_timing=True) for _ in range(n_runs)]
     for i in range(n_runs):
@@ -1590,11 +1571,12 @@ def test_flash_attention_performance(seq_len: int):
 
     speedup = median_regular / median_flash if median_flash > 0 else float("inf")
 
-    print(f"\n[seq_len={seq_len}] Regular: {median_regular:.3f}ms, Flash: {median_flash:.3f}ms, "
+    print(f"\n[m={m}] Regular: {median_regular:.3f}ms, Flash: {median_flash:.3f}ms, "
           f"Speedup: {speedup:.2f}x")
 
     assert median_regular > 0
     assert median_flash > 0
+    assert median_flash <= median_regular * 1.1
 
 # Utility
 
@@ -1758,7 +1740,7 @@ def _debug_convert_tensor_full(x: Tensor):
 
 def _get_autocast_min_val():
     """Return the minimum finite value for the current dtype.
-    
+
     Note: This is used for fill values in sparse tensors, NOT for attention masking.
     For attention masking, use float("-inf") directly.
     """
@@ -1773,14 +1755,13 @@ def _get_autocast_min_val():
 FLASH_ATTENTION_MAX_SEQ = 512
 
 
-def _get_flash_attention_layout(n_batches: int, n_seq_q: int, n_seq_k: int,
-                                sparsity_pct: float) -> Tensor:
-    attention_layout = torch.ones(n_batches, n_seq_q, n_seq_k, dtype=torch.bool, device=DEVICE)
+def _get_flash_attention_layout(b: int, m: int, n: int, sparsity_percentage: float) -> Tensor:
+    attention_layout = torch.ones(b, m, n, dtype=torch.bool, device=DEVICE)
 
-    num_zero_elements = int(n_seq_q * n_seq_k * sparsity_pct)
-    for b in range(n_batches):
-        indices = torch.randperm(n_seq_q * n_seq_k, device=DEVICE)[:num_zero_elements]
-        attention_layout[b, indices // n_seq_k, indices % n_seq_k] = False
+    num_zero_elements = int(m * n * sparsity_percentage)
+    for b_i in range(b):
+        indices = torch.randperm(m * n, device=DEVICE)[:num_zero_elements]
+        attention_layout[b_i, indices // n, indices % n] = False
 
     return attention_layout
 
@@ -1795,60 +1776,56 @@ def _ensure_flash_attention_rows(attention_layout: Tensor):
                 attention_layout[b_i, i, j] = True
 
 
-def _build_flash_optional_sparse_inputs(mask_dense: Tensor, bias_blksprs: Tensor,
-                                        n_batches: int, n_seq_blocks: int, sparsity_block_size: int):
+def _build_flash_optional_sparse_inputs(attention_mask_dense: Tensor, attention_bias_blksprs: Tensor,
+                                        b: int, m_s: int, sparsity_block_size: int):
     mask_sparse = None
     sparsity_layout_mask = None
-    if mask_dense is not None:
-        sparsity_layout_mask = torch.ones(n_batches, n_seq_blocks, n_seq_blocks, dtype=torch.bool, device=DEVICE)
-        mask_sparse = bs.ops.to_sparse(mask_dense.float(), sparsity_layout_mask, sparsity_block_size)
+    if attention_mask_dense is not None:
+        sparsity_layout_mask = torch.ones(b, m_s, m_s, dtype=torch.bool, device=DEVICE)
+        mask_sparse = bs.ops.to_sparse(attention_mask_dense.float(), sparsity_layout_mask, sparsity_block_size)
 
     bias_sparse = None
     sparsity_layout_bias = None
-    if bias_blksprs is not None:
-        sparsity_layout_bias = torch.ones(n_batches, n_seq_blocks, n_seq_blocks, dtype=torch.bool, device=DEVICE)
-        bias_sparse = bs.ops.to_sparse(bias_blksprs, sparsity_layout_bias, sparsity_block_size)
+    if attention_bias_blksprs is not None:
+        sparsity_layout_bias = torch.ones(b, m_s, m_s, dtype=torch.bool, device=DEVICE)
+        bias_sparse = bs.ops.to_sparse(attention_bias_blksprs, sparsity_layout_bias, sparsity_block_size)
 
     return mask_sparse, sparsity_layout_mask, bias_sparse, sparsity_layout_bias
 
 
-def _reference_attention_blocksparse(
-    q: Tensor, k: Tensor, v: Tensor,
-    attention_layout: Tensor, block_size: int,
-    attention_mask: Tensor = None,
-    attention_bias: Tensor = None,
-    scale: float = None,
-) -> Tensor:
-    n_batches, seq_q, head_dim = q.shape
-    _, seq_k, _ = k.shape
+def _slow_flash_attention(q: Tensor, key: Tensor, v: Tensor,
+                          attention_layout: Tensor, sparsity_block_size: int,
+                          attention_mask: Tensor = None, attention_bias: Tensor = None,
+                          scale: float = None) -> Tensor:
+    b, m, k = q.shape
+    n = key.size(1)
 
     if scale is None:
-        scale = 1.0 / (head_dim ** 0.5)
+        scale = 1.0 / (k ** 0.5)
 
-    attn_scores = torch.bmm(q, k.transpose(-2, -1)) * scale
+    attention_scores = torch.bmm(q, key.transpose(-2, -1)) * scale
 
-    n_seq_blocks_q = seq_q // block_size
-    n_seq_blocks_k = seq_k // block_size
+    m_s = m // sparsity_block_size
+    n_s = n // sparsity_block_size
 
-    for b in range(n_batches):
-        for i in range(n_seq_blocks_q):
-            for j in range(n_seq_blocks_k):
-                if not attention_layout[b, i, j]:
-                    attn_scores[b,
-                                i * block_size:(i + 1) * block_size,
-                                j * block_size:(j + 1) * block_size] = float("-inf")
-
-    if attention_mask is not None:
-        attn_scores = attn_scores.masked_fill(attention_mask, float("-inf"))
+    for b_i in range(b):
+        for m_i in range(m_s):
+            for n_i in range(n_s):
+                if not attention_layout[b_i, m_i, n_i]:
+                    attention_scores[b_i,
+                                     m_i * sparsity_block_size:(m_i + 1) * sparsity_block_size,
+                                     n_i * sparsity_block_size:(n_i + 1) * sparsity_block_size] = float("-inf")
 
     if attention_bias is not None:
-        attn_scores = attn_scores + attention_bias
+        attention_scores = attention_scores + attention_bias
 
-    attn_probs = torch.softmax(attn_scores, dim=-1)
-    attn_probs = torch.nan_to_num(attn_probs, nan=0.0)
+    if attention_mask is not None:
+        attention_scores = attention_scores.masked_fill(attention_mask, float("-inf"))
 
-    out = torch.bmm(attn_probs, v)
-    return out
+    attention_probabilities = torch.softmax(attention_scores, dim=-1)
+    attention_probabilities = torch.nan_to_num(attention_probabilities, nan=0.0)
+
+    return torch.bmm(attention_probabilities, v)
 
 
 def _sample_positions(size: int) -> list[int]:
@@ -1860,9 +1837,15 @@ def _dense_block_index(batch_idx: int, row_idx: int, col_idx: int, n_row_blocks:
 
 
 def _require_min_cuda_memory(min_gib: float) -> None:
-    total_gib = torch.cuda.get_device_properties(DEVICE).total_memory / (1024 ** 3)
+    torch.cuda.synchronize(DEVICE)
+    torch.cuda.empty_cache()
+    free_memory, total_memory = torch.cuda.mem_get_info(DEVICE)
+    total_gib = total_memory / (1024 ** 3)
+    free_gib = free_memory / (1024 ** 3)
     if total_gib < min_gib:
         pytest.skip(f"Requires at least {min_gib:.0f} GiB of GPU memory, found {total_gib:.1f} GiB")
+    if free_gib < min_gib:
+        pytest.skip(f"Requires at least {min_gib:.0f} GiB of free GPU memory, found {free_gib:.1f} GiB")
 
 
 def _set_sample_blocks(tensor: Tensor, block_size: int, sample_batches: list[int], sample_rows: list[int]) -> None:
@@ -1894,77 +1877,74 @@ FLASH_ATTENTION_MIXED_DIM_CONFIGS = [
 @pytest.mark.parametrize("use_mask", [True, False])
 @pytest.mark.parametrize("use_bias", [True, False])
 def test_blksprs_flash_attention(config: tuple, use_amp: bool, use_mask: bool, use_bias: bool):
-    b, m, n, k_dim, sparsity_block_size, sparsity_percentage = config
-    seq = m
-    sbs = sparsity_block_size
-    n_batches = b
-    n_seq_blocks = seq // sbs
-    n_head_blocks_qk = k_dim // sbs
-    n_head_blocks_v = n // sbs
+    b, m, n, k, sparsity_block_size, sparsity_percentage = config
+    m_s = m // sparsity_block_size
+    n_s = n // sparsity_block_size
+    k_s = k // sparsity_block_size
 
-    q = torch.randn(n_batches, seq, k_dim, device=DEVICE)
-    k = torch.randn(n_batches, seq, k_dim, device=DEVICE)
-    v = torch.randn(n_batches, seq, n, device=DEVICE)
+    q_d = torch.randn(b, m, k, device=DEVICE)
+    k_d = torch.randn(b, m, k, device=DEVICE)
+    v_d = torch.randn(b, m, n, device=DEVICE)
 
-    sparsity_layout_q = torch.ones(n_batches, n_seq_blocks, n_head_blocks_qk, dtype=torch.bool, device=DEVICE)
-    sparsity_layout_k = torch.ones(n_batches, n_seq_blocks, n_head_blocks_qk, dtype=torch.bool, device=DEVICE)
-    sparsity_layout_v = torch.ones(n_batches, n_seq_blocks, n_head_blocks_v, dtype=torch.bool, device=DEVICE)
-    sparsity_layout_o = torch.ones(n_batches, n_seq_blocks, n_head_blocks_v, dtype=torch.bool, device=DEVICE)
+    sparsity_layout_q = torch.ones(b, m_s, k_s, dtype=torch.bool, device=DEVICE)
+    sparsity_layout_k = torch.ones(b, m_s, k_s, dtype=torch.bool, device=DEVICE)
+    sparsity_layout_v = torch.ones(b, m_s, n_s, dtype=torch.bool, device=DEVICE)
+    sparsity_layout_o = torch.ones(b, m_s, n_s, dtype=torch.bool, device=DEVICE)
 
-    attention_layout = _get_flash_attention_layout(n_batches, n_seq_blocks, n_seq_blocks, sparsity_percentage)
+    attention_layout = _get_flash_attention_layout(b, m_s, m_s, sparsity_percentage)
     _ensure_flash_attention_rows(attention_layout)
 
-    mask_dense = None
+    attention_mask_dense = None
     if use_mask:
-        mask_dense = torch.rand(n_batches, seq, seq, device=DEVICE) > 0.7
+        attention_mask_dense = torch.rand(b, m, m, device=DEVICE) > 0.7
 
-    bias = None
+    attention_bias_dense = None
     if use_bias:
-        bias = torch.randn(n_batches, seq, seq, device=DEVICE) * 0.1
+        attention_bias_dense = torch.randn(b, m, m, device=DEVICE) * 0.1
 
-    q_stock = q.clone().detach().float().requires_grad_(True)
-    k_stock = k.clone().detach().float().requires_grad_(True)
-    v_stock = v.clone().detach().float().requires_grad_(True)
-    bias_stock = None
-    if bias is not None:
-        bias_stock = bias.clone().detach().float().requires_grad_(True)
+    q_stock = q_d.clone().detach().float().requires_grad_(True)
+    k_stock = k_d.clone().detach().float().requires_grad_(True)
+    v_stock = v_d.clone().detach().float().requires_grad_(True)
+    attention_bias_stock = None
+    if attention_bias_dense is not None:
+        attention_bias_stock = attention_bias_dense.clone().detach().float().requires_grad_(True)
 
-    stock_flash_out = _reference_attention_blocksparse(
-        q_stock, k_stock, v_stock, attention_layout, sbs,
-        attention_mask=mask_dense,
-        attention_bias=bias_stock,
+    stock_flash_out = _slow_flash_attention(
+        q_stock, k_stock, v_stock, attention_layout, sparsity_block_size,
+        attention_mask=attention_mask_dense,
+        attention_bias=attention_bias_stock,
     )
 
-    q_blksprs = q.clone().detach().requires_grad_(True)
-    k_blksprs = k.clone().detach().requires_grad_(True)
-    v_blksprs = v.clone().detach().requires_grad_(True)
-    bias_blksprs = None
-    if bias is not None:
-        bias_blksprs = bias.clone().detach().requires_grad_(True)
+    q_blksprs = q_d.clone().detach().requires_grad_(True)
+    k_blksprs = k_d.clone().detach().requires_grad_(True)
+    v_blksprs = v_d.clone().detach().requires_grad_(True)
+    attention_bias_blksprs = None
+    if attention_bias_dense is not None:
+        attention_bias_blksprs = attention_bias_dense.clone().detach().requires_grad_(True)
 
     with torch.amp.autocast(device_type="cuda", enabled=use_amp):
-        q_sparse = bs.ops.to_sparse(q_blksprs, sparsity_layout_q, sbs)
-        k_sparse = bs.ops.to_sparse(k_blksprs, sparsity_layout_k, sbs)
-        v_sparse = bs.ops.to_sparse(v_blksprs, sparsity_layout_v, sbs)
+        q_sparse = bs.ops.to_sparse(q_blksprs, sparsity_layout_q, sparsity_block_size)
+        k_sparse = bs.ops.to_sparse(k_blksprs, sparsity_layout_k, sparsity_block_size)
+        v_sparse = bs.ops.to_sparse(v_blksprs, sparsity_layout_v, sparsity_block_size)
 
         mask_sparse, sparsity_layout_mask, bias_sparse, sparsity_layout_bias = _build_flash_optional_sparse_inputs(
-            mask_dense, bias_blksprs, n_batches, n_seq_blocks, sbs
+            attention_mask_dense, attention_bias_blksprs, b, m_s, sparsity_block_size
         )
 
         blksprs_flash_out = bs.ops.flash_attention(
             q_sparse, sparsity_layout_q,
             k_sparse, sparsity_layout_k,
             v_sparse, sparsity_layout_v,
-            attention_layout, sbs,
+            attention_layout, sparsity_block_size,
             attention_mask=mask_sparse, sparsity_layout_mask=sparsity_layout_mask,
             attention_bias=bias_sparse, sparsity_layout_bias=sparsity_layout_bias,
             sparsity_layout_o=sparsity_layout_o,
         )
-        blksprs_flash_dense_out = bs.ops.to_dense(blksprs_flash_out, sparsity_layout_o, sbs)
+        blksprs_flash_dense_out = bs.ops.to_dense(blksprs_flash_out, sparsity_layout_o, sparsity_block_size)
 
     assert torch.allclose(
         blksprs_flash_dense_out.float(), stock_flash_out, atol=ATOL, rtol=RTOL
-    ), "Forward output mismatch"
+    )
 
     target = torch.randn_like(stock_flash_out)
     stock_loss = torch.nn.L1Loss()(stock_flash_out, target)
@@ -1977,59 +1957,62 @@ def test_blksprs_flash_attention(config: tuple, use_amp: bool, use_mask: bool, u
         torch.nan_to_num(q_blksprs.grad.float()),
         torch.nan_to_num(q_stock.grad),
         atol=ATOL, rtol=RTOL,
-    ), "dQ mismatch"
+    )
     assert torch.allclose(
         torch.nan_to_num(k_blksprs.grad.float()),
         torch.nan_to_num(k_stock.grad),
         atol=ATOL, rtol=RTOL,
-    ), "dK mismatch"
+    )
     assert torch.allclose(
         torch.nan_to_num(v_blksprs.grad.float()),
         torch.nan_to_num(v_stock.grad),
         atol=ATOL, rtol=RTOL,
-    ), "dV mismatch"
+    )
 
-    if bias_blksprs is not None:
-        assert bias_blksprs.grad is not None, "Bias gradient should not be None"
+    if attention_bias_blksprs is not None:
+        assert attention_bias_blksprs.grad is not None
         assert torch.allclose(
-            torch.nan_to_num(bias_blksprs.grad.float()),
-            torch.nan_to_num(bias_stock.grad),
+            torch.nan_to_num(attention_bias_blksprs.grad.float()),
+            torch.nan_to_num(attention_bias_stock.grad),
             atol=ATOL, rtol=RTOL,
-        ), "dBias mismatch"
+        )
 
 
 @pytest.mark.parametrize("config", FLASH_ATTENTION_MIXED_DIM_CONFIGS)
-def test_blksprs_flash_attention_requires_output_layout_for_mixed_dims(config: tuple):
-    b, m, n, k_dim, sparsity_block_size, sparsity_percentage = config
-    seq = m
-    sbs = sparsity_block_size
-    n_batches = b
-    n_seq_blocks = seq // sbs
-    n_head_blocks_qk = k_dim // sbs
-    n_head_blocks_v = n // sbs
+def test_blksprs_flash_attention_derives_output_layout_for_mixed_dims(config: tuple):
+    b, m, n, k, sparsity_block_size, sparsity_percentage = config
+    m_s = m // sparsity_block_size
+    n_s = n // sparsity_block_size
+    k_s = k // sparsity_block_size
 
-    q = torch.randn(n_batches, seq, k_dim, device=DEVICE)
-    k = torch.randn(n_batches, seq, k_dim, device=DEVICE)
-    v = torch.randn(n_batches, seq, n, device=DEVICE)
+    q = torch.randn(b, m, k, device=DEVICE)
+    key = torch.randn(b, m, k, device=DEVICE)
+    v = torch.randn(b, m, n, device=DEVICE)
 
-    sparsity_layout_q = torch.ones(n_batches, n_seq_blocks, n_head_blocks_qk, dtype=torch.bool, device=DEVICE)
-    sparsity_layout_k = torch.ones(n_batches, n_seq_blocks, n_head_blocks_qk, dtype=torch.bool, device=DEVICE)
-    sparsity_layout_v = torch.ones(n_batches, n_seq_blocks, n_head_blocks_v, dtype=torch.bool, device=DEVICE)
+    sparsity_layout_q = torch.ones(b, m_s, k_s, dtype=torch.bool, device=DEVICE)
+    sparsity_layout_k = torch.ones(b, m_s, k_s, dtype=torch.bool, device=DEVICE)
+    sparsity_layout_v = torch.ones(b, m_s, n_s, dtype=torch.bool, device=DEVICE)
 
-    attention_layout = _get_flash_attention_layout(n_batches, n_seq_blocks, n_seq_blocks, sparsity_percentage)
+    attention_layout = _get_flash_attention_layout(b, m_s, m_s, sparsity_percentage)
     _ensure_flash_attention_rows(attention_layout)
 
-    q_sparse = bs.ops.to_sparse(q, sparsity_layout_q, sbs)
-    k_sparse = bs.ops.to_sparse(k, sparsity_layout_k, sbs)
-    v_sparse = bs.ops.to_sparse(v, sparsity_layout_v, sbs)
+    q_sparse = bs.ops.to_sparse(q, sparsity_layout_q, sparsity_block_size)
+    k_sparse = bs.ops.to_sparse(key, sparsity_layout_k, sparsity_block_size)
+    v_sparse = bs.ops.to_sparse(v, sparsity_layout_v, sparsity_block_size)
 
-    with pytest.raises(ValueError, match="sparsity_layout_o is required"):
-        bs.ops.flash_attention(
-            q_sparse, sparsity_layout_q,
-            k_sparse, sparsity_layout_k,
-            v_sparse, sparsity_layout_v,
-            attention_layout, sbs,
-        )
+    sparsity_layout_o = bs.layouting.build_sparsity_layout_matmul(
+        attention_layout, sparsity_layout_v)
+    output = bs.ops.flash_attention(
+        q_sparse, sparsity_layout_q,
+        k_sparse, sparsity_layout_k,
+        v_sparse, sparsity_layout_v,
+        attention_layout, sparsity_block_size,
+    )
+    output_dense = bs.ops.to_dense(output, sparsity_layout_o, sparsity_block_size)
+    expected = _slow_flash_attention(
+        q, key, v, attention_layout, sparsity_block_size)
+
+    assert torch.allclose(output_dense, expected, atol=ATOL, rtol=RTOL)
 
 
 @pytest.mark.benchmark
@@ -2382,23 +2365,27 @@ def test_blksprs_large_index_scatter_operations(config: tuple):
             idx_sparse[block_idx] = batch_idx
             sparsity_layout_tgt[batch_idx, row_idx, 0] = True
 
-    scattered_sparse = bs.ops.scatter(
-        src_sparse,
-        sparsity_layout_src,
-        0,
-        idx_sparse,
-        sparsity_layout_tgt,
-        sparsity_block_size,
-    )
-    scatter_reduced_sparse = bs.ops.scatter_reduce(
-        src_sparse,
-        sparsity_layout_src,
-        0,
-        idx_sparse,
-        sparsity_layout_tgt,
-        sparsity_block_size,
-        reduce_op="sum",
-    )
+    bs.utils.disable_validation()
+    try:
+        scattered_sparse = bs.ops.scatter(
+            src_sparse,
+            sparsity_layout_src,
+            0,
+            idx_sparse,
+            sparsity_layout_tgt,
+            sparsity_block_size,
+        )
+        scatter_reduced_sparse = bs.ops.scatter_reduce(
+            src_sparse,
+            sparsity_layout_src,
+            0,
+            idx_sparse,
+            sparsity_layout_tgt,
+            sparsity_block_size,
+            reduce_op="sum",
+        )
+    finally:
+        bs.utils.enable_validation()
     torch.cuda.synchronize()
 
     for sparse_idx, (batch_idx, row_idx) in enumerate(
@@ -2440,14 +2427,26 @@ def test_blksprs_large_index_partition_operations(config: tuple):
                 block_idx = _dense_block_index(batch_idx, row_idx, col_idx, n_row_blocks, n_col_blocks)
                 x_sparse[block_idx] = torch.randn_like(x_sparse[block_idx])
 
+    sample_blocks = {
+        (batch_idx, row_idx, col_idx): x_sparse[
+            _dense_block_index(batch_idx, row_idx, col_idx, n_row_blocks, n_col_blocks)
+        ].cpu()
+        for batch_idx in sample_batches
+        for row_idx in sample_rows
+        for col_idx in range(n_col_blocks)
+    }
+
     split_sparse, split_layout = bs.ops.split(x_sparse, sparsity_layout_x, partitions, 2, sparsity_block_size)
     torch.cuda.synchronize()
     for batch_idx in sample_batches:
         for row_idx in sample_rows:
             for col_idx in range(n_col_blocks):
-                source_block_idx = _dense_block_index(batch_idx, row_idx, col_idx, n_row_blocks, n_col_blocks)
                 split_block_idx = _dense_block_index(batch_idx * partitions + col_idx, row_idx, 0, n_row_blocks, 1)
-                assert torch.allclose(split_sparse[split_block_idx], x_sparse[source_block_idx], atol=ATOL, rtol=RTOL)
+                assert torch.allclose(split_sparse[split_block_idx].cpu(),
+                                      sample_blocks[(batch_idx, row_idx, col_idx)], atol=ATOL, rtol=RTOL)
+
+    del x_sparse
+    torch.cuda.empty_cache()
 
     merged_sparse, merged_layout = bs.ops.merge(split_sparse, split_layout, partitions, 2, sparsity_block_size)
     torch.cuda.synchronize()
@@ -2456,9 +2455,10 @@ def test_blksprs_large_index_partition_operations(config: tuple):
         for row_idx in sample_rows:
             for col_idx in range(n_col_blocks):
                 source_block_idx = _dense_block_index(batch_idx, row_idx, col_idx, n_row_blocks, n_col_blocks)
-                assert torch.allclose(merged_sparse[source_block_idx], x_sparse[source_block_idx], atol=ATOL, rtol=RTOL)
+                assert torch.allclose(merged_sparse[source_block_idx].cpu(),
+                                      sample_blocks[(batch_idx, row_idx, col_idx)], atol=ATOL, rtol=RTOL)
 
-    del x_sparse, split_sparse, merged_sparse, sparsity_layout_x, split_layout, merged_layout
+    del split_sparse, merged_sparse, sparsity_layout_x, split_layout, merged_layout
     torch.cuda.empty_cache()
 
 
@@ -2620,7 +2620,7 @@ def test_blksprs_large_index_broadcast_operations(config: tuple):
 @pytest.mark.benchmark
 @pytest.mark.parametrize("config", OVERFLOW_TEST_CONFIGURATIONS)
 def test_blksprs_large_index_softmax_regular(config: tuple):
-    _require_min_cuda_memory(32)
+    _require_min_cuda_memory(20)
 
     b, m, _, k, sparsity_block_size, _ = config
     dtype = torch.float32
@@ -2661,20 +2661,18 @@ def test_blksprs_large_index_softmax_fused(config: tuple):
     n_row_blocks = m // sparsity_block_size
     n_col_blocks = k // sparsity_block_size
 
-    x = torch.randn(size=(b, m, k), device=DEVICE, dtype=dtype)
     sparsity_layout_x = torch.ones(size=(b, n_row_blocks, n_col_blocks), dtype=torch.bool, device=DEVICE)
+    n_sparse_blocks = int(sparsity_layout_x.sum().item())
+    x_sparse = BlksprsTensor.wrap(torch.randn(
+        (n_sparse_blocks, sparsity_block_size, sparsity_block_size), device=DEVICE, dtype=dtype
+    ))
     sample_blocks = {
-        (batch_idx, row_idx): x[
-            batch_idx,
-            row_idx * sparsity_block_size:(row_idx + 1) * sparsity_block_size,
-            :sparsity_block_size,
+        (batch_idx, row_idx): x_sparse[
+            _dense_block_index(batch_idx, row_idx, 0, n_row_blocks, n_col_blocks)
         ].cpu()
         for batch_idx in _sample_positions(b)
         for row_idx in _sample_positions(n_row_blocks)
     }
-    x_sparse = bs.ops.to_sparse(x, sparsity_layout_x, sparsity_block_size)
-    del x
-    torch.cuda.empty_cache()
 
     x_softmax_fused = bs.ops.softmax_fused(x_sparse, sparsity_layout_x, sparsity_block_size)
 
@@ -2684,42 +2682,43 @@ def test_blksprs_large_index_softmax_fused(config: tuple):
             dense_block_softmax = torch.softmax(sample_blocks[(batch_idx, row_idx)], dim=-1)
             assert torch.allclose(x_softmax_fused[blk_idx].cpu(), dense_block_softmax, atol=ATOL, rtol=RTOL)
 
+    del x_sparse, x_softmax_fused, sparsity_layout_x
+    torch.cuda.empty_cache()
+
 
 @pytest.mark.benchmark
 @pytest.mark.parametrize("config", OVERFLOW_FLASH_ATTENTION_CONFIGURATIONS)
 def test_blksprs_flash_attention_large_indices(config: tuple):
     _require_min_cuda_memory(20)
 
-    b, m, n, k_dim, sparsity_block_size, _ = config
+    b, m, n, k, sparsity_block_size, _ = config
     dtype = torch.float16
-    seq = m
-    sbs = sparsity_block_size
-    n_seq_blocks = seq // sbs
-    n_head_blocks_qk = k_dim // sbs
-    n_head_blocks_v = n // sbs
+    m_s = m // sparsity_block_size
+    n_s = n // sparsity_block_size
+    k_s = k // sparsity_block_size
 
-    q = torch.randn(b, seq, k_dim, device=DEVICE, dtype=dtype)
-    k = torch.randn(b, seq, k_dim, device=DEVICE, dtype=dtype)
-    v = torch.randn(b, seq, n, device=DEVICE, dtype=dtype)
+    q = torch.randn(b, m, k, device=DEVICE, dtype=dtype)
+    key = torch.randn(b, m, k, device=DEVICE, dtype=dtype)
+    v = torch.randn(b, m, n, device=DEVICE, dtype=dtype)
 
-    sparsity_layout_q = torch.ones(b, n_seq_blocks, n_head_blocks_qk, dtype=torch.bool, device=DEVICE)
-    sparsity_layout_k = torch.ones(b, n_seq_blocks, n_head_blocks_qk, dtype=torch.bool, device=DEVICE)
-    sparsity_layout_v = torch.ones(b, n_seq_blocks, n_head_blocks_v, dtype=torch.bool, device=DEVICE)
-    sparsity_layout_o = torch.ones(b, n_seq_blocks, n_head_blocks_v, dtype=torch.bool, device=DEVICE)
-    attention_layout = torch.ones(b, n_seq_blocks, n_seq_blocks, dtype=torch.bool, device=DEVICE)
+    sparsity_layout_q = torch.ones(b, m_s, k_s, dtype=torch.bool, device=DEVICE)
+    sparsity_layout_k = torch.ones(b, m_s, k_s, dtype=torch.bool, device=DEVICE)
+    sparsity_layout_v = torch.ones(b, m_s, n_s, dtype=torch.bool, device=DEVICE)
+    sparsity_layout_o = torch.ones(b, m_s, n_s, dtype=torch.bool, device=DEVICE)
+    attention_layout = torch.ones(b, m_s, m_s, dtype=torch.bool, device=DEVICE)
     sample_batches = _sample_positions(b)
 
     q_ref = q[sample_batches].float().cpu()
-    k_ref = k[sample_batches].float().cpu()
+    k_ref = key[sample_batches].float().cpu()
     v_ref = v[sample_batches].float().cpu()
 
-    q_sparse = bs.ops.to_sparse(q, sparsity_layout_q, sbs)
+    q_sparse = bs.ops.to_sparse(q, sparsity_layout_q, sparsity_block_size)
     del q
     torch.cuda.empty_cache()
-    k_sparse = bs.ops.to_sparse(k, sparsity_layout_k, sbs)
-    del k
+    k_sparse = bs.ops.to_sparse(key, sparsity_layout_k, sparsity_block_size)
+    del key
     torch.cuda.empty_cache()
-    v_sparse = bs.ops.to_sparse(v, sparsity_layout_v, sbs)
+    v_sparse = bs.ops.to_sparse(v, sparsity_layout_v, sparsity_block_size)
     del v
     torch.cuda.empty_cache()
 
@@ -2727,17 +2726,17 @@ def test_blksprs_flash_attention_large_indices(config: tuple):
         q_sparse, sparsity_layout_q,
         k_sparse, sparsity_layout_k,
         v_sparse, sparsity_layout_v,
-        attention_layout, sbs,
+        attention_layout, sparsity_block_size,
         sparsity_layout_o=sparsity_layout_o,
     )
-    out_dense = bs.ops.to_dense(out_sparse, sparsity_layout_o, sbs)
+    out_dense = bs.ops.to_dense(out_sparse, sparsity_layout_o, sparsity_block_size)
 
     for sample_idx, batch_idx in enumerate(sample_batches):
-        ref = _reference_attention_blocksparse(
+        ref = _slow_flash_attention(
             q_ref[sample_idx:sample_idx + 1],
             k_ref[sample_idx:sample_idx + 1],
             v_ref[sample_idx:sample_idx + 1],
             attention_layout[batch_idx:batch_idx + 1].cpu(),
-            sbs,
+            sparsity_block_size,
         )
         assert torch.allclose(out_dense[batch_idx:batch_idx + 1].float().cpu(), ref.float(), atol=ATOL, rtol=RTOL)

@@ -4,40 +4,43 @@ from torch._library import triton_op
 
 from blksprs.ops.flow import flow_pull_forward
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import build_packed_indices
+from blksprs.utils.tools import as_base_tensor, build_layout_indices, build_packed_indices, \
+    prepare_layout_cache, finalize_layout_cache
 from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_device, \
     validate_sparsity, validate_sparsity_block_size, validate_positive_integer, validate_divisible, \
-    ensure_contiguous
+    ensure_contiguous, validate_dimension, validate_dtype_supported
 
 
 @torch.amp.custom_fwd(device_type="cuda")
 def split(x: BlksprsTensor, sparsity_layout: Tensor, partitions: int,
-          dim: int, sparsity_block_size: int, layout_cache: dict = None) -> (
-        BlksprsTensor, Tensor):
-    """Splits a block-sparse tensor in compressed form along the last dimension into partitions.
+          dim: int, sparsity_block_size: int, layout_cache: dict | None = None) -> tuple[BlksprsTensor, Tensor]:
+    """Splits a compressed block-sparse tensor along its last dimension.
+
+    For a layout with shape ``(B, R, C)`` and ``P`` partitions, the output layout has shape
+    ``(B * P, R, C // P)``.
 
     Args:
-        x (BlksprsTensor): A block-sparse tensor in compressed form.
-        sparsity_layout (Tensor): The sparsity layout of the block-sparse tensor.
-        partitions (int): The number of partitions to split the block-sparse tensor into.
-        dim (int): The dimension along which to split the tensor. Currently only supports dim=2.
+        x (BlksprsTensor): The compressed input tensor.
+        sparsity_layout (Tensor): The sparsity layout of ``x``.
+        partitions (int): The number of equal partitions.
+        dim (int): The dimension along which to split the tensor. Only ``dim=2`` is supported.
         sparsity_block_size (int): The size of the sparsity blocks.
-        layout_cache (dict, optional): A dictionary containing the layout cache data for the operation (default ``None``).
+        layout_cache (dict, optional): Reusable layout metadata cache (default ``None``).
 
     Returns:
-        BlksprsTensor: The block-sparse tensor split into partitions in compressed form.
-        Tensor: The sparsity layout of the output tensor.
+        tuple[BlksprsTensor, Tensor]: The partitioned tensor in compressed form and its sparsity layout.
 
     """
     x = ensure_contiguous(x)
 
     validate_dimensions(x)
     validate_contiguous(x)
+    validate_dtype_supported(x)
     validate_device(x)
     validate_sparsity(sparsity_block_size, (x, sparsity_layout))
     validate_sparsity_block_size(sparsity_block_size, x)
 
-    adjusted_dim = dim % 3
+    adjusted_dim = validate_dimension(dim)
     if adjusted_dim != 2:
         raise NotImplementedError("Currently only supports dim=2")
     validate_positive_integer(partitions, "partitions")
@@ -59,6 +62,7 @@ def split_forward(x: Tensor, sparsity_layout_o: Tensor, layout_indices: Tensor, 
 
 
 def split_wrapper_backward(ctx, grad_output):
+    grad_output = grad_output.contiguous()
     sparsity_layout = ctx.saved_tensors[0]
     num_partitions = ctx.num_partitions
     dim = ctx.dim
@@ -68,21 +72,24 @@ def split_wrapper_backward(ctx, grad_output):
                  sparsity_block_size)[0], None, None, None, None, None, None, None
 
 
-def split_build_layout_cache(layout_cache: dict, sparsity_layout: Tensor, partitions: int):
-    if layout_cache is None:
-        layout_cache = dict()
+def split_build_layout_cache(layout_cache: dict | None, sparsity_layout: Tensor, partitions: int):
+    layout_cache = prepare_layout_cache(
+        layout_cache, "split", sparsity_layout, partitions)
 
     if "sparsity_layout_output" not in layout_cache:
-        sparsity_layout_output = (sparsity_layout
-                                  .reshape(sparsity_layout.size(0), sparsity_layout.size(1), partitions,
-                                           sparsity_layout.size(2) // partitions)
-                                  .permute(0, 2, 1, 3)
-                                  .reshape(sparsity_layout.size(0) * partitions, sparsity_layout.size(1),
-                                           sparsity_layout.size(2) // partitions).contiguous())
+        sparsity_layout_output = as_base_tensor(
+            sparsity_layout
+            .reshape(sparsity_layout.size(0), sparsity_layout.size(1), partitions,
+                     sparsity_layout.size(2) // partitions)
+            .permute(0, 2, 1, 3)
+            .reshape(sparsity_layout.size(0) * partitions, sparsity_layout.size(1),
+                     sparsity_layout.size(2) // partitions).contiguous())
+        if sparsity_layout_output.data_ptr() == sparsity_layout.data_ptr():
+            sparsity_layout_output = sparsity_layout_output.clone()
         layout_cache["sparsity_layout_output"] = sparsity_layout_output
 
     if "layout_indices" not in layout_cache:
-        layout_indices = torch.nonzero(layout_cache["sparsity_layout_output"]).contiguous()
+        layout_indices = build_layout_indices(layout_cache["sparsity_layout_output"])
         layout_cache["layout_indices"] = layout_indices
 
     if "packed_indices" not in layout_cache:
@@ -98,7 +105,7 @@ def split_build_layout_cache(layout_cache: dict, sparsity_layout: Tensor, partit
 
     validate_contiguous(layout_cache["sparsity_layout_output"], layout_cache["layout_indices"], layout_cache["packed_indices"])
 
-    return layout_cache
+    return finalize_layout_cache(layout_cache)
 
 
 # noinspection PyUnusedLocal
@@ -116,32 +123,34 @@ split_forward.register_autograd(split_wrapper_backward, setup_context=split_setu
 
 @torch.amp.custom_fwd(device_type="cuda")
 def merge(x: BlksprsTensor, sparsity_layout: Tensor, partitions: int,
-          dim: int, sparsity_block_size: int, layout_cache: dict = None) -> (
-        BlksprsTensor, Tensor):
-    """Merges the specified partitions of a block-sparse tensor in compressed form along the last dimension.
+          dim: int, sparsity_block_size: int, layout_cache: dict | None = None) -> tuple[BlksprsTensor, Tensor]:
+    """Merges compressed block-sparse partitions along the last dimension.
+
+    For a layout with shape ``(B, R, C)`` and ``P`` partitions, the output layout has shape
+    ``(B // P, R, C * P)``.
 
     Args:
-        x (BlksprsTensor): A block-sparse tensor in compressed form.
-        sparsity_layout (Tensor): The sparsity layout of the block-sparse tensor.
-        partitions (int): The number of partitions to be merged.
-        dim (int): The dimension along which to merge the tensor. Currently only supports dim=2.
+        x (BlksprsTensor): The compressed partitioned tensor.
+        sparsity_layout (Tensor): The sparsity layout of ``x``.
+        partitions (int): The number of partitions to merge.
+        dim (int): The dimension along which to merge the tensor. Only ``dim=2`` is supported.
         sparsity_block_size (int): The size of the sparsity blocks.
-        layout_cache (dict, optional): A dictionary containing the layout cache data for the operation (default ``None``).
+        layout_cache (dict, optional): Reusable layout metadata cache (default ``None``).
 
     Returns:
-        BlksprsTensor: The merged block-sparse tensor in compressed form.
-        Tensor: The sparsity layout of the output tensor.
+        tuple[BlksprsTensor, Tensor]: The merged tensor in compressed form and its sparsity layout.
 
     """
     x = ensure_contiguous(x)
 
     validate_dimensions(x)
     validate_contiguous(x)
+    validate_dtype_supported(x)
     validate_device(x)
     validate_sparsity(sparsity_block_size, (x, sparsity_layout))
     validate_sparsity_block_size(sparsity_block_size, x)
 
-    adjusted_dim = dim % 3
+    adjusted_dim = validate_dimension(dim)
     if adjusted_dim != 2:
         raise NotImplementedError("Currently only supports dim=2")
     validate_positive_integer(partitions, "partitions")
@@ -163,6 +172,7 @@ def merge_forward(x: Tensor, sparsity_layout_o: Tensor, layout_indices: Tensor, 
 
 
 def merge_wrapper_backward(ctx, grad_output):
+    grad_output = grad_output.contiguous()
     sparsity_layout = ctx.saved_tensors[0]
     num_partitions = ctx.num_partitions
     dim = ctx.dim
@@ -172,21 +182,24 @@ def merge_wrapper_backward(ctx, grad_output):
                  sparsity_block_size)[0], None, None, None, None, None, None, None
 
 
-def merge_build_layout_cache(layout_cache: dict, sparsity_layout: Tensor, partitions: int):
-    if layout_cache is None:
-        layout_cache = dict()
+def merge_build_layout_cache(layout_cache: dict | None, sparsity_layout: Tensor, partitions: int):
+    layout_cache = prepare_layout_cache(
+        layout_cache, "merge", sparsity_layout, partitions)
 
     if "sparsity_layout_output" not in layout_cache:
-        sparsity_layout_output = (sparsity_layout.reshape(sparsity_layout.size(0) // partitions, partitions,
-                                                          sparsity_layout.size(1), sparsity_layout.size(2))
-                                  .permute(0, 2, 1, 3)
-                                  .reshape(sparsity_layout.size(0) // partitions,
-                                           sparsity_layout.size(1),
-                                           sparsity_layout.size(2) * partitions).contiguous())
+        sparsity_layout_output = as_base_tensor(
+            sparsity_layout.reshape(sparsity_layout.size(0) // partitions, partitions,
+                                    sparsity_layout.size(1), sparsity_layout.size(2))
+            .permute(0, 2, 1, 3)
+            .reshape(sparsity_layout.size(0) // partitions,
+                     sparsity_layout.size(1),
+                     sparsity_layout.size(2) * partitions).contiguous())
+        if sparsity_layout_output.data_ptr() == sparsity_layout.data_ptr():
+            sparsity_layout_output = sparsity_layout_output.clone()
         layout_cache["sparsity_layout_output"] = sparsity_layout_output
 
     if "layout_indices" not in layout_cache:
-        layout_indices = torch.nonzero(layout_cache["sparsity_layout_output"]).contiguous()
+        layout_indices = build_layout_indices(layout_cache["sparsity_layout_output"])
         layout_cache["layout_indices"] = layout_indices
 
     if "packed_indices" not in layout_cache:
@@ -205,7 +218,7 @@ def merge_build_layout_cache(layout_cache: dict, sparsity_layout: Tensor, partit
 
     validate_contiguous(layout_cache["sparsity_layout_output"], layout_cache["layout_indices"], layout_cache["packed_indices"])
 
-    return layout_cache
+    return finalize_layout_cache(layout_cache)
 
 
 # noinspection PyUnusedLocal
