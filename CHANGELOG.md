@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Add reusable causal and causal-window Flash Attention layout/mask builders for padded variable-length sequences
+- Add ``flash_attention_relative_embedding()``, a generic fused query-relative embedding term for block-sparse Flash
+  Attention that supports arbitrary integral relation coordinates
+
 ## [2.6.0] - 2026-08-03
 
 ### Added

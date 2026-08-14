@@ -22,7 +22,7 @@ Core operations support gradient calculation unless noted otherwise:
 - Splitting and merging of matrices (_currently restricted to the last dimension_)
 - Conversion between dense and compressed form
 - Conversion to different sparsity layouts and different sparsity block sizes
-- Flash Attention (_supports custom masks and cross-attention_)
+- Flash Attention (_supports custom masks, cross-attention, and fused query-relative embeddings_)
 
 In this library, sparse matrices are represented by a tuple of
 `(matrix, sparsity_layout, sparsity_block_size)`, so element-wise operations can be applied in regular PyTorch fashion.
@@ -200,6 +200,16 @@ Flash Attention uses compressed Q, K, and V tensors together with their individu
 attention. It is a block-level pattern rather than an element-level mask. Flash Attention supports sparsity block sizes
 16, 32, and 64; larger blocks are rejected because the kernel cannot fit them portably into GPU shared memory.
 
+For standard padded causal self-attention, ``bs.layouting`` provides
+``build_causal_self_attention_layout()`` and
+``build_causal_self_attention_mask()``. Their ``valid_lengths`` input preserves
+each sequence's independent valid prefix, while the compact mask stores only
+blocks that need causal or padding refinement. The corresponding
+``build_causal_window_self_attention_layout()`` and
+``build_causal_window_self_attention_mask()`` helpers implement an exact
+token-local causal window. These helpers describe sequence structure only and
+are usable with any compatible block-sparse attention model.
+
 An element-level ``attention_mask`` is also stored in compressed block-sparse form. It may use ``bool`` or a supported
 floating-point dtype, its values must be binary, and a non-zero value means that the position is masked and does not
 participate in attention. This convention matches
@@ -216,6 +226,16 @@ the conservative structural output layout as
 Q sparsity pattern and works when the V/output head dimension differs from the Q/K head dimension. Callers that need the
 layout for a later operation can compute it explicitly with the same helper or read ``sparsity_layout_o`` from a supplied
 Flash Attention layout cache.
+
+``bs.ops.flash_attention_relative_embedding()`` adds a learned relation term
+without materialising a token-pair score tensor. Supply one integral coordinate
+per query and key position plus an embedding table for an inclusive relation
+range; the operation adds ``q @ R[clip(query_relation - key_relation)]`` to
+the usual scaled QK score inside the streaming Flash kernels. It shares the
+same compressed-tensor, mask, output-layout, cache, gradient, and CUDA
+autocast contracts as ``flash_attention()``. The leading relation-table axis is
+the flattened attention batch, so callers can represent independent head
+tables without imposing a model-specific head convention on BLK-SPRS.
 
 ### Validation and contiguous conversion
 

@@ -1,6 +1,12 @@
 """Construction and transformation of sparsity layouts."""
 
 from .distribution_layout import build_distribution_layout
+from .causal import (
+    build_causal_self_attention_layout,
+    build_causal_self_attention_mask,
+    build_causal_window_self_attention_layout,
+    build_causal_window_self_attention_mask,
+)
 from .sparsity_layout import (
     build_sparsity_layout,
     build_sparsity_layout_adaption,
@@ -12,6 +18,10 @@ from .sparsity_layout import (
 
 __all__ = [
     "build_distribution_layout",
+    "build_causal_self_attention_layout",
+    "build_causal_self_attention_mask",
+    "build_causal_window_self_attention_layout",
+    "build_causal_window_self_attention_mask",
     "build_sparsity_layout",
     "build_sparsity_layout_adaption",
     "build_sparsity_layout_full",

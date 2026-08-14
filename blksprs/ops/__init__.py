@@ -15,6 +15,7 @@ from .conversion import (
 )
 from .distribution import gather, scatter, scatter_reduce
 from .flash_attention import flash_attention, flash_attention_build_layout_cache
+from .relative_flash_attention import flash_attention_relative_embedding
 from .matmul import matmul
 from .partitioning import merge, split
 from .repeat import repeat, repeat_interleave
@@ -25,6 +26,7 @@ __all__ = [
     "adapt_layout",
     "flash_attention",
     "flash_attention_build_layout_cache",
+    "flash_attention_relative_embedding",
     "from_blksprs",
     "gather",
     "is_row_striped_layout",
