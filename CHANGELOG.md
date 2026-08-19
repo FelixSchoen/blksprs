@@ -11,6 +11,22 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Add reusable causal and causal-window Flash Attention layout/mask builders for padded variable-length sequences
 - Add ``flash_attention_relative_embedding()``, a generic fused query-relative embedding term for block-sparse Flash
   Attention that supports arbitrary integral relation coordinates
+- Add ``flash_attention_relative_embeddings()`` for up to eight independent relation terms with explicit optional
+  coordinate-validity tensors
+- Add native ``causal_lengths`` support to regular and learned-relative Flash Attention, avoiding explicit causal and
+  padding-mask lookup for full causal self-attention
+
+### Changed
+
+- Fuse tensor-core query/table projection with projected-score lookup in the tiled Flash Attention kernels, and
+  recompute the projection during backward to reduce long-sequence activation memory
+- Reduce clipped endpoint gradients locally before atomic accumulation, eliminating the row-serial relative backward
+  bottleneck
+- Allow callers to declare pairwise-distinct key relations so unclipped relative-embedding gradients can avoid atomic
+  writes
+- Add forward, gradient, multi-relation, validity, autocast, and guarded training-performance regression coverage for
+  learned relative attention
+- Use inline causal and padding predicates in forward and backward kernels when native causal lengths are supplied
 
 ## [2.6.0] - 2026-08-03
 

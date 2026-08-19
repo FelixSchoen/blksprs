@@ -210,6 +210,15 @@ blocks that need causal or padding refinement. The corresponding
 token-local causal window. These helpers describe sequence structure only and
 are usable with any compatible block-sparse attention model.
 
+Flash Attention can apply full causal and padding refinement directly in the
+kernel by receiving ``causal_lengths``, one integral valid length per flattened
+attention batch. In that form, use ``build_causal_self_attention_layout()`` for
+the block pattern and omit the causal ``attention_mask`` entirely. This avoids
+mask storage and lookup while preserving zero output for padded query rows.
+``causal_lengths`` can also be combined with an explicit mask when the caller
+needs additional restrictions; causal-window attention still needs its compact
+window-boundary mask.
+
 An element-level ``attention_mask`` is also stored in compressed block-sparse form. It may use ``bool`` or a supported
 floating-point dtype, its values must be binary, and a non-zero value means that the position is masked and does not
 participate in attention. This convention matches
@@ -227,15 +236,33 @@ Q sparsity pattern and works when the V/output head dimension differs from the Q
 layout for a later operation can compute it explicitly with the same helper or read ``sparsity_layout_o`` from a supplied
 Flash Attention layout cache.
 
-``bs.ops.flash_attention_relative_embedding()`` adds a learned relation term
-without materialising a token-pair score tensor. Supply one integral coordinate
-per query and key position plus an embedding table for an inclusive relation
-range; the operation adds ``q @ R[clip(query_relation - key_relation)]`` to
-the usual scaled QK score inside the streaming Flash kernels. It shares the
-same compressed-tensor, mask, output-layout, cache, gradient, and CUDA
-autocast contracts as ``flash_attention()``. The leading relation-table axis is
-the flattened attention batch, so callers can represent independent head
-tables without imposing a model-specific head convention on BLK-SPRS.
+``bs.ops.flash_attention_relative_embedding()`` adds one learned relation term.
+Supply one integral coordinate per query and key position plus an embedding
+table for an inclusive relation range; the operation adds
+``q @ R[clip(query_relation - key_relation)]`` to the usual scaled QK score.
+The implementation projects queries against the bounded relation table with a
+tensor-core matrix multiplication, and the tiled Flash kernels gather those
+scores directly for active blocks. It never constructs a dense
+sequence-by-sequence tensor. The projection is recomputed during backward so a
+large projected-score table is not retained for every layer.
+
+``bs.ops.flash_attention_relative_embeddings()`` is the generic multi-relation
+form. Coordinates have shape ``(n_relations, attention_batches, sequence)`` and
+the relation tables are concatenated along their relation-range dimension. Up
+to eight terms are supported. Optional per-position validity tensors suppress a
+term when either coordinate is unavailable without reserving a sentinel value
+from the integral coordinate domain. Both forms share the compressed-tensor,
+mask, output-layout, cache, gradient, and CUDA-autocast contracts of
+``flash_attention()``. The flattened attention batch remains model agnostic,
+so callers can use independent per-head tables without imposing a head
+convention on BLK-SPRS.
+
+When valid key coordinates are pairwise distinct, set
+``key_relations_are_unique=True`` for the single-relation form or mark the
+corresponding entries in ``key_relations_are_unique`` for the multi-relation
+form. This avoids atomic writes for unclipped embedding gradients. These flags
+are performance assertions: enabling one for a relation with duplicate valid
+key coordinates produces incorrect gradients.
 
 ### Validation and contiguous conversion
 
