@@ -666,7 +666,7 @@ class _FlashAttentionAutograd(torch.autograd.Function):
             packed_indices_bias if has_bias else dummy_packed_indices,
             query_indices, query_offsets,
             n_batches, n_seq_blocks_q, n_seq_blocks_k,
-            n_head_blocks_qk, n_head_blocks_v, ctx.max_queries_per_key,
+            n_head_blocks_qk, n_head_blocks_v,
             q.size(0), k.size(0), v.size(0), grad_output.size(0),
             attention_mask.size(0) if has_mask else 0,
             attention_bias.size(0) if has_bias else 0,
@@ -733,7 +733,7 @@ class _FlashAttentionAutograd(torch.autograd.Function):
             packed_indices_bias if has_bias else dummy_packed_indices,
             key_indices, key_offsets,
             n_batches, n_seq_blocks_q, n_seq_blocks_k,
-            n_head_blocks_qk, n_head_blocks_v, ctx.max_keys_per_query,
+            n_head_blocks_qk, n_head_blocks_v,
             q.size(0), k.size(0), v.size(0), grad_output.size(0),
             attention_mask.size(0) if has_mask else 0,
             attention_bias.size(0) if has_bias else 0,
@@ -743,6 +743,7 @@ class _FlashAttentionAutograd(torch.autograd.Function):
             has_projected_relative, has_relation_validity,
             sparsity_block_size,
             N_RELATIONS=ctx.n_relations,
+            RELATION_BLOCK_SIZE=max(1, triton.next_power_of_2(ctx.n_relations)),
             UNIQUE_KEY_RELATIONS=unique_key_relations_mask,
             USE_INT64=use_int64_dq)
 
@@ -881,10 +882,16 @@ def _accumulate_projected_relative_score_gradients(
         n_seq_blocks_k,
         total_relation_count,
         N_RELATIONS: tl.constexpr,
+        RELATION_BLOCK_SIZE: tl.constexpr,
         UNIQUE_KEY_RELATIONS: tl.constexpr,
         HAS_RELATION_VALIDITY: tl.constexpr,
         BLOCK_SIZE: tl.constexpr,
 ):
+    relation_slots = tl.arange(0, RELATION_BLOCK_SIZE)
+    minimum_gradients = tl.zeros(
+        (RELATION_BLOCK_SIZE, BLOCK_SIZE), dtype=tl.float32)
+    maximum_gradients = tl.zeros(
+        (RELATION_BLOCK_SIZE, BLOCK_SIZE), dtype=tl.float32)
     rows = tl.arange(0, BLOCK_SIZE)
     columns = tl.arange(0, BLOCK_SIZE)
     q_length = n_seq_blocks_q * BLOCK_SIZE
@@ -952,29 +959,20 @@ def _accumulate_projected_relative_score_gradients(
             & (relation_differences < relation_max)
             & pair_validity
         )
-        row_score_offsets = (
-            (batch_index * q_length + query_positions)
-            * total_relation_count
-            + relation_offset
-        )
         minimum_gradient = tl.sum(
             tl.where(minimum_mask, gradient, 0.0), axis=1)
         maximum_gradient = tl.sum(
             tl.where(maximum_mask, gradient, 0.0), axis=1)
-        tl.atomic_add(
-            drelative_scores + row_score_offsets,
-            minimum_gradient,
-            mask=tl.sum(minimum_mask.to(tl.int32), axis=1) > 0,
-            sem="relaxed",
+        relation_mask = relation_slots[:, None] == relation
+        minimum_gradients += tl.where(
+            relation_mask,
+            minimum_gradient[None, :],
+            0.0,
         )
-        tl.atomic_add(
-            drelative_scores
-            + row_score_offsets
-            + relation_max
-            - relation_min,
-            maximum_gradient,
-            mask=tl.sum(maximum_mask.to(tl.int32), axis=1) > 0,
-            sem="relaxed",
+        maximum_gradients += tl.where(
+            relation_mask,
+            maximum_gradient[None, :],
+            0.0,
         )
         if UNIQUE_KEY_RELATIONS & (1 << relation):
             tl.store(
@@ -989,6 +987,7 @@ def _accumulate_projected_relative_score_gradients(
                 mask=interior_mask,
                 sem="relaxed",
             )
+    return minimum_gradients, maximum_gradients
 
 
 # noinspection PyUnusedLocal
@@ -1299,7 +1298,7 @@ def flash_attention_kernel_bwd_dkdv(q, q_b_s, q_r_s, q_c_s,
                                     pidx_mask, pidx_bias,
                                     query_indices, query_offsets,
                                     n_batches, n_seq_blocks_q, n_seq_blocks_k,
-                                    n_head_blocks_qk, n_head_blocks_v, max_queries_per_key,
+                                    n_head_blocks_qk, n_head_blocks_v,
                                     total_q_blocks, total_k_blocks,
                                     total_v_blocks, total_o_blocks,
                                     total_mask_blocks, total_bias_blocks,
@@ -1325,7 +1324,9 @@ def flash_attention_kernel_bwd_dkdv(q, q_b_s, q_r_s, q_c_s,
     query_end = tl.load(query_offsets + query_offset_idx + 1)
     n_q_blocks = query_end - query_start
 
-    for q_idx in range(max_queries_per_key):
+    # Keep the explicit bound guard: Triton fails to lower some dynamic-loop
+    # configurations without it, even though the loop uses the same bound.
+    for q_idx in range(n_q_blocks):
         if q_idx < n_q_blocks:
             q_seq_block = tl.load(query_indices + query_start + q_idx)
 
@@ -1510,7 +1511,7 @@ def flash_attention_kernel_bwd_dq(q, q_b_s, q_r_s, q_c_s,
                                   pidx_mask, pidx_bias,
                                   key_indices, key_offsets,
                                   n_batches, n_seq_blocks_q, n_seq_blocks_k,
-                                  n_head_blocks_qk, n_head_blocks_v, max_keys_per_query,
+                                  n_head_blocks_qk, n_head_blocks_v,
                                   total_q_blocks, total_k_blocks,
                                   total_v_blocks, total_o_blocks,
                                   total_mask_blocks, total_bias_blocks,
@@ -1520,6 +1521,7 @@ def flash_attention_kernel_bwd_dq(q, q_b_s, q_r_s, q_c_s,
                                   has_projected_relative, has_relation_validity,
                                   sparsity_block_size,
                                   N_RELATIONS: tl.constexpr,
+                                  RELATION_BLOCK_SIZE: tl.constexpr,
                                   UNIQUE_KEY_RELATIONS: tl.constexpr,
                                   USE_INT64: tl.constexpr,
                                   TRITON_BLOCK_SIZE: tl.constexpr) -> None:
@@ -1539,7 +1541,14 @@ def flash_attention_kernel_bwd_dq(q, q_b_s, q_r_s, q_c_s,
     key_end = tl.load(key_offsets + key_offset_idx + 1)
     n_key_blocks = key_end - key_start
 
-    for key_idx in range(max_keys_per_query):
+    minimum_endpoint_gradients = tl.zeros(
+        (RELATION_BLOCK_SIZE, TRITON_BLOCK_SIZE), dtype=tl.float32)
+    maximum_endpoint_gradients = tl.zeros(
+        (RELATION_BLOCK_SIZE, TRITON_BLOCK_SIZE), dtype=tl.float32)
+
+    # Keep the explicit bound guard: Triton fails to lower some dynamic-loop
+    # configurations without it, even though the loop uses the same bound.
+    for key_idx in range(n_key_blocks):
         if key_idx < n_key_blocks:
             k_seq_block = tl.load(key_indices + key_start + key_idx)
 
@@ -1641,26 +1650,31 @@ def flash_attention_kernel_bwd_dq(q, q_b_s, q_r_s, q_c_s,
             ds = p * (dp - delta_row[:, None])
 
             if has_projected_relative:
-                _accumulate_projected_relative_score_gradients(
-                    ds,
-                    drelative_scores,
-                    query_relations,
-                    key_relations,
-                    relation_metadata,
-                    query_relation_validity,
-                    key_relation_validity,
-                    pid_bat,
-                    pid_q_seq,
-                    k_seq_block,
-                    n_batches,
-                    n_seq_blocks_q,
-                    n_seq_blocks_k,
-                    total_relation_count,
-                    N_RELATIONS=N_RELATIONS,
-                    UNIQUE_KEY_RELATIONS=UNIQUE_KEY_RELATIONS,
-                    HAS_RELATION_VALIDITY=has_relation_validity,
-                    BLOCK_SIZE=TRITON_BLOCK_SIZE,
+                minimum_gradients, maximum_gradients = (
+                    _accumulate_projected_relative_score_gradients(
+                        ds,
+                        drelative_scores,
+                        query_relations,
+                        key_relations,
+                        relation_metadata,
+                        query_relation_validity,
+                        key_relation_validity,
+                        pid_bat,
+                        pid_q_seq,
+                        k_seq_block,
+                        n_batches,
+                        n_seq_blocks_q,
+                        n_seq_blocks_k,
+                        total_relation_count,
+                        N_RELATIONS=N_RELATIONS,
+                        RELATION_BLOCK_SIZE=RELATION_BLOCK_SIZE,
+                        UNIQUE_KEY_RELATIONS=UNIQUE_KEY_RELATIONS,
+                        HAS_RELATION_VALIDITY=has_relation_validity,
+                        BLOCK_SIZE=TRITON_BLOCK_SIZE,
+                    )
                 )
+                minimum_endpoint_gradients += minimum_gradients
+                maximum_endpoint_gradients += maximum_gradients
 
             # dQ += ds @ K * scale
             for h in range(n_head_blocks_qk):
@@ -1677,6 +1691,48 @@ def flash_attention_kernel_bwd_dq(q, q_b_s, q_r_s, q_c_s,
                     blk_dq = tl.cast(tl.load(dq + blk_dq_idx, mask=((blk_dq_idx >= 0) & (blk_dq_idx < tl.cast(total_q_blocks, index_dtype) * q_b_s)), other=0), tl.float32)
                     blk_dq += tl.cast(tl.dot(tl.cast(ds, blk_k.dtype), blk_k), tl.float32) * scale
                     tl.store(dq + blk_dq_idx, tl.cast(blk_dq, dq.dtype.element_ty))
+
+    if has_projected_relative:
+        relation_slots = tl.arange(0, RELATION_BLOCK_SIZE)
+        relation_mask = relation_slots < N_RELATIONS
+        relation_minimum = tl.load(
+            relation_metadata + relation_slots * 3,
+            mask=relation_mask,
+            other=0,
+        )
+        relation_maximum = tl.load(
+            relation_metadata + relation_slots * 3 + 1,
+            mask=relation_mask,
+            other=0,
+        )
+        relation_offset = tl.load(
+            relation_metadata + relation_slots * 3 + 2,
+            mask=relation_mask,
+            other=0,
+        )
+        query_positions = pid_q_seq * TRITON_BLOCK_SIZE + idx_row
+        row_score_offsets = (
+            (pid_bat * n_seq_blocks_q * TRITON_BLOCK_SIZE
+             + query_positions[None, :])
+            * total_relation_count
+            + relation_offset[:, None]
+        )
+        tl.store(
+            drelative_scores + row_score_offsets,
+            minimum_endpoint_gradients,
+            mask=relation_mask[:, None],
+        )
+        tl.store(
+            drelative_scores
+            + row_score_offsets
+            + relation_maximum[:, None]
+            - relation_minimum[:, None],
+            maximum_endpoint_gradients,
+            mask=(
+                relation_mask
+                & (relation_maximum != relation_minimum)
+            )[:, None],
+        )
 
 
 def flash_attention_build_layout_cache(attention_layout: Tensor,

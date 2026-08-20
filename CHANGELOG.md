@@ -20,8 +20,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Fuse tensor-core query/table projection with projected-score lookup in the tiled Flash Attention kernels, and
   recompute the projection during backward to reduce long-sequence activation memory
-- Reduce clipped endpoint gradients locally before atomic accumulation, eliminating the row-serial relative backward
-  bottleneck
+- Accumulate clipped endpoint gradients across each query's attended key blocks and store every endpoint once, avoiding
+  contended endpoint atomics in learned-relative backward
+- Iterate over each key or query block's actual backward adjacency instead of the globally padded maximum
 - Allow callers to declare pairwise-distinct key relations so unclipped relative-embedding gradients can avoid atomic
   writes
 - Add forward, gradient, multi-relation, validity, autocast, and guarded training-performance regression coverage for

@@ -157,21 +157,26 @@ def test_relative_flash_attention_supports_cuda_autocast() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-@pytest.mark.parametrize("block_size", [16, 32, 64])
+@pytest.mark.parametrize(
+    ("block_size", "n_blocks"),
+    [(16, 1), (16, 2), (32, 1), (64, 1)],
+)
 def test_multi_relative_flash_attention_matches_dense_forward_and_gradients(
         block_size: int,
+        n_blocks: int,
 ) -> None:
     torch.manual_seed(14)
+    sequence_length = n_blocks * block_size
     bounds = ((-2, 2), (-3, 3), (0, 0))
     query_relations = torch.stack((
-        torch.arange(block_size, device=DEVICE),
-        torch.arange(block_size, device=DEVICE) // 2,
-        torch.arange(block_size, device=DEVICE),
+        torch.arange(sequence_length, device=DEVICE),
+        torch.arange(sequence_length, device=DEVICE) // 2,
+        torch.arange(sequence_length, device=DEVICE),
     )).unsqueeze(1)
     key_relations = torch.stack((
-        torch.arange(block_size, device=DEVICE) // 2,
-        torch.arange(block_size, device=DEVICE) // 3,
-        torch.arange(block_size - 1, -1, -1, device=DEVICE),
+        torch.arange(sequence_length, device=DEVICE) // 2,
+        torch.arange(sequence_length, device=DEVICE) // 3,
+        torch.arange(sequence_length - 1, -1, -1, device=DEVICE),
     )).unsqueeze(1)
     query_relations[:, :, 0] = -1
     key_relations[:, :, 0] = -1
@@ -179,7 +184,7 @@ def test_multi_relative_flash_attention_matches_dense_forward_and_gradients(
     key_validity = key_relations.ge(0)
     fused_inputs = [
         torch.randn(
-            (1, block_size, block_size),
+            (1, sequence_length, block_size),
             device=DEVICE,
             dtype=torch.float32,
             requires_grad=True,
@@ -197,9 +202,15 @@ def test_multi_relative_flash_attention_matches_dense_forward_and_gradients(
         for tensor in fused_inputs
     ]
     reference_embedding = fused_embedding.detach().clone().requires_grad_(True)
-    layout = torch.ones((1, 1, 1), dtype=torch.bool, device=DEVICE)
+    layout = torch.ones(
+        (1, n_blocks, 1), dtype=torch.bool, device=DEVICE)
+    attention_layout = torch.tril(torch.ones(
+        (1, n_blocks, n_blocks), dtype=torch.bool, device=DEVICE))
     mask, mask_layout = bs.layouting.build_causal_self_attention_mask(
-        torch.tensor([block_size], device=DEVICE), layout, block_size)
+        torch.tensor([sequence_length], device=DEVICE),
+        attention_layout,
+        block_size,
+    )
 
     fused_sparse = [
         bs.ops.to_sparse(tensor, layout, block_size)
@@ -210,7 +221,7 @@ def test_multi_relative_flash_attention_matches_dense_forward_and_gradients(
             fused_sparse[0], layout,
             fused_sparse[1], layout,
             fused_sparse[2], layout,
-            layout,
+            attention_layout,
             block_size,
             query_relations,
             key_relations,
@@ -249,7 +260,10 @@ def test_multi_relative_flash_attention_matches_dense_forward_and_gradients(
         relation_offset += relation_max - relation_min + 1
     causal_mask = torch.triu(
         torch.ones(
-            (block_size, block_size), dtype=torch.bool, device=DEVICE),
+            (sequence_length, sequence_length),
+            dtype=torch.bool,
+            device=DEVICE,
+        ),
         diagonal=1,
     )
     reference_output = torch.softmax(
