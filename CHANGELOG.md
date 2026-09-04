@@ -20,6 +20,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Fuse tensor-core query/table projection with projected-score lookup in the tiled Flash Attention kernels, and
   recompute the projection during backward to reduce long-sequence activation memory
+- Pack highly sparse relative-attention query rows and gather them directly from compressed Q, avoiding dense padded
+  projections while retaining the regular path for layouts where most query rows are active
+- Use 32-bit projected-table addressing whenever the complete Flash Attention operation fits safely, and avoid
+  redundant value scans for intrinsically binary boolean masks
 - Accumulate clipped endpoint gradients across each query's attended key blocks and store every endpoint once, avoiding
   contended endpoint atomics in learned-relative backward
 - Iterate over each key or query block's actual backward adjacency instead of the globally padded maximum

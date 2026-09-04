@@ -21,7 +21,7 @@ from blksprs.ops.flash_attention import (
     flash_attention_build_layout_cache,
 )
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import cast_for_autocast
+from blksprs.utils.tools import cast_for_autocast, finalize_layout_cache
 from blksprs.utils.validation import (
     ensure_contiguous,
     validate_contiguous,
@@ -261,7 +261,7 @@ def flash_attention_relative_embeddings(
         validate_device(attention_mask_value, sparsity_layout_mask_value, q)
         if attention_mask_value.dtype != torch.bool:
             validate_dtype_float(attention_mask_value)
-        validate_binary(attention_mask_value)
+            validate_binary(attention_mask_value)
         validate_sparsity(
             sparsity_block_size,
             (attention_mask_value, sparsity_layout_mask_value),
@@ -333,7 +333,13 @@ def flash_attention_relative_embeddings(
         layout_cache=layout_cache,
     )
 
-    dense_q = to_dense(q, sparsity_layout_q, sparsity_block_size)
+    relative_query, projected_query_indices = _pack_relative_queries(
+        q,
+        sparsity_layout_q,
+        attention_layout,
+        sparsity_block_size,
+        layout_cache,
+    )
     return _flash_attention_projected_relative(
         q,
         sparsity_layout_q,
@@ -343,13 +349,14 @@ def flash_attention_relative_embeddings(
         sparsity_layout_v,
         attention_mask_value,
         causal_lengths_value,
-        dense_q,
+        relative_query,
         relative_embeddings,
         query_relations,
         key_relations,
         relation_metadata,
         query_relation_validity_value,
         key_relation_validity_value,
+        projected_query_indices,
         layout_cache,
         sparsity_block_size,
         n_seq_blocks_q,
@@ -361,11 +368,113 @@ def flash_attention_relative_embeddings(
         n_batches,
         n_relations,
         has_relation_validity,
+        projected_query_indices.numel() != 0,
         sum(
             int(keys_are_unique) << relation
             for relation, keys_are_unique in enumerate(unique_key_relations)
         ),
     )
+
+
+def _pack_relative_queries(
+        query: BlksprsTensor,
+        sparsity_layout_q: Tensor,
+        attention_layout: Tensor,
+        sparsity_block_size: int,
+        layout_cache: dict,
+) -> tuple[Tensor, Tensor]:
+    """Pack highly sparse query rows before projecting relation scores.
+
+    A relative projection normally covers every padded query row. Some sparse
+    layouts, such as summary construction, only activate a small fraction of
+    those rows. Packing them keeps the projected score table proportional to
+    the active query set. Dense and moderately sparse layouts retain the
+    regular projection to avoid adding gather overhead to the common case.
+    """
+    cache_key = "relative_query_projection"
+    projection = layout_cache.get(cache_key)
+    if projection is None:
+        active_query_rows = attention_layout.any(dim=-1).repeat_interleave(
+            sparsity_block_size,
+            dim=-1,
+        )
+        active_row_counts = active_query_rows.sum(dim=-1)
+        maximum_active_rows = (
+            int(active_row_counts.max().item())
+            if active_row_counts.numel() > 0
+            else 0
+        )
+        query_length = sparsity_layout_q.size(1) * sparsity_block_size
+        projection = {"packed": maximum_active_rows * 2 <= query_length}
+        if projection["packed"]:
+            row_indices = torch.cumsum(
+                active_query_rows.to(torch.int64), dim=-1
+            ) - 1
+            row_indices = torch.where(
+                active_query_rows,
+                row_indices,
+                torch.full_like(row_indices, -1),
+            ).contiguous()
+            gather_indices = torch.zeros(
+                (sparsity_layout_q.size(0), maximum_active_rows),
+                dtype=torch.int64,
+                device=query.device,
+            )
+            batch_indices, source_indices = active_query_rows.nonzero(
+                as_tuple=True
+            )
+            gather_indices[
+                batch_indices,
+                row_indices[batch_indices, source_indices],
+            ] = source_indices
+            packed_indices_q = layout_cache["packed_indices_q"].reshape(
+                sparsity_layout_q.shape
+            )
+            head_block_indices = torch.arange(
+                sparsity_layout_q.size(2), device=query.device
+            )
+            source_block_indices = packed_indices_q[
+                torch.arange(
+                    sparsity_layout_q.size(0), device=query.device
+                )[:, None, None],
+                (gather_indices // sparsity_block_size)[:, :, None],
+                head_block_indices[None, None, :],
+            ].contiguous()
+            projection["row_indices"] = row_indices
+            projection["gather_indices"] = gather_indices
+            projection["source_block_indices"] = source_block_indices
+            projection["source_row_indices"] = (
+                gather_indices % sparsity_block_size
+            ).contiguous()
+        layout_cache[cache_key] = projection
+        finalize_layout_cache(layout_cache)
+
+    if not projection["packed"]:
+        return to_dense(
+            query, sparsity_layout_q, sparsity_block_size
+        ), torch.empty(
+            0, dtype=torch.int64, device=query.device)
+
+    source_block_indices = projection["source_block_indices"]
+    output_shape = (
+        sparsity_layout_q.size(0),
+        projection["gather_indices"].size(1),
+        sparsity_layout_q.size(2) * sparsity_block_size,
+    )
+    if query.size(0) == 0:
+        packed_query = Tensor(query).new_zeros(output_shape)
+    else:
+        gathered_query = Tensor(query)[
+            source_block_indices.clamp_min(0),
+            projection["source_row_indices"][:, :, None],
+            :,
+        ]
+        packed_query = torch.where(
+            source_block_indices[:, :, :, None] >= 0,
+            gathered_query,
+            torch.zeros_like(gathered_query),
+        ).reshape(output_shape).contiguous()
+    return packed_query, projection["row_indices"]
 
 
 def _normalise_relation_bounds(

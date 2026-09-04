@@ -244,7 +244,10 @@ The implementation projects queries against the bounded relation table with a
 tensor-core matrix multiplication, and the tiled Flash kernels gather those
 scores directly for active blocks. It never constructs a dense
 sequence-by-sequence tensor. The projection is recomputed during backward so a
-large projected-score table is not retained for every layer.
+large projected-score table is not retained for every layer. When at most half
+of the query rows participate in the attention layout, BLK-SPRS also projects
+only those rows and gathers them directly from compressed Q. The reusable Flash
+Attention layout cache retains the corresponding mapping.
 
 ``bs.ops.flash_attention_relative_embeddings()`` is the generic multi-relation
 form. Coordinates have shape ``(n_relations, attention_batches, sequence)`` and

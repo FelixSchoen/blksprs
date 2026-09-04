@@ -147,7 +147,7 @@ def flash_attention(q: BlksprsTensor, sparsity_layout_q: Tensor,
         validate_device(attention_mask_value, sparsity_layout_mask, q)
         if attention_mask_value.dtype != torch.bool:
             validate_dtype_float(attention_mask_value)
-        validate_binary(attention_mask_value)
+            validate_binary(attention_mask_value)
         validate_sparsity(sparsity_block_size, (attention_mask_value, sparsity_layout_mask))
         validate_shape(sparsity_layout_mask, expected_attn_shape, "sparsity_layout_mask")
     else:
@@ -202,6 +202,7 @@ def flash_attention(q: BlksprsTensor, sparsity_layout_q: Tensor,
             empty_float, empty_float,
             empty_integer, empty_integer, empty_integer,
             empty_boolean, empty_boolean,
+            empty_integer,
             sparsity_layout_q, sparsity_layout_k, sparsity_layout_v, sparsity_layout_o,
             layout_cache["packed_indices_q"], layout_cache["packed_indices_k"],
             layout_cache["packed_indices_v"], layout_cache["packed_indices_o"],
@@ -214,7 +215,7 @@ def flash_attention(q: BlksprsTensor, sparsity_layout_q: Tensor,
             layout_cache["n_sparse_blocks_o"],
             scale, has_mask, has_bias,
             n_batches,
-            0, False, False, 0))
+            0, False, False, False, 0))
 
 
 def _normalise_causal_lengths(
@@ -258,6 +259,7 @@ def _flash_attention_projected_relative(
         relation_metadata: Tensor,
         query_relation_validity: Tensor,
         key_relation_validity: Tensor,
+        projected_query_indices: Tensor,
         layout_cache: dict,
         sparsity_block_size: int,
         n_seq_blocks_q: int,
@@ -269,6 +271,7 @@ def _flash_attention_projected_relative(
         n_batches: int,
         n_relations: int,
         has_relation_validity: bool,
+        has_packed_relative_queries: bool,
         unique_key_relations_mask: int,
 ) -> BlksprsTensor:
     """Apply Flash attention with a private learned relative projection."""
@@ -286,6 +289,7 @@ def _flash_attention_projected_relative(
         relative_query, relative_embeddings,
         query_relations, key_relations, relation_metadata,
         query_relation_validity, key_relation_validity,
+        projected_query_indices,
         sparsity_layout_q, sparsity_layout_k, sparsity_layout_v,
         layout_cache["sparsity_layout_o"],
         layout_cache["packed_indices_q"],
@@ -303,6 +307,7 @@ def _flash_attention_projected_relative(
         scale, has_mask, False,
         n_batches,
         n_relations, has_relation_validity, True,
+        has_packed_relative_queries,
         unique_key_relations_mask,
     ))
 
@@ -316,6 +321,7 @@ class _FlashAttentionAutograd(torch.autograd.Function):
         relative_query, relative_embeddings,
         query_relations, key_relations, relation_metadata,
         query_relation_validity, key_relation_validity,
+        projected_query_indices,
         sparsity_layout_q, sparsity_layout_k, sparsity_layout_v, sparsity_layout_o,
         packed_indices_q, packed_indices_k, packed_indices_v, packed_indices_o,
         key_indices, key_offsets,
@@ -328,6 +334,7 @@ class _FlashAttentionAutograd(torch.autograd.Function):
         scale, has_mask, has_bias,
         n_batches,
         n_relations, has_relation_validity, has_projected_relative,
+        has_packed_relative_queries,
         unique_key_relations_mask,
     ):
         has_causal = causal_lengths.numel() != 0
@@ -402,6 +409,7 @@ class _FlashAttentionAutograd(torch.autograd.Function):
             relation_metadata if has_projected_relative else None,
             query_relation_validity if has_relation_validity else None,
             key_relation_validity if has_relation_validity else None,
+            projected_query_indices if has_packed_relative_queries else None,
             packed_indices_q,
             packed_indices_k,
             packed_indices_v,
@@ -430,6 +438,7 @@ class _FlashAttentionAutograd(torch.autograd.Function):
             relative_scores,
             query_relations, key_relations, relation_metadata,
             query_relation_validity, key_relation_validity,
+            projected_query_indices,
             packed_indices_q,
             s_l_q_b, s_l_q_b_s, s_l_q_r_s, s_l_q_c_s,
             packed_indices_k,
@@ -447,9 +456,11 @@ class _FlashAttentionAutograd(torch.autograd.Function):
             attention_mask.size(0) if has_mask else 0,
             attention_bias.size(0) if has_bias else 0,
             total_relation_count,
+            relative_query.size(1) if has_projected_relative else 0,
             scale,
             has_mask, has_bias, has_causal,
             has_projected_relative, has_relation_validity,
+            has_packed_relative_queries,
             sparsity_block_size,
             N_RELATIONS=n_relations,
             USE_INT64=use_int64)
@@ -480,6 +491,8 @@ class _FlashAttentionAutograd(torch.autograd.Function):
                 0, device=q.device, dtype=torch.bool),
             key_relation_validity if has_relation_validity else torch.empty(
                 0, device=q.device, dtype=torch.bool),
+            projected_query_indices if has_packed_relative_queries else torch.empty(
+                0, device=q.device, dtype=torch.int64),
             packed_indices_mask if has_mask else torch.empty(0, device=q.device, dtype=torch.long),
             packed_indices_bias if has_bias else torch.empty(0, device=q.device, dtype=torch.long),
         )
@@ -496,6 +509,7 @@ class _FlashAttentionAutograd(torch.autograd.Function):
         ctx.has_causal = has_causal
         ctx.has_projected_relative = has_projected_relative
         ctx.has_relation_validity = has_relation_validity
+        ctx.has_packed_relative_queries = has_packed_relative_queries
         ctx.n_relations = n_relations
         ctx.unique_key_relations_mask = unique_key_relations_mask
         ctx.n_batches = n_batches
@@ -514,6 +528,7 @@ class _FlashAttentionAutograd(torch.autograd.Function):
          relative_query, relative_embeddings,
          query_relations, key_relations, relation_metadata,
          query_relation_validity, key_relation_validity,
+         projected_query_indices,
          packed_indices_mask, packed_indices_bias,
          ) = ctx.saved_tensors
 
@@ -528,6 +543,7 @@ class _FlashAttentionAutograd(torch.autograd.Function):
         has_causal = ctx.has_causal
         has_projected_relative = ctx.has_projected_relative
         has_relation_validity = ctx.has_relation_validity
+        has_packed_relative_queries = ctx.has_packed_relative_queries
         unique_key_relations_mask = ctx.unique_key_relations_mask
         if has_projected_relative:
             relative_scores = torch.bmm(
@@ -625,6 +641,7 @@ class _FlashAttentionAutograd(torch.autograd.Function):
             relation_metadata if has_projected_relative else None,
             query_relation_validity if has_relation_validity else None,
             key_relation_validity if has_relation_validity else None,
+            projected_query_indices if has_packed_relative_queries else None,
             lse,
             delta,
             attention_mask if has_mask else None,
@@ -654,6 +671,7 @@ class _FlashAttentionAutograd(torch.autograd.Function):
             relative_scores,
             query_relations, key_relations, relation_metadata,
             query_relation_validity, key_relation_validity,
+            projected_query_indices,
             packed_indices_q,
             s_l_q_b_s, s_l_q_r_s, s_l_q_c_s,
             packed_indices_k,
@@ -671,9 +689,11 @@ class _FlashAttentionAutograd(torch.autograd.Function):
             attention_mask.size(0) if has_mask else 0,
             attention_bias.size(0) if has_bias else 0,
             total_relation_count,
+            relative_query.size(1) if has_projected_relative else 0,
             ctx.scale,
             has_mask, has_bias, has_causal,
             has_projected_relative, has_relation_validity,
+            has_packed_relative_queries,
             sparsity_block_size,
             N_RELATIONS=ctx.n_relations,
             USE_INT64=use_int64_dkdv)
@@ -698,6 +718,7 @@ class _FlashAttentionAutograd(torch.autograd.Function):
             relation_metadata if has_projected_relative else None,
             query_relation_validity if has_relation_validity else None,
             key_relation_validity if has_relation_validity else None,
+            projected_query_indices if has_packed_relative_queries else None,
             packed_indices_q,
             packed_indices_k,
             packed_indices_v,
@@ -721,6 +742,7 @@ class _FlashAttentionAutograd(torch.autograd.Function):
             relative_scores,
             query_relations, key_relations, relation_metadata,
             query_relation_validity, key_relation_validity,
+            projected_query_indices,
             packed_indices_q,
             s_l_q_b_s, s_l_q_r_s, s_l_q_c_s,
             packed_indices_k,
@@ -738,9 +760,11 @@ class _FlashAttentionAutograd(torch.autograd.Function):
             attention_mask.size(0) if has_mask else 0,
             attention_bias.size(0) if has_bias else 0,
             total_relation_count,
+            relative_query.size(1) if has_projected_relative else 0,
             ctx.scale,
             has_mask, has_bias, has_causal,
             has_projected_relative, has_relation_validity,
+            has_packed_relative_queries,
             sparsity_block_size,
             N_RELATIONS=ctx.n_relations,
             RELATION_BLOCK_SIZE=max(1, triton.next_power_of_2(ctx.n_relations)),
@@ -776,7 +800,7 @@ class _FlashAttentionAutograd(torch.autograd.Function):
             None, dbias_out,
             None,
             drelative_query, drelative_embeddings,
-            None, None, None, None, None,
+            None, None, None, None, None, None,
             None, None, None, None,
             None, None, None, None,
             None, None, None, None,
@@ -784,7 +808,7 @@ class _FlashAttentionAutograd(torch.autograd.Function):
             None, None, None, None, None,
             None, None, None,
             None, None, None,
-            None, None, None, None, None)
+            None, None, None, None, None, None)
 
 
 @triton.jit
@@ -795,6 +819,7 @@ def _load_projected_relative_scores(
         relation_metadata,
         query_relation_validity,
         key_relation_validity,
+        projected_query_indices,
         batch_index,
         query_block,
         key_block,
@@ -802,16 +827,30 @@ def _load_projected_relative_scores(
         n_seq_blocks_q,
         n_seq_blocks_k,
         total_relation_count,
+        projected_query_length,
         N_RELATIONS: tl.constexpr,
         HAS_RELATION_VALIDITY: tl.constexpr,
+        HAS_PACKED_RELATIVE_QUERIES: tl.constexpr,
+        USE_INT64: tl.constexpr,
         BLOCK_SIZE: tl.constexpr,
 ):
+    index_dtype = tl.int64 if USE_INT64 else tl.int32
     rows = tl.arange(0, BLOCK_SIZE)
     columns = tl.arange(0, BLOCK_SIZE)
     q_length = n_seq_blocks_q * BLOCK_SIZE
     k_length = n_seq_blocks_k * BLOCK_SIZE
     query_positions = query_block * BLOCK_SIZE + rows
     key_positions = key_block * BLOCK_SIZE + columns
+    projected_query_positions = tl.cast(query_positions, index_dtype)
+    if HAS_PACKED_RELATIVE_QUERIES:
+        projected_query_positions = tl.cast(
+            tl.load(
+                projected_query_indices
+                + batch_index * q_length
+                + query_positions
+            ),
+            index_dtype,
+        )
     result = tl.zeros((BLOCK_SIZE, BLOCK_SIZE), dtype=tl.float32)
     for relation in range(N_RELATIONS):
         relation_min = tl.load(relation_metadata + relation * 3)
@@ -827,19 +866,25 @@ def _load_projected_relative_scores(
             + (relation * n_batches + batch_index) * k_length
             + key_positions
         )
-        relation_indices = (
-            tl.maximum(
-                tl.minimum(
-                    query_coordinates[:, None] - key_coordinates[None, :],
-                    relation_max,
-                ),
-                relation_min,
-            )
-            - relation_min
-            + relation_offset
+        relation_indices = tl.cast(
+            (
+                tl.maximum(
+                    tl.minimum(
+                        query_coordinates[:, None] - key_coordinates[None, :],
+                        relation_max,
+                    ),
+                    relation_min,
+                )
+                - relation_min
+                + relation_offset
+            ),
+            index_dtype,
         )
         score_offsets = (
-            (batch_index * q_length + query_positions[:, None])
+            (
+                batch_index * projected_query_length
+                + projected_query_positions[:, None]
+            )
             * total_relation_count
             + relation_indices
         )
@@ -874,6 +919,7 @@ def _accumulate_projected_relative_score_gradients(
         relation_metadata,
         query_relation_validity,
         key_relation_validity,
+        projected_query_indices,
         batch_index,
         query_block,
         key_block,
@@ -881,12 +927,16 @@ def _accumulate_projected_relative_score_gradients(
         n_seq_blocks_q,
         n_seq_blocks_k,
         total_relation_count,
+        projected_query_length,
         N_RELATIONS: tl.constexpr,
         RELATION_BLOCK_SIZE: tl.constexpr,
         UNIQUE_KEY_RELATIONS: tl.constexpr,
         HAS_RELATION_VALIDITY: tl.constexpr,
+        HAS_PACKED_RELATIVE_QUERIES: tl.constexpr,
+        USE_INT64: tl.constexpr,
         BLOCK_SIZE: tl.constexpr,
 ):
+    index_dtype = tl.int64 if USE_INT64 else tl.int32
     relation_slots = tl.arange(0, RELATION_BLOCK_SIZE)
     minimum_gradients = tl.zeros(
         (RELATION_BLOCK_SIZE, BLOCK_SIZE), dtype=tl.float32)
@@ -898,6 +948,16 @@ def _accumulate_projected_relative_score_gradients(
     k_length = n_seq_blocks_k * BLOCK_SIZE
     query_positions = query_block * BLOCK_SIZE + rows
     key_positions = key_block * BLOCK_SIZE + columns
+    projected_query_positions = tl.cast(query_positions, index_dtype)
+    if HAS_PACKED_RELATIVE_QUERIES:
+        projected_query_positions = tl.cast(
+            tl.load(
+                projected_query_indices
+                + batch_index * q_length
+                + query_positions
+            ),
+            index_dtype,
+        )
     for relation in range(N_RELATIONS):
         relation_min = tl.load(relation_metadata + relation * 3)
         relation_max = tl.load(relation_metadata + relation * 3 + 1)
@@ -914,16 +974,22 @@ def _accumulate_projected_relative_score_gradients(
         )
         relation_differences = (
             query_coordinates[:, None] - key_coordinates[None, :])
-        relation_indices = (
-            tl.maximum(
-                tl.minimum(relation_differences, relation_max),
-                relation_min,
-            )
-            - relation_min
-            + relation_offset
+        relation_indices = tl.cast(
+            (
+                tl.maximum(
+                    tl.minimum(relation_differences, relation_max),
+                    relation_min,
+                )
+                - relation_min
+                + relation_offset
+            ),
+            index_dtype,
         )
         score_offsets = (
-            (batch_index * q_length + query_positions[:, None])
+            (
+                batch_index * projected_query_length
+                + projected_query_positions[:, None]
+            )
             * total_relation_count
             + relation_indices
         )
@@ -1014,6 +1080,7 @@ def flash_attention_kernel(q,
                            relative_scores,
                            query_relations, key_relations, relation_metadata,
                            query_relation_validity, key_relation_validity,
+                           projected_query_indices,
                            pidx_q,
                            s_l_q_b, s_l_q_b_s, s_l_q_r_s, s_l_q_c_s,
                            pidx_k,
@@ -1029,9 +1096,11 @@ def flash_attention_kernel(q,
                            n_head_blocks_qk, n_head_blocks_v, max_keys_per_query,
                            total_mask_blocks, total_bias_blocks,
                            total_relation_count,
+                           projected_query_length,
                            scale,
                            has_mask, has_bias, has_causal,
                            has_projected_relative, has_relation_validity,
+                           has_packed_relative_queries,
                            sparsity_block_size,
                            N_RELATIONS: tl.constexpr,
                            USE_INT64: tl.constexpr,
@@ -1112,6 +1181,7 @@ def flash_attention_kernel(q,
                     relation_metadata,
                     query_relation_validity,
                     key_relation_validity,
+                    projected_query_indices,
                     pid_bat,
                     pid_q_seq,
                     k_seq_block,
@@ -1119,8 +1189,11 @@ def flash_attention_kernel(q,
                     n_seq_blocks_q,
                     n_seq_blocks_k,
                     total_relation_count,
+                    projected_query_length,
                     N_RELATIONS=N_RELATIONS,
                     HAS_RELATION_VALIDITY=has_relation_validity,
+                    HAS_PACKED_RELATIVE_QUERIES=has_packed_relative_queries,
+                    USE_INT64=USE_INT64,
                     BLOCK_SIZE=TRITON_BLOCK_SIZE,
                 )
                 buf_s += projected_relative_scores * 1.4426950408889634
@@ -1287,6 +1360,7 @@ def flash_attention_kernel_bwd_dkdv(q, q_b_s, q_r_s, q_c_s,
                                     relative_scores,
                                     query_relations, key_relations, relation_metadata,
                                     query_relation_validity, key_relation_validity,
+                                    projected_query_indices,
                                     pidx_q,
                                     s_l_q_b_s, s_l_q_r_s, s_l_q_c_s,
                                     pidx_k,
@@ -1303,9 +1377,11 @@ def flash_attention_kernel_bwd_dkdv(q, q_b_s, q_r_s, q_c_s,
                                     total_v_blocks, total_o_blocks,
                                     total_mask_blocks, total_bias_blocks,
                                     total_relation_count,
+                                    projected_query_length,
                                     scale,
                                     has_mask, has_bias, has_causal,
                                     has_projected_relative, has_relation_validity,
+                                    has_packed_relative_queries,
                                     sparsity_block_size,
                                     N_RELATIONS: tl.constexpr,
                                     USE_INT64: tl.constexpr,
@@ -1366,6 +1442,7 @@ def flash_attention_kernel_bwd_dkdv(q, q_b_s, q_r_s, q_c_s,
                     relation_metadata,
                     query_relation_validity,
                     key_relation_validity,
+                    projected_query_indices,
                     pid_bat,
                     q_seq_block,
                     pid_k_seq,
@@ -1373,8 +1450,11 @@ def flash_attention_kernel_bwd_dkdv(q, q_b_s, q_r_s, q_c_s,
                     n_seq_blocks_q,
                     n_seq_blocks_k,
                     total_relation_count,
+                    projected_query_length,
                     N_RELATIONS=N_RELATIONS,
                     HAS_RELATION_VALIDITY=has_relation_validity,
+                    HAS_PACKED_RELATIVE_QUERIES=has_packed_relative_queries,
+                    USE_INT64=USE_INT64,
                     BLOCK_SIZE=TRITON_BLOCK_SIZE,
                 )
                 buf_s += projected_relative_scores * 1.4426950408889634
@@ -1500,6 +1580,7 @@ def flash_attention_kernel_bwd_dq(q, q_b_s, q_r_s, q_c_s,
                                   relative_scores,
                                   query_relations, key_relations, relation_metadata,
                                   query_relation_validity, key_relation_validity,
+                                  projected_query_indices,
                                   pidx_q,
                                   s_l_q_b_s, s_l_q_r_s, s_l_q_c_s,
                                   pidx_k,
@@ -1516,9 +1597,11 @@ def flash_attention_kernel_bwd_dq(q, q_b_s, q_r_s, q_c_s,
                                   total_v_blocks, total_o_blocks,
                                   total_mask_blocks, total_bias_blocks,
                                   total_relation_count,
+                                  projected_query_length,
                                   scale,
                                   has_mask, has_bias, has_causal,
                                   has_projected_relative, has_relation_validity,
+                                  has_packed_relative_queries,
                                   sparsity_block_size,
                                   N_RELATIONS: tl.constexpr,
                                   RELATION_BLOCK_SIZE: tl.constexpr,
@@ -1587,6 +1670,7 @@ def flash_attention_kernel_bwd_dq(q, q_b_s, q_r_s, q_c_s,
                     relation_metadata,
                     query_relation_validity,
                     key_relation_validity,
+                    projected_query_indices,
                     pid_bat,
                     pid_q_seq,
                     k_seq_block,
@@ -1594,8 +1678,11 @@ def flash_attention_kernel_bwd_dq(q, q_b_s, q_r_s, q_c_s,
                     n_seq_blocks_q,
                     n_seq_blocks_k,
                     total_relation_count,
+                    projected_query_length,
                     N_RELATIONS=N_RELATIONS,
                     HAS_RELATION_VALIDITY=has_relation_validity,
+                    HAS_PACKED_RELATIVE_QUERIES=has_packed_relative_queries,
+                    USE_INT64=USE_INT64,
                     BLOCK_SIZE=TRITON_BLOCK_SIZE,
                 )
                 buf_s += projected_relative_scores * 1.4426950408889634
@@ -1659,6 +1746,7 @@ def flash_attention_kernel_bwd_dq(q, q_b_s, q_r_s, q_c_s,
                         relation_metadata,
                         query_relation_validity,
                         key_relation_validity,
+                        projected_query_indices,
                         pid_bat,
                         pid_q_seq,
                         k_seq_block,
@@ -1666,10 +1754,13 @@ def flash_attention_kernel_bwd_dq(q, q_b_s, q_r_s, q_c_s,
                         n_seq_blocks_q,
                         n_seq_blocks_k,
                         total_relation_count,
+                        projected_query_length,
                         N_RELATIONS=N_RELATIONS,
                         RELATION_BLOCK_SIZE=RELATION_BLOCK_SIZE,
                         UNIQUE_KEY_RELATIONS=UNIQUE_KEY_RELATIONS,
                         HAS_RELATION_VALIDITY=has_relation_validity,
+                        HAS_PACKED_RELATIVE_QUERIES=has_packed_relative_queries,
+                        USE_INT64=USE_INT64,
                         BLOCK_SIZE=TRITON_BLOCK_SIZE,
                     )
                 )
@@ -1705,33 +1796,54 @@ def flash_attention_kernel_bwd_dq(q, q_b_s, q_r_s, q_c_s,
             mask=relation_mask,
             other=0,
         )
-        relation_offset = tl.load(
-            relation_metadata + relation_slots * 3 + 2,
-            mask=relation_mask,
-            other=0,
+        relation_offset = tl.cast(
+            tl.load(
+                relation_metadata + relation_slots * 3 + 2,
+                mask=relation_mask,
+                other=0,
+            ),
+            index_dtype,
+        )
+        relation_span = tl.cast(
+            relation_maximum - relation_minimum,
+            index_dtype,
         )
         query_positions = pid_q_seq * TRITON_BLOCK_SIZE + idx_row
+        projected_query_positions = tl.cast(query_positions, index_dtype)
+        if has_packed_relative_queries:
+            projected_query_positions = tl.cast(
+                tl.load(
+                    projected_query_indices
+                    + pid_bat * n_seq_blocks_q * TRITON_BLOCK_SIZE
+                    + query_positions
+                ),
+                index_dtype,
+            )
         row_score_offsets = (
-            (pid_bat * n_seq_blocks_q * TRITON_BLOCK_SIZE
-             + query_positions[None, :])
+            (
+                pid_bat * projected_query_length
+                + projected_query_positions[None, :]
+            )
             * total_relation_count
             + relation_offset[:, None]
         )
         tl.store(
             drelative_scores + row_score_offsets,
             minimum_endpoint_gradients,
-            mask=relation_mask[:, None],
+            mask=(
+                relation_mask[:, None]
+                & (projected_query_positions[None, :] >= 0)
+            ),
         )
         tl.store(
             drelative_scores
             + row_score_offsets
-            + relation_maximum[:, None]
-            - relation_minimum[:, None],
+            + relation_span[:, None],
             maximum_endpoint_gradients,
             mask=(
                 relation_mask
                 & (relation_maximum != relation_minimum)
-            )[:, None],
+            )[:, None] & (projected_query_positions[None, :] >= 0),
         )
 
 
