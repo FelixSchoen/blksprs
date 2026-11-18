@@ -140,8 +140,8 @@ Block-sparse tensors are stored in compressed form: only active blocks are prese
 
 Derived layout metadata is passed through an optional ``layout_cache`` dictionary. Internally, ``layout_indices`` map
 compressed block positions to coordinates in the full sparsity layout, while ``packed_indices`` map full sparsity-layout
-positions back to compressed block positions or ``-1`` for inactive blocks. Flash Attention additionally caches
-``key_indices``/``key_offsets`` and ``query_indices``/``query_offsets`` for the attention pattern.
+positions back to compressed block positions or ``-1`` for inactive blocks. Flash Attention additionally caches tile
+schedules of the attention pattern, and learned relative attention the metadata derived from its coordinates.
 
 ### Layout caches
 
@@ -166,6 +166,11 @@ reuse from returning stale metadata. Consequently, a long-lived cache also keeps
 ``layout_cache.clear()`` when the cache is no longer required. Tensors created inside ``torch.inference_mode()`` do not
 provide version counters, so their derived metadata is rebuilt on each call to preserve correctness after possible
 in-place mutations.
+
+Changes are detected through PyTorch's version counters. In-place writes that bypass them, such as writes through
+``tensor.data`` or by custom kernels that write the raw storage, are not detected: the cache then returns stale
+metadata, for example the prepared coordinates of learned relative attention. Pass new tensors or call
+``layout_cache.clear()`` after such writes.
 
 ### Softmax dispatch
 
@@ -198,7 +203,10 @@ maxima.
 Flash Attention uses compressed Q, K, and V tensors together with their individual sparsity layouts. The separate
 ``attention_layout`` has shape ``(batch, query_blocks, key_blocks)`` and marks the Q-K block pairs that participate in
 attention. It is a block-level pattern rather than an element-level mask. Flash Attention supports sparsity block sizes
-16, 32, and 64; larger blocks are rejected because the kernel cannot fit them portably into GPU shared memory.
+16, 32, and 64; larger blocks are rejected because the kernel cannot fit them portably into GPU shared memory. The
+kernels autotune their query and key tiles independently of the sparsity block size: a tile spans one or more sparsity
+blocks and gathers the blocks that its queries attend to, so that sparse layouts and short sparsity blocks retain the
+efficiency of large tiles.
 
 For standard padded causal self-attention, ``bs.layouting`` provides
 ``build_causal_self_attention_layout()`` and
@@ -236,18 +244,21 @@ Q sparsity pattern and works when the V/output head dimension differs from the Q
 layout for a later operation can compute it explicitly with the same helper or read ``sparsity_layout_o`` from a supplied
 Flash Attention layout cache.
 
-``bs.ops.flash_attention_relative_embedding()`` adds one learned relation term.
-Supply one integral coordinate per query and key position plus an embedding
-table for an inclusive relation range; the operation adds
-``q @ R[clip(query_relation - key_relation)]`` to the usual scaled QK score.
-The implementation projects queries against the bounded relation table with a
-tensor-core matrix multiplication, and the tiled Flash kernels gather those
-scores directly for active blocks. It never constructs a dense
-sequence-by-sequence tensor. The projection is recomputed during backward so a
-large projected-score table is not retained for every layer. When at most half
-of the query rows participate in the attention layout, BLK-SPRS also projects
-only those rows and gathers them directly from compressed Q. The reusable Flash
-Attention layout cache retains the corresponding mapping.
+``bs.ops.flash_attention_relative_embedding()`` adds one learned relation term. Supply one integral coordinate per query
+and key position plus an embedding table for an inclusive relation range; the operation adds
+``q @ R[clip(query_relation - key_relation)]`` to the usual scaled QK score. The implementation projects queries against
+the bounded relation table with tensor-core matrix multiplications, and the tiled Flash kernels gather those scores
+directly for active blocks. It never constructs a dense sequence-by-sequence tensor. By default
+(``score_precalculation="referenced_blocks"``), it computes only the blocks of queries and relation values that a
+permitted query-key pair references, that is, a pair in the attention layout, within the causal lengths, and valid for
+the relation; ``score_precalculation="complete"`` projects the complete table for every query. The gaps between the
+referenced blocks of a query block and relation are stored and computed as well for relations whose tables span at
+most eight value blocks, and for all relations if the gaps of a call hold at most one sixty-fourth of its referenced
+blocks. The kernels then address such relations through one offset per query block instead of a lookup per query-key
+pair; for causal music models, this stored at most 0.1 % additional blocks. The projection is recomputed during
+backward so a large projected-score table is not retained for every layer. The reusable Flash Attention layout cache
+retains the referenced blocks for calls with the same coordinate, validity, and causal-length tensors, such as the
+layers of a model.
 
 ``bs.ops.flash_attention_relative_embeddings()`` is the generic multi-relation
 form. Coordinates have shape ``(n_relations, attention_batches, sequence)`` and
@@ -265,7 +276,25 @@ When valid key coordinates are pairwise distinct, set
 corresponding entries in ``key_relations_are_unique`` for the multi-relation
 form. This avoids atomic writes for unclipped embedding gradients. These flags
 are performance assertions: enabling one for a relation with duplicate valid
-key coordinates produces incorrect gradients.
+key coordinates produces incorrect gradients. Only the keys of permitted pairs count: masked keys and keys beyond the
+causal lengths, such as padding keys, may repeat a coordinate.
+
+``key_relations_repeat`` marks the relations whose consecutive keys mostly share their coordinates, such as onsets or
+bar positions. The query-gradient kernel handles these relations once per query and run of keys with equal
+coordinates of all marked relations, in the key tiles that hold few such runs, and per pair in all others. By default,
+every relation without unique keys is marked. A relation whose keys change at almost every key, such as a pitch class,
+should not be marked, since its runs would leave the tiles to the per-pair path; the results do not depend on the
+marks beyond the order of summation.
+
+Distant key tiles of causal layouts often clip a relation to its maximum for every pair, so that the kernels take its
+score from a single table column. The kernels handle the tiles that clip the first two relations, or the only one,
+with a specialised loop, which takes these from their maximum and gathers the others. List the relations that clip
+most often first, such as positions and times before phases or pitch classes.
+
+For float32 operands, the Flash Attention kernels compute their matrix products with TF32 tensor cores, Triton's
+default, regardless of ``torch.backends.cuda.matmul.allow_tf32``; float16 and bfloat16 operands use their native
+products with float32 accumulation. The projection of learned relative scores uses full float32 products for float32
+operands, as ``torch.bmm`` does by default.
 
 ### Validation and contiguous conversion
 
@@ -313,6 +342,53 @@ BLKSPRS_AUTOTUNE=TEST python -m pytest test/cases
 
 ``DEFAULT`` explores the production configuration set. ``TEST`` uses a smaller configuration set to reduce test startup
 time. Any other value is rejected during import.
+
+Triton compiles every kernel variant on first use, which takes seconds to minutes for the Flash Attention kernels, and
+benchmarks the configurations of an autotuned kernel for every new autotuning key. The Flash Attention kernels compile
+one variant per configuration and combination of the static properties of a call: the dtype, the head dimensions, the
+block size, the mask and bias, the causal lengths, the relation validity, the number of relations, their unique and
+repeated keys, and the score pre-calculation. The data of a call, such as its lengths, coordinates, and layouts, do
+not change the compiled code: they only decide at run time which of the compiled variants a call launches, whether
+its relations are all addressed through intervals, and which of the compiled loops a tile takes, so that a model
+compiles a fixed set of variants. The autotuning key also holds power-of-two buckets of the sequence
+length and of the number of tile-schedule entries, which grows with the number and the density of the attention
+batches of a call, whose first occurrences benchmark the compiled configurations again without compiling. Three
+properties of the data still change the compiled code: relation coordinates beyond ``2**29`` in magnitude, which use
+64-bit coordinates; calls whose operands, including the projected relative scores, exceed ``2**31`` elements, which
+use 64-bit indexing; and operand layouts in which a sequence block holds only some of its head-dimension blocks.
+
+``bs.ops.flash_attention_warm_up()`` compiles every variant of a static call configuration and tunes it for given
+shapes ahead of training. For production training, and in particular for distributed training, where a rank that
+compiles or tunes stalls the others:
+
+```bash
+# A persistent Triton cache shared by all ranks and jobs, so that compiled kernels are reused across processes.
+export TRITON_CACHE_DIR=/persistent/shared/triton-cache
+# Persist autotuning results in this cache, so that later processes skip the benchmarking.
+export TRITON_CACHE_AUTOTUNING=1
+```
+
+and warm up before the first distributed step on every rank, each on its own and without collectives, so that no rank
+waits in a collective, with its timeout, while another compiles; the ranks load what another rank has compiled from
+the shared cache. The warm-up needs the static configuration of the calls of training, including the dtype of an
+explicit mask; a forward and backward pass of the model on one real batch covers it as well, but only tunes the
+buckets of that batch:
+
+```python
+import torch
+
+import blksprs as bs
+
+# The static configuration of the calls of a model: 64-dimensional heads in float16 under autocast, three relations,
+# causal lengths and relation validity, for the attention batches (sequences times heads) and lengths of training.
+bs.ops.flash_attention_warm_up(
+    32, 64, torch.float16, [(8 * 16, 1024), (8 * 4, 4096), (8, 16384)],
+    relation_bounds=[(0, 2048), (0, 3072), (-96, 96)], key_relations_are_unique=[True, False, False],
+    key_relations_repeat=[False, True, True], relation_validity=True)
+```
+
+Autotuning results are keyed by the Triton version, the GPU architecture, the kernel source, and the autotuning key,
+so that they are reused only for identical kernels and GPUs of the same architecture.
 
 The following example is verified by
 [`test_readme.py`](https://github.com/FelixSchoen/blksprs/blob/main/test/cases/test_readme.py). See
@@ -438,6 +514,7 @@ def test_readme():
         n_seq_blocks_k=n_seq_blocks,
         n_head_blocks=n_head_blocks,
         sparsity_layout_o=sparsity_layout_o,
+        sparsity_block_size=sparsity_block_size_attn,
     )
 
     attn_out_sparse = bs.ops.flash_attention(

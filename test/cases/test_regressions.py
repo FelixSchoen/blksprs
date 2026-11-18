@@ -11,7 +11,7 @@ import torch
 
 import blksprs as bs
 from blksprs.ops.conversion import to_sparse_build_layout_cache
-from blksprs.ops.flash_attention import _select_segmented_index_dtype
+from blksprs.ops.flash_attention import _schedule_group_blocks, _select_segmented_index_dtype
 from blksprs.utils.benchmarking import benchmark
 
 
@@ -458,7 +458,7 @@ def test_flash_attention_reuses_prebuilt_layout_cache_with_resolved_defaults():
         n_seq_blocks_k=1,
         n_head_blocks=1,
     )
-    key_indices = cache["key_indices"]
+    packed_indices_q = cache["packed_indices_q"]
     source = bs.BlksprsTensor.wrap(torch.randn(
         (1, SPARSITY_BLOCK_SIZE, SPARSITY_BLOCK_SIZE), device=DEVICE))
 
@@ -471,7 +471,7 @@ def test_flash_attention_reuses_prebuilt_layout_cache_with_resolved_defaults():
         layout_cache=cache,
     )
 
-    assert cache["key_indices"] is key_indices
+    assert cache["packed_indices_q"] is packed_indices_q
 
 
 def test_flash_attention_cache_builder_preserves_positional_cache_argument():
@@ -1036,12 +1036,12 @@ def test_flash_attention_rejects_unsupported_block_sizes(sparsity_block_size: in
 
 def test_flash_attention_segmented_metadata_uses_smallest_safe_dtype():
     layout = _full_layout()
-    cache = bs.ops.flash_attention_build_layout_cache(layout)
+    cache = bs.ops.flash_attention_build_layout_cache(layout, sparsity_block_size=SPARSITY_BLOCK_SIZE)
 
-    assert cache["key_indices"].dtype == torch.int32
-    assert cache["key_offsets"].dtype == torch.int32
-    assert cache["query_indices"].dtype == torch.int32
-    assert cache["query_offsets"].dtype == torch.int32
+    for direction in ("query", "key"):
+        schedule = cache[f"{direction}_tile_schedule_{_schedule_group_blocks(SPARSITY_BLOCK_SIZE)}"]
+        assert schedule["offsets"].dtype == torch.int32
+        assert schedule["blocks"].dtype == torch.int32
     assert _select_segmented_index_dtype(2_147_483_647, 2_147_483_648) == torch.int32
     assert _select_segmented_index_dtype(2_147_483_648, 1) == torch.int64
     assert _select_segmented_index_dtype(1, 2_147_483_649) == torch.int64
@@ -1051,10 +1051,11 @@ def test_flash_attention_segmented_metadata_counts_numeric_layouts_exactly():
     n_columns = 65_536
     layout = torch.ones((1, 1, n_columns), dtype=torch.float16, device=DEVICE)
 
-    cache = bs.ops.flash_attention_build_layout_cache(layout)
+    cache = bs.ops.flash_attention_build_layout_cache(layout, sparsity_block_size=SPARSITY_BLOCK_SIZE)
+    schedule = cache[f"query_tile_schedule_{_schedule_group_blocks(SPARSITY_BLOCK_SIZE)}"]
 
-    assert cache["key_indices"].numel() == n_columns
-    assert cache["key_offsets"][-1].item() == n_columns
+    assert schedule["blocks"].numel() == n_columns
+    assert schedule["offsets"][-1].item() == n_columns
 
 
 def test_large_numeric_layout_block_counts_are_exact():

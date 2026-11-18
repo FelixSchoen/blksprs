@@ -2,15 +2,15 @@ import os
 
 import triton
 
-_SUPPORTED_AUTOTUNE_MODES = ("DEFAULT", "TEST")
+SUPPORTED_AUTOTUNE_MODES = ("DEFAULT", "TEST")
 blksprs_autotune_mode = os.getenv("BLKSPRS_AUTOTUNE", "DEFAULT").upper()
 
-if blksprs_autotune_mode not in _SUPPORTED_AUTOTUNE_MODES:
+if blksprs_autotune_mode not in SUPPORTED_AUTOTUNE_MODES:
     raise NotImplementedError(f"Unknown autotune mode: {blksprs_autotune_mode}")
 
 # Named autotune profiles allow each operation family to expose its own
 # configuration space while keeping a small, test-friendly mode.
-_AUTOTUNE_PARAMETER_PROFILES = {
+_AUTOTUNE_PARAMETER_PROFILES: dict[str, dict[str, list[tuple[int, ...]]]] = {
     "generic": {
         "DEFAULT": [
             (16, 3, 8),
@@ -78,22 +78,67 @@ _AUTOTUNE_PARAMETER_PROFILES = {
             (64, 2, 4),
         ],
     },
-    "flash_attention": {
+    # Attention profiles list query and key tile sizes instead of a single block size. Tiles span whole sparsity
+    # blocks, see ``prune_autotune_configs_spanning``. The forward and key/value-gradient profiles start with program
+    # tiles of single sparsity blocks, which suit sparse layouts whose block rows attend to few, scattered blocks. The
+    # last entry of every profile fits into the shared memory of current GPUs for every supported dtype, head
+    # dimension, and optional input.
+    "flash_attention_forward": {
         "DEFAULT": [
-            (16, 3, 4),
-            (16, 4, 4),
+            (32, 64, 2, 4),
 
-            (32, 3, 4),
-            (32, 4, 8),
+            (64, 32, 3, 4),
+            (64, 64, 2, 4),
+            (64, 64, 3, 4),
 
-            (64, 3, 8),
-            (64, 4, 8),
+            (128, 32, 3, 4),
+            (128, 64, 2, 4),
+            (128, 64, 3, 4),
+            (128, 64, 3, 8),
 
+            (64, 64, 1, 4),
         ],
         "TEST": [
-            (16, 3, 4),
-            (32, 3, 4),
-            (64, 3, 8),
+            (64, 64, 2, 4),
+            (64, 64, 1, 4),
+        ],
+    },
+    "flash_attention_backward_dkdv": {
+        "DEFAULT": [
+            (32, 32, 2, 4),
+            (64, 32, 2, 4),
+
+            (32, 64, 3, 4),
+            (32, 128, 2, 4),
+            (32, 128, 3, 4),
+
+            (64, 64, 3, 4),
+            (64, 128, 2, 8),
+
+            (64, 64, 1, 4),
+        ],
+        "TEST": [
+            (64, 64, 2, 4),
+            (64, 64, 1, 4),
+        ],
+    },
+    "flash_attention_backward_dq": {
+        "DEFAULT": [
+            (32, 32, 3, 4),
+            (32, 64, 2, 4),
+
+            (64, 32, 3, 4),
+            (64, 64, 3, 4),
+
+            (128, 32, 3, 4),
+            (128, 64, 2, 4),
+            (128, 64, 2, 8),
+
+            (64, 64, 1, 4),
+        ],
+        "TEST": [
+            (64, 64, 2, 4),
+            (64, 64, 1, 4),
         ],
     },
     "conversion": {
@@ -198,16 +243,12 @@ def get_autotune_parameters(profile: str = "generic", mode: str | None = None):
     mode = blksprs_autotune_mode if mode is None else mode.upper()
     profile = profile.lower()
 
-    if mode not in _SUPPORTED_AUTOTUNE_MODES:
+    if mode not in SUPPORTED_AUTOTUNE_MODES:
         raise NotImplementedError(f"Unknown autotune mode: {mode}")
     if profile not in _AUTOTUNE_PARAMETER_PROFILES:
         raise NotImplementedError(f"Unknown autotune profile: {profile}")
 
     return _AUTOTUNE_PARAMETER_PROFILES[profile][mode]
-
-
-# Backward compatibility for callers that still read this module-level value.
-autotune_parameters = get_autotune_parameters()
 
 
 def prune_autotune_configs(autotune_configs, kernel_args, **kwargs):
@@ -219,13 +260,20 @@ def prune_autotune_configs(autotune_configs, kernel_args, **kwargs):
     )
 
 
-def prune_autotune_configs_exact(autotune_configs, kernel_args, **kwargs):
+def prune_autotune_configs_spanning(autotune_configs, kernel_args, **kwargs):
+    """Keeps configurations whose tiles span whole sparsity blocks in every tiled dimension."""
     sparsity_block_size = kernel_args["sparsity_block_size"]
-    return _prune_autotune_configs_by_block_size(
-        autotune_configs,
-        sparsity_block_size,
-        predicate=lambda triton_block_size, sbs: triton_block_size == sbs,
+    pruned_configs = [
+        config for config in autotune_configs
+        if all(block_size % sparsity_block_size == 0
+               for name, block_size in config.kwargs.items() if name.startswith("TRITON_BLOCK_SIZE"))
+    ]
+
+    assert len(pruned_configs) > 0, (
+        f"No valid autotune configs found for sparsity block size {sparsity_block_size}"
     )
+
+    return pruned_configs
 
 
 def prune_autotune_configs_conversion(autotune_configs, kernel_args, **kwargs):
@@ -254,13 +302,22 @@ def _prune_autotune_configs_by_block_size(autotune_configs, sparsity_block_size,
     return pruned_configs
 
 
-def get_autotune_configs(profile: str = "generic", mode: str | None = None):
+def get_autotune_configs(profile: str = "generic", mode: str | None = None,
+                         block_size_names: tuple[str, ...] = ("TRITON_BLOCK_SIZE",)):
+    """Builds the Triton configurations of a profile.
+
+    Every profile entry lists one block size per name in ``block_size_names``, followed by the number of pipeline
+    stages and warps.
+
+    """
     autotune_parameters = get_autotune_parameters(profile=profile, mode=mode)
 
     autotune_configs = []
 
-    for block_size, num_stages, num_warps in autotune_parameters:
+    for *block_sizes, num_stages, num_warps in autotune_parameters:
+        if len(block_sizes) != len(block_size_names):
+            raise ValueError(f"Autotune profile {profile} does not provide the block sizes {block_size_names}")
         autotune_configs.append(
-            triton.Config({"TRITON_BLOCK_SIZE": block_size}, num_stages=num_stages, num_warps=num_warps))
+            triton.Config(dict(zip(block_size_names, block_sizes)), num_stages=num_stages, num_warps=num_warps))
 
     return autotune_configs

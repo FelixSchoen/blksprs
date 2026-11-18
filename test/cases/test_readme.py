@@ -116,6 +116,7 @@ def test_readme():
         n_seq_blocks_k=n_seq_blocks,
         n_head_blocks=n_head_blocks,
         sparsity_layout_o=sparsity_layout_o,
+        sparsity_block_size=sparsity_block_size_attn,
     )
 
     attn_out_sparse = bs.ops.flash_attention(

@@ -18,6 +18,7 @@ from .flash_attention import flash_attention, flash_attention_build_layout_cache
 from .relative_flash_attention import (
     flash_attention_relative_embedding,
     flash_attention_relative_embeddings,
+    flash_attention_warm_up,
 )
 from .matmul import matmul
 from .partitioning import merge, split
@@ -31,6 +32,7 @@ __all__ = [
     "flash_attention_build_layout_cache",
     "flash_attention_relative_embedding",
     "flash_attention_relative_embeddings",
+    "flash_attention_warm_up",
     "from_blksprs",
     "gather",
     "is_row_striped_layout",

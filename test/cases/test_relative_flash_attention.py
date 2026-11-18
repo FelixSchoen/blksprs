@@ -265,7 +265,7 @@ def test_relative_flash_attention_packs_sparse_query_rows(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_relative_flash_attention_reuses_packed_query_layout_cache() -> None:
+def test_relative_flash_attention_reuses_relation_metadata_of_layout_cache() -> None:
     torch.manual_seed(122)
     sequence_length = 4 * BLOCK_SIZE
     query_layout = torch.zeros(
@@ -316,26 +316,25 @@ def test_relative_flash_attention_reuses_packed_query_layout_cache() -> None:
         )
 
     first = run()
-    first_projection = layout_cache["relative_query_projection"]
-    first_row_indices = first_projection["row_indices"]
-    first_gather_indices = first_projection["gather_indices"]
-    first_source_block_indices = first_projection["source_block_indices"]
-    first_source_row_indices = first_projection["source_row_indices"]
+    first_coordinates = layout_cache["relative_coordinates"]["coordinates"]
     second = run()
 
     torch.testing.assert_close(second, first, rtol=RTOL, atol=ATOL)
-    assert layout_cache["relative_query_projection"] is first_projection
-    assert first_projection["row_indices"] is first_row_indices
-    assert first_projection["gather_indices"] is first_gather_indices
-    assert first_projection["source_block_indices"] is first_source_block_indices
-    assert first_projection["source_row_indices"] is first_source_row_indices
+    assert layout_cache["relative_coordinates"]["coordinates"] is first_coordinates
+    # Only the active query block references blocks of the projected scores.
+    assert first_coordinates.score_blocks.lookup[:, :-1].lt(0).all()
+
+    # Changed coordinates invalidate the cached metadata.
+    relations.add_(1)
+    run()
+    assert layout_cache["relative_coordinates"]["coordinates"] is not first_coordinates
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-@pytest.mark.parametrize("packed_queries", [False, True])
+@pytest.mark.parametrize("sparse_queries", [False, True])
 def test_relative_flash_attention_index_widths_match(
         monkeypatch: pytest.MonkeyPatch,
-        packed_queries: bool,
+        sparse_queries: bool,
 ) -> None:
     """Projected-table addresses are exact with 32- or 64-bit arithmetic."""
     torch.manual_seed(124)
@@ -346,7 +345,7 @@ def test_relative_flash_attention_index_widths_match(
         (batch_size, n_blocks, 1), dtype=torch.bool, device=DEVICE)
     attention_layout = torch.ones(
         (batch_size, n_blocks, n_blocks), dtype=torch.bool, device=DEVICE)
-    if packed_queries:
+    if sparse_queries:
         query_layout[:, :-1] = False
         attention_layout[:, :-1] = False
     key_value_layout = torch.ones_like(query_layout)
@@ -366,7 +365,7 @@ def test_relative_flash_attention_index_widths_match(
         (batch_size, 15, BLOCK_SIZE), device=DEVICE)
     output_gradient = torch.randn_like(base_inputs[0])
 
-    def run() -> tuple[torch.Tensor, tuple[torch.Tensor, ...], bool]:
+    def run() -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
         inputs = [
             tensor.detach().clone().requires_grad_(True)
             for tensor in base_inputs
@@ -401,9 +400,7 @@ def test_relative_flash_attention_index_widths_match(
             tensor.grad.detach().clone()
             for tensor in (*inputs, embeddings)
         )
-        projection_is_packed = layout_cache[
-            "relative_query_projection"]["packed"]
-        return output.detach(), gradients, projection_is_packed
+        return output.detach(), gradients
 
     original_index_check = FLASH_ATTENTION_MODULE.can_use_int32_indexing
     decisions = []
@@ -418,16 +415,15 @@ def test_relative_flash_attention_index_widths_match(
         "can_use_int32_indexing",
         record_index_check,
     )
-    output_32, gradients_32, projection_is_packed = run()
+    output_32, gradients_32 = run()
     assert decisions and all(decisions)
-    assert projection_is_packed is packed_queries
 
     monkeypatch.setattr(
         FLASH_ATTENTION_MODULE,
         "can_use_int32_indexing",
         lambda *values: False,
     )
-    output_64, gradients_64, _ = run()
+    output_64, gradients_64 = run()
 
     torch.testing.assert_close(
         output_32, output_64, rtol=RTOL, atol=ATOL)
@@ -760,6 +756,30 @@ def test_relative_flash_attention_supports_cuda_autocast() -> None:
 
     assert output.dtype == torch.float16
     assert torch.isfinite(output).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("score_precalculation", ["referenced_blocks", "complete"])
+def test_relative_flash_attention_rejects_double_backward(score_precalculation: str) -> None:
+    """The kernels compute first-order gradients only, so that a second differentiation raises an error."""
+    torch.manual_seed(14)
+    query, key, value = [
+        torch.randn((1, 2 * BLOCK_SIZE, BLOCK_SIZE), device=DEVICE, dtype=torch.float32, requires_grad=True)
+        for _ in range(3)
+    ]
+    relations = torch.arange(2 * BLOCK_SIZE, device=DEVICE).unsqueeze(0)
+    embedding = torch.randn((1, 9, BLOCK_SIZE), device=DEVICE, dtype=torch.float32, requires_grad=True)
+    layout = torch.ones((1, 2, 1), dtype=torch.bool, device=DEVICE)
+    attention_layout = torch.tril(torch.ones((1, 2, 2), dtype=torch.bool, device=DEVICE))
+    output = bs.ops.flash_attention_relative_embedding(
+        bs.ops.to_sparse(query, layout, BLOCK_SIZE), layout,
+        bs.ops.to_sparse(key, layout, BLOCK_SIZE), layout,
+        bs.ops.to_sparse(value, layout, BLOCK_SIZE), layout,
+        attention_layout, BLOCK_SIZE, relations, relations, embedding, -4, 4,
+        sparsity_layout_o=layout, score_precalculation=score_precalculation)
+    (query_gradient,) = torch.autograd.grad(output.sum(), query, create_graph=True)
+    with pytest.raises(RuntimeError, match="does not require grad|once_differentiable"):
+        torch.autograd.grad(query_gradient.pow(2).sum(), embedding)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -1214,7 +1234,9 @@ def test_relative_flash_attention_training_performance(
     flash_time = measure(run_flash, inputs)
     relative_time = measure(run_relative, [*inputs, embeddings])
 
-    assert relative_cache["relative_query_projection"]["packed"] is packed_queries
+    # Inactive query rows reference no blocks of the projected scores.
+    score_blocks = relative_cache["relative_coordinates"]["coordinates"].score_blocks
+    assert bool(score_blocks.lookup[:, :-2].lt(0).all()) == packed_queries
 
     assert relative_time <= flash_time * 8, (
         "Relative Flash attention regressed beyond the guarded training-cost "

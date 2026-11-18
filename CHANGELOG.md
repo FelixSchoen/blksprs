@@ -15,23 +15,96 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   coordinate-validity tensors
 - Add native ``causal_lengths`` support to regular and learned-relative Flash Attention, avoiding explicit causal and
   padding-mask lookup for full causal self-attention
+- Add ``flash_attention_warm_up()``, which compiles every Flash Attention kernel variant of a static call
+  configuration and tunes it for given shapes ahead of training
+- Add ``key_relations_repeat`` to learned relative attention to declare the relations whose consecutive keys share
+  their coordinates, which the query-gradient kernel handles once per run of equal keys
 
 ### Changed
 
 - Fuse tensor-core query/table projection with projected-score lookup in the tiled Flash Attention kernels, and
   recompute the projection during backward to reduce long-sequence activation memory
-- Pack highly sparse relative-attention query rows and gather them directly from compressed Q, avoiding dense padded
-  projections while retaining the regular path for layouts where most query rows are active
 - Use 32-bit projected-table addressing whenever the complete Flash Attention operation fits safely, and avoid
   redundant value scans for intrinsically binary boolean masks
 - Accumulate clipped endpoint gradients across each query's attended key blocks and store every endpoint once, avoiding
   contended endpoint atomics in learned-relative backward
-- Iterate over each key or query block's actual backward adjacency instead of the globally padded maximum
 - Allow callers to declare pairwise-distinct key relations so unclipped relative-embedding gradients can avoid atomic
-  writes
+  writes; pairs that are not permitted, such as padding keys that repeat a coordinate, write no gradients
 - Add forward, gradient, multi-relation, validity, autocast, and guarded training-performance regression coverage for
   learned relative attention
 - Use inline causal and padding predicates in forward and backward kernels when native causal lengths are supplied
+- Tile Flash Attention independently of the sparsity block size: query and key tiles span one or more sparsity blocks,
+  every program visits the union of the blocks attended by its tile through a tile schedule in the layout cache, keeps
+  the output and gradients in registers, processes tiles without masking where no block of its tile needs any, and
+  gathers explicit mask and bias elements only for tiles that hold mask or bias blocks
+- Autotune the query and key tile sizes of the Flash Attention forward, key/value-gradient, and query-gradient kernels
+  separately, and allow autotuning profiles to define several block sizes
+- Write Flash Attention outputs and gradients directly in the input dtype instead of casting float32 accumulators
+- Replace the per-block adjacency metadata of the Flash Attention layout cache by tile schedules, and accept an optional
+  ``sparsity_block_size`` argument in ``flash_attention_build_layout_cache()`` to build the schedules ahead of the
+  first call; the cache no longer holds ``key_indices``, ``key_offsets``, ``query_indices``, ``query_offsets``,
+  ``max_keys_per_query``, and ``max_queries_per_key``
+- Pad every relation table of learned relative attention to whole sparsity blocks, so that the score projection and
+  its gradients use aligned matrix multiplications and every value block belongs to one relation
+- Pre-calculate only the blocks of the projected relative scores that permitted query-key pairs reference, instead of
+  the packed projection of sparse query rows, and compute the query and table gradients from these blocks;
+  ``score_precalculation="complete"`` keeps the projection of the complete tables
+- Keep the coordinate-derived metadata of learned relative attention, including the referenced blocks, in the layout
+  cache for calls with the same coordinate, validity, and causal-length tensors, so that later layers of a model repeat
+  neither the preparation nor its synchronisation; input validation and the range check of ``causal_lengths`` still
+  synchronise
+- Mark the referenced blocks only once for consecutive attention batches with equal coordinates, validity, causal
+  lengths, and attention layout, such as the heads of one sequence
+- Apply relation-validity masks only to the tiles that hold positions without valid relations, such as a start token,
+  and process all other tiles without them
+- Handle the relations without unique key coordinates once per query and run of keys with equal coordinates in the
+  query-gradient kernel, where key tiles hold few such runs, instead of once per query-key pair
+- Merge the relations declared through ``key_relations_repeat``, by default all relations without unique keys, so
+  that a relation whose keys rarely repeat, such as a pitch class, can be handled per pair instead of preventing the
+  merge of the others
+- Address the referenced blocks of the projected relative scores through one offset per query block and relation for
+  relations whose stored blocks form one interval of value blocks in every query block, instead of looking up and
+  checking every pair; pairs outside the permitted ones keep masked scores and write no gradients, and zero guard
+  blocks around the referenced blocks keep their addresses within the allocation
+- Store the gaps between the referenced blocks of relations with at most eight value blocks, and those of all
+  relations in calls whose gaps hold at most one sixty-fourth of the referenced blocks, so that these calls address
+  all relations through intervals
+- Compile the Flash Attention kernels only for the static properties of a call, so that the coordinates, lengths, and
+  layouts of a batch never compile or tune new variants, and keep only these properties and the length buckets in the
+  autotuning keys
+- Compile all autotuning configurations and variants of a Flash Attention call configuration in parallel on its first
+  launch instead of one after the other during benchmarking
+- Do not specialise the Flash Attention and referenced relative-score kernels on batch sizes and sequence lengths, so
+  that varying batches compile no further kernel variants
+- Tune the Flash Attention kernels separately for every compiled variant, with all compile-time flags in the autotuning
+  key, including causal lengths, relation validity, unique key relations, head-dimension chunks, row completeness, and
+  64-bit indexing
+- Tune the Flash Attention kernels separately for attention layouts of one length but different density, through a
+  power-of-two bucket of the number of tile-schedule entries in the autotuning key, and offer program tiles of a
+  single sparsity block to the forward and key/value-gradient kernels for sparse layouts
+- Store relation coordinates in 32 bits whenever their clipped differences cannot overflow
+- Process the leading tiles in which every pair reaches the maximum of the first two relations, or of the only one,
+  in a kernel loop specialised to these relations, which reads them from their last table column and sums their
+  gradients per query instead of per pair, instead of compiling a loop for the relations that each call clips; the
+  tiles are found from block-level coordinate bounds
+- Split wide head dimensions into chunks in the projection kernels of the referenced relative-score blocks, so that
+  float32 operands with head dimensions of 256 or more fit into shared memory
+- Raise an error when Flash Attention is differentiated twice instead of returning incorrect second-order gradients
+- Document TF32 products for float32 Flash Attention operands, the version-counter contract of layout caches, and
+  persistent compilation and autotuning caches for production training
+
+### Fixed
+
+- Fix the 32-bit offset check of learned relative attention ignoring the guard blocks around the referenced score
+  blocks that relations addressed through intervals reach
+- Fix the marking and projection kernels of referenced relative-score blocks failing for more than 65,535 query or value
+  blocks per batch
+
+### Removed
+
+- Remove the module-level ``autotune_parameters`` of ``blksprs.utils.autotuning``; use ``get_autotune_parameters()``
+- Remove the ``"flash_attention"`` autotuning profile and ``prune_autotune_configs_exact()``, which no blksprs kernel
+  uses since the Flash Attention kernels are tuned with their own tile-size profiles
 
 ## [2.6.0] - 2026-08-03
 
