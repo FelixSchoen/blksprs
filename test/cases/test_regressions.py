@@ -575,8 +575,6 @@ def test_linear_cache_invalidates_after_parameter_gradient_state_changes(
 
     bs.utils.apply_torch_linear_cached(
         sparse, layout, SPARSITY_BLOCK_SIZE, linear, layout_cache=cache)
-    cached_value_name = "w_t_bs" if parameter_name == "weight" else "bias_slice_bs"
-    initial_cached_value = cache[cached_value_name]
 
     parameter = getattr(linear, parameter_name)
     parameter.requires_grad_(updated_state)
@@ -586,8 +584,8 @@ def test_linear_cache_invalidates_after_parameter_gradient_state_changes(
     expected, expected_layout = bs.utils.apply_torch_linear_cached(
         sparse, layout, SPARSITY_BLOCK_SIZE, linear, layout_cache={})
 
-    assert cache[cached_value_name] is not initial_cached_value
-    assert cache[cached_value_name].requires_grad is updated_state
+    # The cache holds layout metadata only; the parameters enter every call afresh.
+    assert all(not isinstance(value, torch.Tensor) or not value.requires_grad for value in cache.values())
     assert torch.equal(actual_layout, expected_layout)
     assert torch.allclose(actual, expected)
 
@@ -612,20 +610,15 @@ def test_linear_cache_rebuilds_after_gradient_disabled_evaluation(use_bias: bool
     with torch.no_grad():
         bs.utils.apply_torch_linear_cached(
             sparse, layout, SPARSITY_BLOCK_SIZE, linear, layout_cache=cache)
-    evaluation_weight = cache["w_t_bs"]
-    evaluation_bias = cache.get("bias_slice_bs")
 
     output, _ = bs.utils.apply_torch_linear_cached(
         sparse, layout, SPARSITY_BLOCK_SIZE, linear, layout_cache=cache)
     output.sum().backward()
 
-    assert cache["w_t_bs"] is not evaluation_weight
-    assert cache["w_t_bs"].requires_grad
+    assert all(not isinstance(value, torch.Tensor) or not value.requires_grad for value in cache.values())
     assert dense.grad is not None
     assert linear.weight.grad is not None
     if use_bias:
-        assert cache["bias_slice_bs"] is not evaluation_bias
-        assert cache["bias_slice_bs"].requires_grad
         assert linear.bias is not None
         assert linear.bias.grad is not None
 
@@ -1310,7 +1303,7 @@ def test_row_wise_arithmetic_accepts_empty_logical_columns(operation):
     assert output.shape == source.shape
 
 
-def test_single_block_to_dense_returns_base_tensor_and_preserves_autograd():
+def test_single_block_to_dense_returns_new_base_tensor_and_preserves_autograd():
     layout = _full_layout()
     source_base = torch.randn(
         (1, SPARSITY_BLOCK_SIZE, SPARSITY_BLOCK_SIZE),
@@ -1319,8 +1312,10 @@ def test_single_block_to_dense_returns_base_tensor_and_preserves_autograd():
 
     output = bs.ops.to_dense(source, layout, SPARSITY_BLOCK_SIZE)
 
+    # Conversions return new storage for every layout, also for the single-block shortcut.
     assert type(output) is torch.Tensor
-    assert output.data_ptr() == source.data_ptr()
+    assert output.data_ptr() != source.data_ptr()
+    assert torch.equal(output, source_base)
     output.sum().backward()
     assert torch.equal(source_base.grad, torch.ones_like(source_base))
 
@@ -1972,11 +1967,13 @@ def test_layout_builders_and_adaption_preserve_nan_blocks(dtype: torch.dtype):
         SPARSITY_BLOCK_SIZE,
     )
 
+    # The value-based builder keeps the NaN block; the adaption is structural and keeps every source block.
+    expected_adapted_layout = torch.tensor([[[True, True]]], device=DEVICE)
     assert torch.equal(dense_layout, expected_layout)
-    assert torch.equal(adapted_layout, expected_layout)
-    assert torch.equal(returned_layout, expected_layout)
-    assert adapted.shape == (1, SPARSITY_BLOCK_SIZE, SPARSITY_BLOCK_SIZE)
-    assert torch.isnan(adapted[0, 0, 0])
+    assert torch.equal(adapted_layout, expected_adapted_layout)
+    assert torch.equal(returned_layout, expected_adapted_layout)
+    assert adapted.shape == (2, SPARSITY_BLOCK_SIZE, SPARSITY_BLOCK_SIZE)
+    assert torch.isnan(adapted[1, 0, 0])
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])

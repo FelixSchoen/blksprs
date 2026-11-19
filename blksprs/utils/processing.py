@@ -1,14 +1,16 @@
 from collections.abc import Callable
+from typing import cast
 
 import torch
 from torch import Tensor, nn
 
 import blksprs as bs
 from blksprs.layouting.sparsity_layout import build_sparsity_layout_matmul_fast
-from blksprs.ops.conversion import to_sparse, to_sparse_shaped
+from blksprs.ops.conversion import to_sparse
 from blksprs.ops.matmul import matmul
 from blksprs.ops.repeat import repeat
 from blksprs.utils.blksprs_tensor import BlksprsTensor
+from blksprs.utils.public_op import public_op
 from blksprs.utils.tools import prepare_layout_cache, finalize_layout_cache
 from blksprs.utils.validation import ensure_contiguous, validate_contiguous, validate_device, \
     validate_dimensions, validate_dtype_float, validate_dtype_supported, validate_shape, validate_sparsity, \
@@ -24,7 +26,7 @@ def _validate_linear_dtypes(x: Tensor, weight: Tensor, bias: Tensor | None) -> N
         validate_dtype_float(*tensors)
 
 
-@torch.amp.custom_fwd(device_type="cuda")
+@public_op
 def apply_torch_linear(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
                        linear: nn.Linear, bias: nn.Parameter | None = None) -> tuple[BlksprsTensor, Tensor]:
     """Applies a PyTorch linear layer to a block-sparse tensor.
@@ -66,7 +68,7 @@ def apply_torch_linear(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block
     # Apply weights
     xw = matmul(x, sparsity_layout, BlksprsTensor.wrap(w_t_bs.to(x.dtype)), sparsity_layout_w_t, sparsity_layout_output,
                 sparsity_block_size)
-    interim = xw
+    interim: Tensor = xw
 
     # Apply bias
     if b is not None:
@@ -82,17 +84,22 @@ def apply_torch_linear(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block
                                          sparsity_layout_output=sparsity_layout_output)
         interim = interim + b_bs.to(interim.dtype)
 
-    return interim, sparsity_layout_output
+    return cast(BlksprsTensor, interim), sparsity_layout_output
 
 
-@torch.amp.custom_fwd(device_type="cuda")
+@public_op
 def apply_torch_linear_cached(x: BlksprsTensor,
                               sparsity_layout: Tensor,
                               sparsity_block_size: int,
                               linear: nn.Linear,
                               bias: nn.Parameter | None = None,
                               layout_cache: dict | None = None) -> tuple[BlksprsTensor, Tensor]:
-    """Applies a PyTorch linear layer while caching its compressed parameters.
+    """Applies a PyTorch linear layer while caching its layout metadata.
+
+    The cache holds only non-differentiable metadata derived from ``sparsity_layout``, the sparsity block size, and the
+    parameter shapes. The compressed weight and bias are derived from the current parameters on every call, so that
+    optimizer steps, reloaded parameters, gradient accumulation, and activation checkpointing always use the current
+    values and a fresh autograd graph. A warm cache avoids host synchronisation when validation is disabled.
 
     Args:
         x (BlksprsTensor): The compressed input tensor.
@@ -100,7 +107,7 @@ def apply_torch_linear_cached(x: BlksprsTensor,
         sparsity_block_size (int): The size of the sparsity blocks.
         linear (nn.Linear): The linear layer to apply.
         bias (nn.Parameter, optional): An explicit bias overriding ``linear.bias`` (default ``None``).
-        layout_cache (dict, optional): Reusable layout and parameter cache (default ``None``).
+        layout_cache (dict, optional): Reusable layout metadata cache (default ``None``).
 
     Returns:
         tuple[BlksprsTensor, Tensor]: The projected tensor in compressed form and its sparsity layout.
@@ -110,98 +117,91 @@ def apply_torch_linear_cached(x: BlksprsTensor,
     b = bias if bias is not None else linear.bias
     _validate_linear_dtypes(x, w, b)
     validate_sparsity_block_size(sparsity_block_size, w)
+    if b is not None:
+        validate_shape(b, (w.size(0),), "Bias")
 
+    n_batches, n_row_blocks = sparsity_layout.size(0), sparsity_layout.size(1)
+    n_blocks_out = w.size(0) // sparsity_block_size
+
+    layout_cache = apply_torch_linear_build_layout_cache(
+        layout_cache, sparsity_layout, sparsity_block_size, x.device, tuple(w.shape), b is not None)
+
+    interim: Tensor = matmul(x, layout_cache["sparsity_layout_x"],
+                             BlksprsTensor.wrap(_build_linear_weight_blocks(w, sparsity_block_size, x.dtype)),
+                             layout_cache["sparsity_layout_w_t"],
+                             layout_cache["sparsity_layout_o"],
+                             sparsity_block_size, layout_cache=layout_cache["matmul_layout_cache"])
+
+    if b is not None:
+        # Every output block is active, so the bias broadcasts over the stacked row blocks.
+        b_blocks = b.to(interim.dtype).reshape(n_blocks_out, 1, sparsity_block_size)
+        interim = (interim.view(n_batches * n_row_blocks, n_blocks_out, sparsity_block_size, sparsity_block_size)
+                   + b_blocks).flatten(0, 1)
+
+    output_layout = layout_cache["sparsity_layout_output"]
+    finalize_layout_cache(layout_cache)
+    return cast(BlksprsTensor, interim), output_layout
+
+
+@torch.compiler.disable
+def apply_torch_linear_build_layout_cache(layout_cache: dict | None, sparsity_layout: Tensor, sparsity_block_size: int,
+                                          device: torch.device, weight_shape: tuple[int, ...],
+                                          has_bias: bool) -> dict:
+    """Prepares the layout metadata of :func:`apply_torch_linear_cached`.
+
+    The caller finalises the cache once the nested matrix multiplication has populated its own cache.
+
+    """
     layout_cache = prepare_layout_cache(
         layout_cache,
         "apply_torch_linear",
         sparsity_layout,
         sparsity_block_size,
-        x.device,
-        x.dtype,
-        torch.is_grad_enabled(),
-        w,
-        b,
+        device,
+        weight_shape,
+        has_bias,
     )
-
-    if "sparsity_layout_w_t" not in layout_cache:
-        layout_cache["sparsity_layout_w_t"] = torch.ones(
-            size=(sparsity_layout.size(0),
-                  w.size(1) // sparsity_block_size,
-                  w.size(0) // sparsity_block_size),
-            dtype=torch.bool,
-            device=x.device,
-        )
-
-    if "w_t_bs" not in layout_cache:
-        w_t_dense = w.transpose(-1, -2).unsqueeze(0).repeat(
-            sparsity_layout.size(0), 1, 1
-        ).contiguous()
-        layout_cache["w_t_bs"] = to_sparse_shaped(
-            w_t_dense,
-            layout_cache["sparsity_layout_w_t"],
-            sparsity_block_size,
-            layout_cache=layout_cache.setdefault("weight_layout_cache", dict()),
-        )
 
     if "sparsity_layout_output" not in layout_cache:
-        if b is not None:
-            layout_cache["sparsity_layout_output"] = torch.ones(
-                size=(sparsity_layout.size(0),
-                      sparsity_layout.size(1),
-                      w.size(0) // sparsity_block_size),
-                dtype=torch.bool,
-                device=x.device,
-            )
+        n_batches, n_row_blocks = sparsity_layout.size(0), sparsity_layout.size(1)
+        n_blocks_in = weight_shape[1] // sparsity_block_size
+        n_blocks_out = weight_shape[0] // sparsity_block_size
+
+        # Stacking the batches along the rows preserves the order of the compressed blocks, so that a single copy of
+        # the weight serves all batches.
+        sparsity_layout_x = sparsity_layout.reshape(1, n_batches * n_row_blocks, sparsity_layout.size(2))
+        sparsity_layout_w_t = torch.ones(size=(1, n_blocks_in, n_blocks_out), dtype=torch.bool, device=device)
+
+        # A bias can make every output block non-zero, including when the input has no feature blocks.
+        if has_bias:
+            sparsity_layout_o = torch.ones(size=(1, n_batches * n_row_blocks, n_blocks_out), dtype=torch.bool,
+                                           device=device)
         else:
-            layout_cache["sparsity_layout_output"] = build_sparsity_layout_matmul_fast(
-                sparsity_layout,
-                layout_cache["sparsity_layout_w_t"],
-            )
+            sparsity_layout_o = build_sparsity_layout_matmul_fast(sparsity_layout_x, sparsity_layout_w_t)
 
-    interim = matmul(
-        x,
-        sparsity_layout,
-        BlksprsTensor.wrap(layout_cache["w_t_bs"].to(x.dtype)),
-        layout_cache["sparsity_layout_w_t"],
-        layout_cache["sparsity_layout_output"],
-        sparsity_block_size,
-    )
+        layout_cache["sparsity_layout_x"] = sparsity_layout_x
+        layout_cache["sparsity_layout_w_t"] = sparsity_layout_w_t
+        layout_cache["sparsity_layout_o"] = sparsity_layout_o
+        layout_cache["sparsity_layout_output"] = sparsity_layout_o.reshape(n_batches, n_row_blocks, n_blocks_out)
 
-    if b is not None:
-        if "bias_slice_layout" not in layout_cache:
-            b_slice = b.unsqueeze(0).unsqueeze(0).repeat(
-                1, sparsity_block_size, 1
-            ).contiguous()
-            validate_sparsity_block_size(sparsity_block_size, b_slice)
-            layout_cache["bias_slice_layout"] = torch.ones(
-                size=(1,
-                      b_slice.size(1) // sparsity_block_size,
-                      b_slice.size(2) // sparsity_block_size),
-                dtype=torch.bool,
-                device=x.device,
-            )
-            layout_cache["bias_slice_bs"] = to_sparse_shaped(
-                b_slice,
-                layout_cache["bias_slice_layout"],
-                sparsity_block_size,
-                layout_cache=layout_cache.setdefault("bias_slice_layout_cache", dict()),
-            )
+    layout_cache.setdefault("matmul_layout_cache", dict())
 
-        b_bs, _ = repeat(
-            layout_cache["bias_slice_bs"],
-            layout_cache["bias_slice_layout"],
-            (sparsity_layout.size(0), layout_cache["sparsity_layout_output"].size(1), 1),
-            sparsity_block_size,
-            sparsity_layout_output=layout_cache["sparsity_layout_output"],
-            layout_cache=layout_cache.setdefault("bias_repeat_layout_cache", dict()),
-        )
-        interim = interim + b_bs.to(interim.dtype)
-
-    output_layout = layout_cache["sparsity_layout_output"]
-    finalize_layout_cache(layout_cache)
-    return interim, output_layout
+    return layout_cache
 
 
+def _build_linear_weight_blocks(w: Tensor, sparsity_block_size: int, dtype: torch.dtype) -> Tensor:
+    # Compresses the transposed weight under a full single-batch layout. The copy keeps the autograd graph of the
+    # current parameter and is never cached, so it cannot become stale.
+    n_blocks_in = w.size(1) // sparsity_block_size
+    n_blocks_out = w.size(0) // sparsity_block_size
+
+    w_t_blocks = w.to(dtype).t().reshape(n_blocks_in, sparsity_block_size, n_blocks_out, sparsity_block_size)
+
+    return w_t_blocks.permute(0, 2, 1, 3).contiguous().view(n_blocks_in * n_blocks_out, sparsity_block_size,
+                                                            sparsity_block_size)
+
+
+@public_op
 def apply_torch_normalisation(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
                               normalisation: nn.Module) -> BlksprsTensor:
     """Applies a row-wise PyTorch normalisation module to a block-sparse tensor.
@@ -221,6 +221,7 @@ def apply_torch_normalisation(x: BlksprsTensor, sparsity_layout: Tensor, sparsit
     return apply_function_applicable_row_wise(x, sparsity_layout, sparsity_block_size, normalisation)
 
 
+@public_op
 def apply_torch_dropout(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
                         dropout: nn.Dropout) -> BlksprsTensor:
     """Applies a PyTorch dropout module to a block-sparse tensor.
@@ -238,6 +239,7 @@ def apply_torch_dropout(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_bloc
     return apply_function_applicable_row_wise(x, sparsity_layout, sparsity_block_size, dropout)
 
 
+@public_op
 def apply_function_applicable_row_wise(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
                                        function: Callable) -> BlksprsTensor:
     """Applies a callable independently to the packed rows of a block-sparse tensor.

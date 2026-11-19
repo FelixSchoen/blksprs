@@ -11,8 +11,10 @@ import torch
 from torch import Tensor
 
 from blksprs.utils.blksprs_tensor import BlksprsTensor
+from blksprs.utils.public_op import public_op
 
 
+@public_op
 def build_causal_self_attention_layout(
         valid_lengths: Tensor | Sequence[int],
         sparsity_block_size: int,
@@ -48,6 +50,7 @@ def build_causal_self_attention_layout(
             & valid_blocks.unsqueeze(1)).contiguous()
 
 
+@public_op
 def build_causal_self_attention_mask(
         valid_lengths: Tensor | Sequence[int],
         attention_layout: Tensor,
@@ -115,6 +118,17 @@ def _build_causal_attention_mask(
             "attention_layout contains blocks outside the valid causal prefix."
         )
 
+    positions = torch.arange(n_blocks, device=attention_layout.device)
+    block_offsets = positions.unsqueeze(1) - positions.unsqueeze(0)
+    if window_size is not None:
+        window_band = _causal_window_block_band(
+            block_offsets, sparsity_block_size, window_size)
+        if torch.any(attention_layout & torch.logical_not(window_band).unsqueeze(0)):
+            raise ValueError(
+                "attention_layout contains blocks outside the causal window band "
+                "of build_causal_window_self_attention_layout()."
+            )
+
     if n_blocks == 0:
         empty_layout = torch.zeros_like(attention_layout)
         empty_mask = torch.empty(
@@ -124,15 +138,16 @@ def _build_causal_attention_mask(
         )
         return BlksprsTensor.wrap(empty_mask), empty_layout
 
-    positions = torch.arange(n_blocks, device=attention_layout.device)
-    diagonal = positions.unsqueeze(0) == positions.unsqueeze(1)
+    diagonal = block_offsets == 0
     if window_size is None:
         window_boundary = torch.zeros_like(diagonal)
     else:
-        maximum_block_offset = _ceil_div(window_size - 1, sparsity_block_size)
-        window_boundary = (
-            positions.unsqueeze(1) - positions.unsqueeze(0) == maximum_block_offset
-        )
+        # A block at offset d spans the token distances d * bs - (bs - 1) to
+        # d * bs + (bs - 1).  Offsets below window_size // bs therefore lie
+        # entirely inside the window, whereas every remaining offset of the
+        # validated band, up to ceil((window_size - 1) / bs), straddles the
+        # window boundary and requires refinement.
+        window_boundary = block_offsets >= window_size // sparsity_block_size
     last_blocks = _ceil_div_tensor(lengths, sparsity_block_size) - 1
     has_partial_last_block = torch.remainder(lengths, sparsity_block_size) != 0
     final_partial_rows = (
@@ -175,6 +190,7 @@ def _build_causal_attention_mask(
     return BlksprsTensor.wrap(mask), sparsity_layout_mask
 
 
+@public_op
 def build_causal_window_self_attention_layout(
         valid_lengths: Tensor | Sequence[int],
         sparsity_block_size: int,
@@ -183,34 +199,70 @@ def build_causal_window_self_attention_layout(
     """Build a causal block layout restricted to a token-local window.
 
     ``window_size`` counts the current token, so a value of one permits only
-    self-attention.  Boundary blocks are retained and refined by
+    self-attention.  Query position ``q`` of a sequence with valid length ``n``
+    may attend to key position ``k`` exactly if ``k <= q < n`` and
+    ``q - k < window_size``.
+
+    A block ``(query_block, key_block)`` is active exactly if it contains such
+    a pair, that is, if it lies in the valid causal prefix and its offset
+    ``query_block - key_block`` is at most
+    ``ceil((window_size - 1) / sparsity_block_size)``.  Blocks that are only
+    partially inside the window are retained and refined by
     :func:`build_causal_window_self_attention_mask`; this keeps the layout
     block-sparse without changing the exact token-level window contract.
     """
-    if not isinstance(window_size, int) or isinstance(window_size, bool):
-        raise TypeError("window_size must be an integer")
-    if window_size <= 0:
-        raise ValueError("window_size must be positive")
+    _validate_window_size(window_size)
     causal_layout = build_causal_self_attention_layout(
         valid_lengths, sparsity_block_size)
     n_blocks = causal_layout.size(1)
     positions = torch.arange(n_blocks, device=causal_layout.device)
-    maximum_block_offset = _ceil_div(window_size - 1, sparsity_block_size)
-    local_band = positions.unsqueeze(1) - positions.unsqueeze(0) <= maximum_block_offset
-    return (causal_layout & local_band.unsqueeze(0)).contiguous()
+    window_band = _causal_window_block_band(
+        positions.unsqueeze(1) - positions.unsqueeze(0),
+        sparsity_block_size,
+        window_size,
+    )
+    return (causal_layout & window_band.unsqueeze(0)).contiguous()
 
 
+@public_op
 def build_causal_window_self_attention_mask(
         valid_lengths: Tensor | Sequence[int],
         attention_layout: Tensor,
         sparsity_block_size: int,
         window_size: int,
 ) -> tuple[BlksprsTensor, Tensor]:
-    """Build the compact causal/padding mask for local causal attention."""
-    if not isinstance(window_size, int) or isinstance(window_size, bool):
-        raise TypeError("window_size must be an integer")
-    if window_size <= 0:
-        raise ValueError("window_size must be positive")
+    """Build the compact causal/window/padding mask for local causal attention.
+
+    The returned mask follows :func:`blksprs.ops.flash_attention`'s convention:
+    ``True`` marks an ignored score.  Together with ``attention_layout``, it
+    permits exactly the pairs of query position ``q`` and key position ``k``
+    with ``k <= q < n`` and ``q - k < window_size``, where ``n`` is the valid
+    length of the sequence, restricted to the active blocks of
+    ``attention_layout``.  Its accompanying layout contains only blocks that
+    can contain a masked value: every diagonal block, the causal prefix of a
+    partial final query block, and every block whose offset
+    ``query_block - key_block`` lies between
+    ``window_size // sparsity_block_size`` and
+    ``ceil((window_size - 1) / sparsity_block_size)``.  Off-diagonal blocks
+    at smaller offsets lie entirely inside the window and are masked only if
+    they belong to a partial final query block.
+
+    Args:
+        valid_lengths: Unpadded sequence lengths, one per layout batch entry.
+        attention_layout: Causal-window Q-K block layout generated by
+            :func:`build_causal_window_self_attention_layout` for the same
+            lengths, block size, and window size, or a subset of it.  Blocks
+            outside that layout raise a :class:`ValueError` instead of being
+            masked: they cannot contain an attended pair and would only add
+            fully masked blocks to the attention computation.
+        sparsity_block_size: Side length of an individual sparse block.
+        window_size: Number of attended positions, including the current one.
+
+    Returns:
+        A pair ``(attention_mask, sparsity_layout_mask)`` suitable for the
+        independent mask arguments of :func:`blksprs.ops.flash_attention`.
+    """
+    _validate_window_size(window_size)
     return _build_causal_attention_mask(
         valid_lengths,
         attention_layout,
@@ -231,6 +283,22 @@ def _normalise_valid_lengths(
     if torch.any(lengths < 0):
         raise ValueError("valid_lengths must be non-negative")
     return lengths.to(dtype=torch.long)
+
+
+def _validate_window_size(window_size: int) -> None:
+    if not isinstance(window_size, int) or isinstance(window_size, bool):
+        raise TypeError("window_size must be an integer")
+    if window_size <= 0:
+        raise ValueError("window_size must be positive")
+
+
+def _causal_window_block_band(
+        block_offsets: Tensor,
+        sparsity_block_size: int,
+        window_size: int,
+) -> Tensor:
+    """Mark block offsets up to the farthest one holding an in-window pair."""
+    return block_offsets <= _ceil_div(window_size - 1, sparsity_block_size)
 
 
 def _validate_block_size(sparsity_block_size: int) -> None:

@@ -4,13 +4,14 @@ from torch._library import triton_op
 
 from blksprs.ops.flow import flow_pull_forward
 from blksprs.utils.blksprs_tensor import BlksprsTensor
+from blksprs.utils.public_op import on_operand_device, public_op
 from blksprs.utils.tools import as_base_tensor, build_layout_indices, build_packed_indices, \
     prepare_layout_cache, finalize_layout_cache
 from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_device, \
     validate_sparsity, validate_sparsity_block_size, ensure_contiguous, validate_dtype_supported
 
 
-@torch.amp.custom_fwd(device_type="cuda")
+@public_op
 def transpose(x: BlksprsTensor, sparsity_layout: Tensor,
               sparsity_block_size: int, layout_cache: dict | None = None) -> tuple[BlksprsTensor, Tensor]:
     """Transposes a block-sparse tensor in compressed form.
@@ -42,6 +43,7 @@ def transpose(x: BlksprsTensor, sparsity_layout: Tensor,
 
 
 @triton_op("blksprs::transpose_forward", mutates_args={})
+@on_operand_device
 def transpose_forward(x: Tensor, sparsity_layout_o: Tensor,
                       layout_indices: Tensor, packed_indices: Tensor,
                       sparsity_block_size: int, n_sparse_blocks: int) -> Tensor:
@@ -56,10 +58,11 @@ def transpose_wrapper_backward(ctx, grad_output):
     sparsity_layout = ctx.saved_tensors[0]
     sparsity_block_size = ctx.sparsity_block_size
 
-    return transpose(grad_output, sparsity_layout, sparsity_block_size)[
-        0], None, None, None, None, None
+    return as_base_tensor(transpose(grad_output, sparsity_layout, sparsity_block_size)[0]), \
+        None, None, None, None, None
 
 
+@torch.compiler.disable
 def transpose_build_layout_cache(layout_cache: dict | None, sparsity_layout: Tensor):
     layout_cache = prepare_layout_cache(layout_cache, "transpose", sparsity_layout)
 

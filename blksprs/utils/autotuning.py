@@ -239,6 +239,32 @@ _AUTOTUNE_PARAMETER_PROFILES: dict[str, dict[str, list[tuple[int, ...]]]] = {
 }
 
 
+# Kernels that accumulate into their output with atomic operations are launched with a single configuration per sparsity
+# block size instead of being autotuned. Autotuning runs a kernel repeatedly on the same output, which the Triton
+# autotuner resets between runs through ``reset_to_zero``. ``torch.compile``, however, rebuilds an autotuner whose
+# configurations are pruned without this argument, so that Inductor would benchmark the kernel on the live output and
+# accumulate every benchmark run into the result. Every entry lists the Triton block size and the numbers of warps and
+# pipeline stages; the entry of the largest listed block size applies to larger sparsity block sizes as well. On an
+# RTX 3090, the entries are within a few percent of the fastest autotuned configuration for ``float32`` and
+# ``bfloat16``.
+_FIXED_CONFIGS: dict[str, dict[int, tuple[int, int, int]]] = {
+    "row_wise_sum": {16: (16, 2, 2), 32: (32, 4, 2), 64: (64, 4, 2), 128: (128, 8, 2)},
+    "flow_push": {16: (16, 4, 2)},
+    "scatter_reduce": {16: (16, 2, 2), 32: (32, 8, 2), 64: (64, 8, 2)},
+}
+
+
+def get_fixed_config(kernel: str, sparsity_block_size: int) -> tuple[int, int, int]:
+    """Returns the Triton block size and the numbers of warps and stages of a kernel that is not autotuned."""
+    configs = _FIXED_CONFIGS[kernel]
+    eligible = [block_size for block_size in configs if block_size <= sparsity_block_size]
+
+    if not eligible:
+        raise ValueError(f"No launch configuration found for sparsity block size {sparsity_block_size}")
+
+    return configs[max(eligible)]
+
+
 def get_autotune_parameters(profile: str = "generic", mode: str | None = None):
     mode = blksprs_autotune_mode if mode is None else mode.upper()
     profile = profile.lower()

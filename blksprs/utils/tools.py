@@ -57,6 +57,11 @@ def build_packed_indices(sparsity_layout: Tensor) -> Tensor:
     ))
 
 
+# The cache functions compare tensor identities and in-place versions, which only real tensors carry: under
+# ``torch.compile``, traced tensors report no in-place updates between calls, and their identities would become guards
+# that recompile the caller for every new layout. These functions and the layout-cache builders of the operations
+# therefore always run eagerly, and compiled callers graph-break at their calls.
+@torch.compiler.disable
 def prepare_layout_cache(layout_cache: LayoutCache | None, operation: str,
                          *values: object) -> LayoutCache:
     """Prepares an operation-specific cache and invalidates stale metadata.
@@ -110,6 +115,7 @@ def prepare_layout_cache(layout_cache: LayoutCache | None, operation: str,
     return layout_cache
 
 
+@torch.compiler.disable
 def finalize_layout_cache(layout_cache: LayoutCache) -> LayoutCache:
     """Records the current cache contents so caller mutations invalidate them.
 

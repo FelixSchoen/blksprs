@@ -6,150 +6,111 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Added
+## [2.6.0] - 2026-11-19
 
-- Add reusable causal and causal-window Flash Attention layout/mask builders for padded variable-length sequences
-- Add ``flash_attention_relative_embedding()``, a generic fused query-relative embedding term for block-sparse Flash
-  Attention that supports arbitrary integral relation coordinates
-- Add ``flash_attention_relative_embeddings()`` for up to eight independent relation terms with explicit optional
-  coordinate-validity tensors
-- Add native ``causal_lengths`` support to regular and learned-relative Flash Attention, avoiding explicit causal and
-  padding-mask lookup for full causal self-attention
-- Add ``flash_attention_warm_up()``, which compiles every Flash Attention kernel variant of a static call
-  configuration and tunes it for given shapes ahead of training
-- Add ``key_relations_repeat`` to learned relative attention to declare the relations whose consecutive keys share
-  their coordinates, which the query-gradient kernel handles once per run of equal keys
+### Breaking changes
 
-### Changed
-
-- Fuse tensor-core query/table projection with projected-score lookup in the tiled Flash Attention kernels, and
-  recompute the projection during backward to reduce long-sequence activation memory
-- Use 32-bit projected-table addressing whenever the complete Flash Attention operation fits safely, and avoid
-  redundant value scans for intrinsically binary boolean masks
-- Accumulate clipped endpoint gradients across each query's attended key blocks and store every endpoint once, avoiding
-  contended endpoint atomics in learned-relative backward
-- Allow callers to declare pairwise-distinct key relations so unclipped relative-embedding gradients can avoid atomic
-  writes; pairs that are not permitted, such as padding keys that repeat a coordinate, write no gradients
-- Add forward, gradient, multi-relation, validity, autocast, and guarded training-performance regression coverage for
-  learned relative attention
-- Use inline causal and padding predicates in forward and backward kernels when native causal lengths are supplied
-- Tile Flash Attention independently of the sparsity block size: query and key tiles span one or more sparsity blocks,
-  every program visits the union of the blocks attended by its tile through a tile schedule in the layout cache, keeps
-  the output and gradients in registers, processes tiles without masking where no block of its tile needs any, and
-  gathers explicit mask and bias elements only for tiles that hold mask or bias blocks
-- Autotune the query and key tile sizes of the Flash Attention forward, key/value-gradient, and query-gradient kernels
-  separately, and allow autotuning profiles to define several block sizes
-- Write Flash Attention outputs and gradients directly in the input dtype instead of casting float32 accumulators
-- Replace the per-block adjacency metadata of the Flash Attention layout cache by tile schedules, and accept an optional
-  ``sparsity_block_size`` argument in ``flash_attention_build_layout_cache()`` to build the schedules ahead of the
-  first call; the cache no longer holds ``key_indices``, ``key_offsets``, ``query_indices``, ``query_offsets``,
-  ``max_keys_per_query``, and ``max_queries_per_key``
-- Pad every relation table of learned relative attention to whole sparsity blocks, so that the score projection and
-  its gradients use aligned matrix multiplications and every value block belongs to one relation
-- Pre-calculate only the blocks of the projected relative scores that permitted query-key pairs reference, instead of
-  the packed projection of sparse query rows, and compute the query and table gradients from these blocks;
-  ``score_precalculation="complete"`` keeps the projection of the complete tables
-- Keep the coordinate-derived metadata of learned relative attention, including the referenced blocks, in the layout
-  cache for calls with the same coordinate, validity, and causal-length tensors, so that later layers of a model repeat
-  neither the preparation nor its synchronisation; input validation and the range check of ``causal_lengths`` still
-  synchronise
-- Mark the referenced blocks only once for consecutive attention batches with equal coordinates, validity, causal
-  lengths, and attention layout, such as the heads of one sequence
-- Apply relation-validity masks only to the tiles that hold positions without valid relations, such as a start token,
-  and process all other tiles without them
-- Handle the relations without unique key coordinates once per query and run of keys with equal coordinates in the
-  query-gradient kernel, where key tiles hold few such runs, instead of once per query-key pair
-- Merge the relations declared through ``key_relations_repeat``, by default all relations without unique keys, so
-  that a relation whose keys rarely repeat, such as a pitch class, can be handled per pair instead of preventing the
-  merge of the others
-- Address the referenced blocks of the projected relative scores through one offset per query block and relation for
-  relations whose stored blocks form one interval of value blocks in every query block, instead of looking up and
-  checking every pair; pairs outside the permitted ones keep masked scores and write no gradients, and zero guard
-  blocks around the referenced blocks keep their addresses within the allocation
-- Store the gaps between the referenced blocks of relations with at most eight value blocks, and those of all
-  relations in calls whose gaps hold at most one sixty-fourth of the referenced blocks, so that these calls address
-  all relations through intervals
-- Compile the Flash Attention kernels only for the static properties of a call, so that the coordinates, lengths, and
-  layouts of a batch never compile or tune new variants, and keep only these properties and the length buckets in the
-  autotuning keys
-- Compile all autotuning configurations and variants of a Flash Attention call configuration in parallel on its first
-  launch instead of one after the other during benchmarking
-- Do not specialise the Flash Attention and referenced relative-score kernels on batch sizes and sequence lengths, so
-  that varying batches compile no further kernel variants
-- Tune the Flash Attention kernels separately for every compiled variant, with all compile-time flags in the autotuning
-  key, including causal lengths, relation validity, unique key relations, head-dimension chunks, row completeness, and
-  64-bit indexing
-- Tune the Flash Attention kernels separately for attention layouts of one length but different density, through a
-  power-of-two bucket of the number of tile-schedule entries in the autotuning key, and offer program tiles of a
-  single sparsity block to the forward and key/value-gradient kernels for sparse layouts
-- Store relation coordinates in 32 bits whenever their clipped differences cannot overflow
-- Process the leading tiles in which every pair reaches the maximum of the first two relations, or of the only one,
-  in a kernel loop specialised to these relations, which reads them from their last table column and sums their
-  gradients per query instead of per pair, instead of compiling a loop for the relations that each call clips; the
-  tiles are found from block-level coordinate bounds
-- Split wide head dimensions into chunks in the projection kernels of the referenced relative-score blocks, so that
-  float32 operands with head dimensions of 256 or more fit into shared memory
-- Raise an error when Flash Attention is differentiated twice instead of returning incorrect second-order gradients
-- Document TF32 products for float32 Flash Attention operands, the version-counter contract of layout caches, and
-  persistent compilation and autotuning caches for production training
-
-### Fixed
-
-- Fix the 32-bit offset check of learned relative attention ignoring the guard blocks around the referenced score
-  blocks that relations addressed through intervals reach
-- Fix the marking and projection kernels of referenced relative-score blocks failing for more than 65,535 query or value
-  blocks per batch
-
-### Removed
-
-- Remove the module-level ``autotune_parameters`` of ``blksprs.utils.autotuning``; use ``get_autotune_parameters()``
-- Remove the ``"flash_attention"`` autotuning profile and ``prune_autotune_configs_exact()``, which no blksprs kernel
-  uses since the Flash Attention kernels are tuned with their own tile-size profiles
-
-## [2.6.0] - 2026-08-03
+- ``flash_attention()`` defaults its output layout to
+  ``build_sparsity_layout_matmul(attention_layout, sparsity_layout_v)`` instead of the layout of ``q``, which silently
+  discarded value blocks absent from the query layout
+- Flash Attention accepts sparsity block sizes from 16 to 64 only
+- Importing BLK-SPRS no longer sets ``torch._dynamo.config.capture_scalar_outputs = True``
+- ``adapt_layout()`` without ``sparsity_layout_to`` and ``build_sparsity_layout_adaption()`` return the structural
+  layout, in which every block overlapping an active source block is active, instead of dropping blocks whose values are
+  all zero, which therefore received no gradient; for the previous behaviour, pass a target layout built with
+  ``build_sparsity_layout()``
+- ``to_sparse()``, ``to_dense()``, ``to_sparse_row_striped()``, and an ``adapt_layout()`` that changes nothing always
+  return new storage instead of aliasing their input for single-block layouts
+- ``float32`` ``matmul()`` follows PyTorch's TF32 setting like ``torch.matmul`` and computes in full precision by
+  default, about 1.2 to 1.4 times slower than the previous TF32 products; ``torch.set_float32_matmul_precision("high")``
+  restores them
+- Public validators are stricter: ``validate_sparsity_block_size()`` rejects non-integer block sizes, the layout
+  validators require contiguous CUDA layouts, and ``validate_positive_integer()`` rejects Boolean and floating values;
+  linear and row-wise operations reject mixed dtypes outside autocast
+- ``to_dense()`` and slice-only row-wise reductions return regular tensors instead of ``BlksprsTensor``
+- The Flash Attention layout cache holds tile schedules instead of ``key_indices``, ``key_offsets``,
+  ``query_indices``, ``query_offsets``, ``max_keys_per_query``, and ``max_queries_per_key``
+- See also the removed autotuning helpers below
 
 ### Added
 
-- Add package namespace exports, deterministic regression tests, and installed-artifact validation
+- Add package namespace modules (``bs.ops``, ``bs.ops.misc``, ``bs.layouting``, ``bs.utils``) and ship type
+  information (``py.typed``)
+- Add ``flash_attention_relative_embedding()`` and ``flash_attention_relative_embeddings()``, block-sparse Flash
+  Attention with up to eight learned relative-embedding terms over arbitrary integral relation coordinates, with
+  optional coordinate-validity tensors, declarations of unique and repeated key coordinates
+  (``key_relations_are_unique``, ``key_relations_repeat``), and the projection of either the referenced table blocks
+  (``score_precalculation="referenced_blocks"``) or the complete tables (``"complete"``)
+- Add native ``causal_lengths`` to regular and learned-relative Flash Attention, which applies causal and padding
+  predicates inline instead of looking up explicit masks
+- Add causal and causal-window layout and mask builders for padded variable-length sequences, which reproduce the
+  requested window exactly and reject attention layouts wider than it
+- Add ``flash_attention_warm_up()``, which compiles and tunes every Flash Attention kernel variant of a static call
+  configuration ahead of training, including Boolean or floating masks and attention biases
+- Accept ``sparsity_block_size`` in ``flash_attention_build_layout_cache()`` to build the tile schedules ahead of the
+  first call
+- Accept ``float16`` and ``bfloat16`` inputs to ``softmax()`` under CUDA autocast, which computes in and returns
+  ``float32`` like ``torch.softmax``
 
 ### Changed
 
+- Rewrite the Flash Attention kernels: query and key tiles span one or more sparsity blocks independently of the block
+  size and visit the attended blocks through tile schedules in the layout cache; the tile sizes of the forward,
+  key/value-gradient, and query-gradient kernels are autotuned separately; outputs and gradients are written in the
+  input dtype; tiles without mask or bias blocks run unmasked
+- Compile the Flash Attention kernels only for the static properties of a call (dtype, head dimensions, block size,
+  mask and bias, causal lengths, relation validity and declarations, score pre-calculation) and tune them for
+  power-of-two buckets of the sequence length and the tile schedule, so that the data of a batch never compiles new
+  variants; compile all configurations of a call configuration in parallel on its first launch (sequentially on Triton
+  before 3.6)
 - Harden public shape, device, dtype, dimension, index, layout, and contiguity validation
 - Invalidate conversion, linear, and Flash Attention layout caches after input changes while retaining source tensors to
   prevent allocator identity reuse
-- Preserve 64-bit indices throughout kernels and dynamically use 64-bit Flash Attention adjacency metadata when required
-- Limit Flash Attention sparsity blocks to the portable supported range of 16 to 64 elements
-- Publish packages through pinned GitHub Actions and PyPI trusted publishing
-- Gate PyPI publication on static checks, minimum-PyTorch compatibility, and installed distribution tests across all
-  supported Python versions, and publish the exact artifacts that passed those checks
-- Expand API, cache, mask, dtype, installation, and safety documentation
-- Clarify that public wrappers support graph-break-tolerant ``torch.compile`` execution rather than ``fullgraph=True``
-- Test compatibility with the declared minimum PyTorch release and verify versions from built release artifacts
-- Benchmark repeated attention calls with reusable layout caches and skip overflow tests unless sufficient memory is free
+- Preserve 64-bit indices throughout the kernels and select 64-bit indexing per call when required
+- Cache only layout metadata in ``apply_torch_linear_cached()``, which keeps it across parameter updates, rebuilds the
+  compressed weight from the live parameters on every call, avoids host synchronisation on warm calls with validation
+  disabled, and uses one weight copy for all batches
+- Make ``disable_validation()`` and ``disable_contiguous()`` process-wide again, so that they also apply to autograd
+  backward passes
+- Copy only the active rows in ``to_sparse_row_striped()``
 - Reduce regular-softmax peak storage by normalising its exponentiated output in place
-- Preserve positional compatibility for the existing Flash Attention cache argument while extending optional metadata
-- Make the Ruff rule selection explicit so release linting remains stable across tooling updates
-- Polish README, package metadata, and API documentation wording and formatting
+- Raise an error when Flash Attention is differentiated twice instead of returning incorrect second-order gradients
+- Support ``torch.compile`` in its default mode: registered operators are traced into compiled graphs, layout-cache
+  preparation always runs eagerly, and the Flash Attention functions run eagerly within compiled functions
+- Launch the atomically accumulating kernels of ``row_wise_sum()``, summation ``scatter_reduce()``, and the backward
+  passes of ``gather()``, ``repeat()``, and ``repeat_interleave()`` with one fixed configuration per sparsity block size
+  instead of autotuning them
+- Return gradients as regular tensors instead of ``BlksprsTensor``
+- Publish packages through pinned GitHub Actions and PyPI trusted publishing, gated on static checks, minimum-PyTorch
+  compatibility, and installed-distribution tests across all supported Python versions
+- Deselect the high-memory and high-runtime ``benchmark`` tests by default; select them with ``-m benchmark``
+- Document TF32 products for ``float32`` Flash Attention operands, the version-counter contract of layout caches, the
+  exact semantics of the causal-window builders, and persistent compilation and autotuning caches with a kernel warm-up
+  for distributed training
 
 ### Fixed
 
+- Fix ``to_dense()``, the backward pass of ``to_sparse()``, ``build_sparsity_layout()``, fused ``softmax()``, and the
+  Flash Attention kernels failing to launch for more than 65,535 tiles along one axis, about one million rows
+- Fix Boolean ``broadcast_add()`` computing ``True + True = False``; it computes the logical or, and
+  ``broadcast_sub()`` rejects Boolean operands in either position like ``torch.sub``
+- Fix ``apply_torch_linear_cached()`` failing under gradient accumulation and non-reentrant activation checkpointing,
+  and reusing stale weights after fused optimizer steps or ``.data`` updates
 - Preserve float32 Flash Attention accumulators across key/query blocks to prevent long-sequence reduced-precision
   forward corruption and gradient saturation
 - Preserve float32 accumulators for row-wise sums, scatter reductions, and repeated-tensor gradients to prevent
   reduced-precision saturation on large reductions
 - Preserve autograd through row-striped conversions with no active blocks
 - Ensure Flash Attention masks remain authoritative over non-finite additive bias values
-- Rebuild cached sparse linear parameters when switching between gradient-disabled evaluation and training
 - Match ``torch.nn.Linear`` mixed-dtype behavior outside autocast and clarify compiled compressed-tensor return types
 - Preserve ``float64`` and unsupported floating dtypes at the autocast boundary instead of silently downcasting them
 - Apply automatic contiguous conversion to public layout-builder data operands and document structural-layout requirements
-- Document that non-reducing scatter does not support a backward pass
+- Document that non-reducing scatter does not support a backward pass, that gathers from inactive blocks return zero,
+  and that scatters into inactive blocks are discarded
 - Fix stale layout metadata after in-place mutations or cache reuse across operations
-- Invalidate cached sparse linear parameters when their gradient requirements change
 - Fix stale cache metadata after mutating derived layouts and prevent transformed output layouts from aliasing inputs
 - Fix non-contiguous output gradients across differentiable operations
 - Fix Flash Attention mask, bias, sparse Q/K/V, mixed-dimension, and empty-row forward and backward behavior
-- Fix the default Flash Attention output layout silently discarding V blocks that are absent from the Q layout
 - Fix scatter compilation for non-reducing Boolean and compact-integer inputs and reject unsupported summation dtypes clearly
 - Fix gather and scatter silently accepting oversized non-indexed dimensions
 - Reject negative distribution-layout target dimensions before kernel allocation
@@ -171,14 +132,28 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   block-sparse tensor subclasses
 - Forward optional layout caches through ``to_blksprs()``
 - Fix the Nix GPU shell overriding PyTorch's bundled CUDA libraries and claiming stale virtual environments were active
-- Preserve NaN-bearing blocks when building or adapting sparsity layouts and propagate NaNs through row-wise maxima
+- Preserve NaN-bearing blocks when building sparsity layouts and propagate NaNs through row-wise maxima
 - Propagate non-finite Flash Attention inputs and scales instead of silently replacing failed rows with zeros, and reject
   non-real scales at the public boundary
 - Validate row-wise callable inputs and outputs and reject inconsistent benchmark argument lengths before execution
 - Preserve gradients when layout coarsening zero-pads non-divisible logical extents
-- Return slice-only row-wise reductions as regular tensors rather than marking their non-square auxiliary representation
-  as a general block-sparse tensor
 - Allow an explicitly selected production autotuning profile to pass through the test configuration
+- Fix ``row_wise_sum()``, summation ``scatter_reduce()``, and the backward passes of ``gather()``, ``repeat()``, and
+  ``repeat_interleave()`` returning wrong results under ``torch.compile`` on the first call after a recompilation, which
+  accumulated Inductor's benchmark runs into the output
+- Fix compiled backward passes failing with a tensor-subclass metadata error
+- Fix layout caches under ``torch.compile`` missing in-place layout updates and recompiling for every new layout object
+- Fix ``to_sparse_row_striped()`` failing under ``torch.compile`` with dynamic shapes
+- Fix calls that pass the first argument by keyword raising ``IndexError``, and stop public operations from setting
+  ``_dtype`` and ``_fwd_used_autocast`` attributes on their arguments
+- Fix kernels launching on the current CUDA device instead of the device of their operands; every public operation now
+  runs on the device of its first CUDA tensor argument
+
+### Removed
+
+- Remove the module-level ``autotune_parameters`` of ``blksprs.utils.autotuning``; use ``get_autotune_parameters()``
+- Remove the ``"flash_attention"`` autotuning profile and ``prune_autotune_configs_exact()``, which no blksprs kernel
+  uses since the Flash Attention kernels are tuned with their own tile-size profiles
 
 ## [2.5] - 2026-05-20
 

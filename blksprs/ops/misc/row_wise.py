@@ -6,8 +6,9 @@ from torch import Tensor
 from torch._library.triton import wrap_triton, triton_op
 from triton import language as tl
 
-from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
+from blksprs.utils.autotuning import get_autotune_configs, get_fixed_config, prune_autotune_configs
 from blksprs.utils.blksprs_tensor import BlksprsTensor
+from blksprs.utils.public_op import on_operand_device, public_op
 from blksprs.utils.tools import as_base_tensor, build_layout_indices, stride, build_packed_indices, \
     can_use_int32_indexing
 from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_device, validate_sparsity, \
@@ -32,7 +33,7 @@ def row_wise_sum(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size:
     ...
 
 
-@torch.amp.custom_fwd(device_type="cuda")
+@public_op
 def row_wise_sum(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
                  flag_slice_only: bool = False) -> tuple[BlksprsTensor | Tensor, Tensor]:
     """Computes the row-wise sum of a block-sparse tensor.
@@ -100,6 +101,7 @@ def row_wise_sum(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size:
 
 
 @triton_op("blksprs::row_wise_sum_forward", mutates_args={})
+@on_operand_device
 def row_wise_sum_forward(x: Tensor, layout_indices: Tensor,
                          sparsity_layout_output: Tensor, packed_indices_output: Tensor,
                          sparsity_block_size: int, n_sparse_blocks_output: int,
@@ -121,9 +123,11 @@ def row_wise_sum_forward(x: Tensor, layout_indices: Tensor,
         s_l_o_b, s_l_o_r, s_l_o_c = sparsity_layout_output.size()
         s_l_o_b_s, s_l_o_r_s, s_l_o_c_s = stride(sparsity_layout_output)
 
-        triton_grid = lambda meta: [x_b,
-                                    triton.cdiv(x_r, meta["TRITON_BLOCK_SIZE"]),
-                                    triton.cdiv(x_c, meta["TRITON_BLOCK_SIZE"])]
+        # The kernel accumulates into its output and therefore takes a fixed configuration, see ``get_fixed_config``
+        triton_block_size, num_warps, num_stages = get_fixed_config("row_wise_sum", sparsity_block_size)
+        triton_grid = [x_b,
+                       triton.cdiv(x_r, triton_block_size),
+                       triton.cdiv(x_c, triton_block_size)]
 
         use_int64 = not can_use_int32_indexing(
             x,
@@ -141,18 +145,15 @@ def row_wise_sum_forward(x: Tensor, layout_indices: Tensor,
           s_l_o_b, s_l_o_b_s, s_l_o_r_s,
           packed_indices_output,
           sparsity_block_size,
-          USE_INT64=use_int64))
+          USE_INT64=use_int64,
+          TRITON_BLOCK_SIZE=triton_block_size,
+          num_warps=num_warps,
+          num_stages=num_stages))
 
         return output_accumulator.to(x.dtype)
 
 
 # noinspection PyUnusedLocal
-@triton.autotune(
-    configs=get_autotune_configs("row_wise"),
-    key=["sparsity_block_size"],
-    prune_configs_by={"early_config_prune": prune_autotune_configs},
-    reset_to_zero=["o"]
-)
 @triton.jit
 def row_wise_sum_kernel(x,
                         x_b, x_b_s, x_r_s, x_c_s,
@@ -222,7 +223,7 @@ def row_wise_max(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size:
     ...
 
 
-@torch.amp.custom_fwd(device_type="cuda")
+@public_op
 def row_wise_max(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
                  flag_slice_only: bool = False) -> tuple[BlksprsTensor | Tensor, Tensor]:
     """Computes the row-wise maximum of a block-sparse tensor.
@@ -290,6 +291,7 @@ def row_wise_max(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size:
 
 
 @triton_op("blksprs::row_wise_max_forward", mutates_args={})
+@on_operand_device
 def row_wise_max_forward(x: Tensor, layout_indices: Tensor,
                          sparsity_layout_output: Tensor, packed_indices_output: Tensor,
                          sparsity_block_size: int, n_sparse_blocks_output: int,
@@ -418,7 +420,7 @@ def row_wise_max_kernel(x,
         tl.atomic_or(nan_rows + nan_idx, buf_nan, nan_msk)
 
 
-@torch.amp.custom_fwd(device_type="cuda")
+@public_op
 def row_wise_add(x: BlksprsTensor, sparsity_layout_x: Tensor, y: Tensor,
                  sparsity_block_size: int) -> BlksprsTensor:
     """Adds one row-wise value to every element in the corresponding row of ``x``.
@@ -466,6 +468,7 @@ def row_wise_add(x: BlksprsTensor, sparsity_layout_x: Tensor, y: Tensor,
                                                    packed_indices_rwm, y, sparsity_block_size))
 
 
+@public_op
 def row_wise_sub(x: BlksprsTensor, sparsity_layout_x: Tensor, y: Tensor,
                  sparsity_block_size: int) -> BlksprsTensor:
     """Subtracts one row-wise value from every element in the corresponding row of ``x``.
@@ -486,6 +489,7 @@ def row_wise_sub(x: BlksprsTensor, sparsity_layout_x: Tensor, y: Tensor,
 
 
 @triton_op("blksprs::row_wise_add_forward", mutates_args={})
+@on_operand_device
 def row_wise_add_forward(x: Tensor, layout_indices_x: Tensor,
                          sparsity_layout_x_rwm: Tensor, packed_indices_rwm: Tensor,
                          y: Tensor, sparsity_block_size: int) -> Tensor:

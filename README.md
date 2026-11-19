@@ -73,16 +73,18 @@ The exact PyTorch, Triton, CUDA, and driver versions must be mutually compatible
 | Operation family | Supported dtypes |
 | --- | --- |
 | Matrix multiplication, Flash Attention, and row-wise helpers | `float16`, `bfloat16`, `float32` |
-| Regular and fused softmax | `float32` |
+| Regular and fused softmax | `float32`; under CUDA autocast, `float16` and `bfloat16` inputs are computed and returned in `float32` |
 | Gather and scatter indices | `int32`, `int64` |
 | Flash Attention masks | `bool`, `float16`, `bfloat16`, `float32`; values must be binary |
 | Conversion, transpose, repeat, partitioning, gather, and non-reducing scatter data | `bool`, `uint8`, `int8`, `int16`, `int32`, `int64`, `float16`, `bfloat16`, `float32`, `float64`; input dtype is preserved |
 | Summation scatter data | `int32`, `int64`, `float16`, `bfloat16`, `float32`, `float64` |
-| Broadcast addition operands | Matching dtypes from the generic data-movement set above |
+| Broadcast addition operands | Matching dtypes from the generic data-movement set above; `bool` addition is the logical or |
 | Broadcast subtraction operands | Matching numeric dtypes from the generic data-movement set above |
 | Sparsity and attention layouts | `bool` is recommended; integer and real floating-point layouts must contain only `0` and `1`; complex layouts are rejected |
 
-Automatic mixed precision is supported by the operations decorated for CUDA autocast. Inputs to an individual
+Under CUDA autocast, matrix multiplication, broadcast arithmetic, and Flash Attention cast their ``float16``,
+``bfloat16``, and ``float32`` inputs to the autocast dtype, softmax computes in ``float32`` as listed above, and
+all other operations keep the dtype of their inputs. Inputs to an individual
 floating-point operation must satisfy that operation's dtype validation; in particular, matrix multiplication and
 the Q, K, and V inputs of Flash Attention must use matching dtypes. As in PyTorch, CUDA autocast does not downcast
 ``float64`` inputs.
@@ -106,14 +108,15 @@ BLK-SPRS is licensed under the [MIT License](https://github.com/FelixSchoen/blks
 
 ## 🗺️ Roadmap
 
-Since the library covers our current needs, it is in a **bugfix-only** state. There are no plans to add new features,
-such as support for dimensions other than the last in the ``split`` and ``merge`` operations. We will continue to
-maintain the library and fix issues that arise.
+The library covers our current needs. Version 2.6.0 adds block-sparse Flash Attention with learned relative embeddings,
+native causal lengths, and causal layout builders; beyond these, there are no plans to add new features, such as support
+for dimensions other than the last in the ``split`` and ``merge`` operations. We will continue to maintain the library
+and fix issues that arise.
 
 If you find a bug, please open an [issue](https://github.com/FelixSchoen/blksprs/issues).
 We also encourage [pull requests](https://github.com/FelixSchoen/blksprs/pulls).
 
-This scope may change for future projects; as of August 2026, the library meets our current requirements.
+This scope may change for future projects; as of November 2026, the library meets our current requirements.
 
 ## ⚠️ Known Limitations and Issues
 
@@ -127,9 +130,9 @@ This scope may change for future projects; as of August 2026, the library meets 
 - Floating-point operations that use atomic GPU reductions, including summation scatter with overlapping indices, may
   not be bitwise deterministic because the accumulation order can vary.
 
-- Public operation wrappers are compatible with the default, graph-break-tolerant ``torch.compile`` mode, but are not
-  compatible with ``fullgraph=True``. Validation and layout-cache preparation deliberately run as eager Python code, so
-  compiling an individual BLK-SPRS wrapper may introduce graph breaks without improving performance.
+- ``torch.compile`` is supported in its default, graph-break-tolerant mode, but not with ``fullgraph=True``. Validation,
+  layout-cache preparation, and Flash Attention run eagerly and break the graph, so compiling a model that calls
+  BLK-SPRS does not necessarily improve its performance.
 
 ## 💻 Usage
 
@@ -294,12 +297,14 @@ most often first, such as positions and times before phases or pitch classes.
 For float32 operands, the Flash Attention kernels compute their matrix products with TF32 tensor cores, Triton's
 default, regardless of ``torch.backends.cuda.matmul.allow_tf32``; float16 and bfloat16 operands use their native
 products with float32 accumulation. The projection of learned relative scores uses full float32 products for float32
-operands, as ``torch.bmm`` does by default.
+operands, as ``torch.bmm`` does by default. ``bs.ops.matmul`` follows PyTorch's float32 precision setting like
+``torch.matmul``: float32 products use full precision by default and TF32 tensor cores once TF32 is allowed, for example
+with ``torch.set_float32_matmul_precision("high")``.
 
 ### Validation and contiguous conversion
 
 Input validation and automatic contiguous conversion for supported data operands are enabled by default and configured
-per thread. Sparsity layouts are caller-managed structural metadata and must be contiguous. These safeguards can be
+process-wide, so that the settings also apply to autograd backward passes. Sparsity layouts are caller-managed structural metadata and must be contiguous. These safeguards can be
 disabled for carefully measured hot paths, but must always be restored with ``try``/``finally``:
 
 ```python
@@ -318,18 +323,22 @@ metadata can otherwise reach low-level GPU kernels.
 
 ### ``torch.compile``
 
-BLK-SPRS kernels are compiled by Triton independently of ``torch.compile``. Public wrappers can be called from a function
-compiled with the default ``torch.compile`` settings, and BLK-SPRS tests verify that this graph-break-tolerant path remains
-numerically correct. The wrappers also perform Python-side validation and prepare mutable layout caches; these steps cause
-graph breaks and mean that ``fullgraph=True`` is not supported.
+BLK-SPRS operations are registered as PyTorch Triton operators, so that ``torch.compile`` traces their kernels into the
+compiled graph. In a function compiled in the default mode, every public operation matches eager execution in its
+forward and backward pass, also after recompilations for new shapes, layouts, or block sizes, and in-place updates of a
+layout between compiled calls take effect. Validation and the preparation of layout caches run eagerly and break the
+graph, so ``fullgraph=True`` is not supported. The Flash Attention functions are not traced: they run eagerly within
+compiled functions, with the kernels that Triton compiles for them as in eager execution. Backward passes that
+synchronise with the host fall back to eager execution, which PyTorch logs as a graph break.
 
-In eager execution, compressed outputs are marked with the ``BlksprsTensor`` subclass. During Dynamo tracing, compressed
-outputs may instead be base ``torch.Tensor`` instances because constructing tensor subclasses inside the compiled graph
-is unsupported. This does not change their compressed representation, and all BLK-SPRS operations accept either form.
+In eager execution, compressed outputs are marked with the ``BlksprsTensor`` subclass. In compiled code, compressed
+outputs may instead be regular ``torch.Tensor`` instances because tensor subclasses cannot be constructed inside the
+compiled graph; gradients are always regular tensors. This does not change their compressed representation, and all
+BLK-SPRS operations accept either form.
 
-Use eager BLK-SPRS wrappers by default. If the surrounding PyTorch model already benefits from ``torch.compile``, it can
-continue to contain BLK-SPRS calls, but benchmark the complete workload rather than assuming that compiling an individual
-wrapper improves its performance.
+Use eager BLK-SPRS operations by default. If the surrounding PyTorch model already benefits from ``torch.compile``, it
+can continue to contain BLK-SPRS calls, but benchmark the complete workload rather than assuming that compiling improves
+its performance.
 
 ### Autotuning
 
@@ -341,7 +350,8 @@ BLKSPRS_AUTOTUNE=TEST python -m pytest test/cases
 ```
 
 ``DEFAULT`` explores the production configuration set. ``TEST`` uses a smaller configuration set to reduce test startup
-time. Any other value is rejected during import.
+time. Any other value is rejected during import. The test suite deselects the high-memory and high-runtime
+``benchmark`` tests by default; select them with ``-m benchmark``.
 
 Triton compiles every kernel variant on first use, which takes seconds to minutes for the Flash Attention kernels, and
 benchmarks the configurations of an autotuned kernel for every new autotuning key. The Flash Attention kernels compile
@@ -371,8 +381,8 @@ export TRITON_CACHE_AUTOTUNING=1
 and warm up before the first distributed step on every rank, each on its own and without collectives, so that no rank
 waits in a collective, with its timeout, while another compiles; the ranks load what another rank has compiled from
 the shared cache. The warm-up needs the static configuration of the calls of training, including the dtype of an
-explicit mask; a forward and backward pass of the model on one real batch covers it as well, but only tunes the
-buckets of that batch:
+explicit mask (``attention_mask=torch.bool``) and whether calls pass an attention bias (``attention_bias``); a forward
+and backward pass of the model on one real batch covers it as well, but only tunes the buckets of that batch:
 
 ```python
 import torch

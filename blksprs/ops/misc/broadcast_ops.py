@@ -7,19 +7,23 @@ from triton import language as tl
 
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.blksprs_tensor import BlksprsTensor
+from blksprs.utils.public_op import on_operand_device, public_op
 from blksprs.utils.tools import build_layout_indices, stride, can_use_int32_indexing, cast_for_autocast
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity_layout, validate_sparsity_block_size, validate_shape, validate_divisible, ensure_contiguous, \
     validate_same_dtype, validate_dtype_supported
 
 
-@torch.amp.custom_fwd(device_type="cuda")
+@public_op
 def broadcast_add(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
                   sparsity_block_size: int) -> BlksprsTensor:
     """Adds two dense row slices and returns selected output blocks in compressed form.
 
     Note:
         This operation does not support gradient computation.
+
+    Note:
+        As in PyTorch, the sum of two ``bool`` tensors is their logical or.
 
     Args:
         x (Tensor): The dense input tensor with shape ``(B, M)``.
@@ -62,6 +66,7 @@ def broadcast_add(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
     return BlksprsTensor.wrap(broadcast_add_forward(x, y, layout_indices_o, sparsity_block_size, n_sparse_blocks))
 
 
+@public_op
 def broadcast_sub(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
                   sparsity_block_size: int) -> BlksprsTensor:
     """Subtracts two dense row slices and returns selected output blocks in compressed form.
@@ -77,13 +82,18 @@ def broadcast_sub(x: Tensor, y: Tensor, sparsity_layout_output: Tensor,
     Returns:
         BlksprsTensor: The selected blocks of ``x[:, :, None] - y[:, None, :]`` in compressed form.
 
+    Raises:
+        ValueError: If ``x`` or ``y`` is a ``bool`` tensor, which :func:`torch.sub` rejects as well.
+
     """
-    if y.dtype == torch.bool:
-        raise ValueError("Broadcast subtraction does not support bool tensors")
+    if x.dtype == torch.bool or y.dtype == torch.bool:
+        raise ValueError("Broadcast subtraction does not support bool tensors, like torch.sub; "
+                         "use logical operations on boolean masks instead")
     return broadcast_add(x, torch.neg(y), sparsity_layout_output, sparsity_block_size)
 
 
 @triton_op("blksprs::broadcast_add_forward", mutates_args={})
+@on_operand_device
 def broadcast_add_forward(x: Tensor, y: Tensor,
                           layout_indices_o: Tensor,
                           sparsity_block_size: int, n_sparse_blocks: int) -> Tensor:
@@ -168,9 +178,12 @@ def broadcast_add_kernel(x,
                  (blk_y_idx < tl.cast(y_b, index_dtype) * y_b_s))
     blk_y = tl.load(y + blk_y_idx, mask=blk_y_msk, other=0)
 
-    # Compute sum
+    # Compute sum, which is a logical or for boolean tensors as in PyTorch
     blk_x, blk_y = tl.broadcast(tl.trans(blk_x), blk_y)
-    buf = blk_x + blk_y
+    if o.dtype.element_ty == tl.int1:
+        buf = blk_x | blk_y
+    else:
+        buf = blk_x + blk_y
 
     # Store result
     blk_o_idx = ((pid_blk * o_b_s) +

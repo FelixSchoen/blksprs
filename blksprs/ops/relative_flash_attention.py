@@ -1,7 +1,7 @@
 import math
 from collections.abc import Sequence
 from numbers import Integral, Real
-from typing import NamedTuple
+from typing import NamedTuple, cast
 
 import torch
 from torch import Tensor
@@ -12,6 +12,7 @@ from blksprs.ops.flash_attention import _FlashAttentionArguments, _RelativeAtten
 from blksprs.ops.relative_score_blocks import ReferencedScoreBlocks, compact_score_relations, \
     compress_referenced_score_blocks, mark_referenced_score_blocks, referenced_value_intervals
 from blksprs.utils.blksprs_tensor import BlksprsTensor
+from blksprs.utils.public_op import opaque_public_op
 from blksprs.utils.tools import cast_for_autocast, finalize_layout_cache
 from blksprs.utils.validation import ensure_contiguous, validate_contiguous, validate_binary, validate_device, \
     validate_dimensions, validate_dtype_float, validate_shape, validate_sparsity, validate_sparsity_block_size, \
@@ -25,6 +26,7 @@ _COORDINATE_LIMIT = 2 ** 60
 _COORDINATE_CACHE_KEY = "relative_coordinates"
 
 
+@opaque_public_op
 def flash_attention_relative_embedding(q: BlksprsTensor, sparsity_layout_q: Tensor,
                                        k: BlksprsTensor, sparsity_layout_k: Tensor,
                                        v: BlksprsTensor, sparsity_layout_v: Tensor,
@@ -94,7 +96,7 @@ def flash_attention_relative_embedding(q: BlksprsTensor, sparsity_layout_q: Tens
         score_precalculation=score_precalculation)
 
 
-@torch.amp.custom_fwd(device_type="cuda")
+@opaque_public_op
 def flash_attention_relative_embeddings(q: BlksprsTensor, sparsity_layout_q: Tensor,
                                         k: BlksprsTensor, sparsity_layout_k: Tensor,
                                         v: BlksprsTensor, sparsity_layout_v: Tensor,
@@ -329,6 +331,7 @@ def flash_attention_relative_embeddings(q: BlksprsTensor, sparsity_layout_q: Ten
             relations=relations))
 
 
+@opaque_public_op
 def flash_attention_warm_up(sparsity_block_size: int, head_dimension: int, dtype: torch.dtype,
                             shapes: Sequence[tuple[int, int]], *,
                             value_dimension: int | None = None,
@@ -337,20 +340,21 @@ def flash_attention_warm_up(sparsity_block_size: int, head_dimension: int, dtype
                             key_relations_repeat: Sequence[bool] | None = None,
                             relation_validity: bool = False,
                             causal_lengths: bool = True,
-                            attention_mask: bool = False,
+                            attention_mask: bool | torch.dtype = False,
+                            attention_bias: bool | torch.dtype = False,
                             score_precalculation: str = "referenced_blocks",
                             backward: bool = True,
                             device: torch.device | str = "cuda") -> None:
     """Compiles and tunes the Flash Attention kernels of a static call configuration ahead of their first use.
 
     The kernels compile one variant per autotuning configuration and combination of the static properties of a call:
-    the dtype, the head dimensions, the block size, the mask, the causal lengths, the relation validity, the number,
-    bounds, and unique keys of the relations, and the score pre-calculation. The coordinates of a call only decide at
-    run time which of the compiled loops and launches a tile takes, so that this warm-up compiles every variant that
-    calls with these properties use, all configurations of a variant in parallel, and later calls compile nothing. The
-    autotuning key also holds power-of-two buckets of the sequence length and of the number of tile-schedule entries,
-    whose first calls only benchmark the compiled configurations; the warm-up benchmarks them for full causal
-    self-attention over ``shapes``.
+    the dtype, the head dimensions, the block size, the mask and the bias with their dtypes, the causal lengths, the
+    relation validity, the number, bounds, and unique keys of the relations, and the score pre-calculation. The
+    coordinates of a call only decide at run time which of the compiled loops and launches a tile takes, so that this
+    warm-up compiles every variant that calls with these properties use, all configurations of a variant in parallel,
+    and later calls compile nothing. The autotuning key also holds power-of-two buckets of the sequence length and of
+    the number of tile-schedule entries, whose first calls only benchmark the compiled configurations; the warm-up
+    benchmarks them for full causal self-attention over ``shapes``.
 
     Note:
         Together with a persistent ``TRITON_CACHE_DIR`` and ``TRITON_CACHE_AUTOTUNING=1``, the compiled kernels and the
@@ -359,8 +363,8 @@ def flash_attention_warm_up(sparsity_block_size: int, head_dimension: int, dtype
         use coordinates that clip, merge, and address through intervals in only some tiles, which does not affect what
         is compiled. Calls with relation coordinates beyond ``2**29`` in magnitude use 64-bit coordinates, and calls
         whose operands exceed ``2**31`` elements use 64-bit indexing, both of which compile separately. The explicit
-        mask of the warm-up has the dtype of the operands, so that calls with Boolean masks compile separately, and
-        calls with an attention bias are not warmed up.
+        mask and the bias compile separately for every dtype, so that calls with Boolean masks, for instance, are
+        warmed up with ``attention_mask=torch.bool``.
 
     Args:
         sparsity_block_size (int): The size of the sparsity blocks.
@@ -377,7 +381,10 @@ def flash_attention_warm_up(sparsity_block_size: int, head_dimension: int, dtype
             (default ``None``).
         relation_validity (bool, optional): Whether the calls pass relation-validity tensors (default ``False``).
         causal_lengths (bool, optional): Whether the calls pass causal lengths (default ``True``).
-        attention_mask (bool, optional): Whether the calls pass an explicit attention mask (default ``False``).
+        attention_mask (bool | torch.dtype, optional): Whether the calls pass an explicit attention mask, given by its
+            dtype or by ``True`` for the dtype of the operands (default ``False``).
+        attention_bias (bool | torch.dtype, optional): Whether the calls of :func:`blksprs.ops.flash_attention` pass an
+            attention bias, given by its dtype or by ``True`` for the dtype of the operands (default ``False``).
         score_precalculation (str, optional): The pre-calculation of the projected relative scores
             (default ``"referenced_blocks"``).
         backward (bool, optional): Whether to warm up the backward kernels (default ``True``).
@@ -386,18 +393,33 @@ def flash_attention_warm_up(sparsity_block_size: int, head_dimension: int, dtype
     """
     if not shapes:
         raise ValueError("shapes must hold at least one shape")
+    mask_dtype = _warm_up_dtype(attention_mask, dtype)
+    bias_dtype = _warm_up_dtype(attention_bias, dtype)
+    if bias_dtype is not None and relation_bounds is not None:
+        raise ValueError("Flash Attention with learned relative terms takes no attention bias")
     for n_batches, length in shapes:
         _warm_up_call(sparsity_block_size, head_dimension, value_dimension or head_dimension, dtype, n_batches, length,
                       relation_bounds, key_relations_are_unique, key_relations_repeat, relation_validity,
-                      causal_lengths, attention_mask, score_precalculation, backward, torch.device(device))()
+                      causal_lengths, mask_dtype, bias_dtype, score_precalculation, backward, torch.device(device))()
     torch.cuda.synchronize(device)
+
+
+def _warm_up_dtype(value: bool | torch.dtype, dtype: torch.dtype) -> torch.dtype | None:
+    """Returns the dtype of an optional operand of the warm-up calls, or None if the calls do not pass it.
+
+    A true value other than a dtype stands for the dtype of the operands, ``dtype``.
+
+    """
+    if isinstance(value, torch.dtype):
+        return value
+    return dtype if value else None
 
 
 def _warm_up_call(sparsity_block_size: int, head_dimension: int, value_dimension: int, dtype: torch.dtype,
                   n_batches: int, length: int, relation_bounds: Sequence[Sequence[int]] | None,
                   key_relations_are_unique: Sequence[bool] | None, key_relations_repeat: Sequence[bool] | None,
-                  relation_validity: bool, causal_lengths: bool, attention_mask: bool, score_precalculation: str,
-                  backward: bool, device: torch.device):
+                  relation_validity: bool, causal_lengths: bool, mask_dtype: torch.dtype | None,
+                  bias_dtype: torch.dtype | None, score_precalculation: str, backward: bool, device: torch.device):
     """Returns a function that runs one synthetic call of ``flash_attention_warm_up`` and its backward."""
     n_blocks = -(-length // sparsity_block_size)
     length = n_blocks * sparsity_block_size
@@ -417,12 +439,19 @@ def _warm_up_call(sparsity_block_size: int, head_dimension: int, value_dimension
     keywords: dict = {"sparsity_layout_o": layout_v}
     if causal_lengths:
         keywords["causal_lengths"] = torch.full((n_batches,), length, dtype=torch.int64, device=device)
-    if attention_mask:
+    if mask_dtype is not None:
         # The strict upper triangles of the diagonal blocks, a causal mask within the attention layout.
         positions = torch.arange(length, device=device)
         mask = (positions[None, :] > positions[:, None]).expand(n_batches, -1, -1)
-        keywords["attention_mask"] = to_sparse(mask.to(dtype), attention_layout, sparsity_block_size)
+        keywords["attention_mask"] = to_sparse(mask.to(mask_dtype), attention_layout, sparsity_block_size)
         keywords["sparsity_layout_mask"] = attention_layout
+    if bias_dtype is not None:
+        # One block of the bias per block of the attention layout.
+        n_bias_blocks = int(attention_layout.sum().item())
+        keywords["attention_bias"] = BlksprsTensor.wrap(torch.randn(
+            (n_bias_blocks, sparsity_block_size, sparsity_block_size), generator=generator, device=device,
+            dtype=bias_dtype))
+        keywords["sparsity_layout_bias"] = attention_layout
     relative_embeddings = None
     if relation_bounds is not None:
         bounds = _normalise_relation_bounds(relation_bounds)
@@ -442,7 +471,7 @@ def _warm_up_call(sparsity_block_size: int, head_dimension: int, value_dimension
                                           dtype=dtype)
 
     def attend() -> None:
-        inputs = [tensor.detach().requires_grad_(backward) for tensor in (q, k, v)]
+        inputs = [cast(BlksprsTensor, tensor.detach().requires_grad_(backward)) for tensor in (q, k, v)]
         if relative_embeddings is None:
             output = flash_attention(inputs[0], layout_qk, inputs[1], layout_qk, inputs[2], layout_v,
                                      attention_layout, sparsity_block_size, **keywords)

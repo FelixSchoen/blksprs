@@ -1,5 +1,9 @@
 import blksprs as bs
+import pytest
 import torch
+
+# The README examples run on a CUDA device.
+pytestmark = pytest.mark.cuda
 
 
 def test_readme():

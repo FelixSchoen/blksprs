@@ -5,22 +5,25 @@ from torch._library import triton_op
 from torch._library.triton import wrap_triton
 from triton import language as tl
 
-from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
+from blksprs.utils.autotuning import get_autotune_configs, get_fixed_config, prune_autotune_configs
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import build_layout_indices, stride, build_packed_indices, can_use_int32_indexing, \
-    prepare_layout_cache, finalize_layout_cache
+from blksprs.utils.public_op import on_operand_device, public_op
+from blksprs.utils.tools import as_base_tensor, build_layout_indices, stride, build_packed_indices, \
+    can_use_int32_indexing, prepare_layout_cache, finalize_layout_cache
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity, validate_dtype_int, validate_sparsity_block_size, ensure_contiguous, \
     validate_dimension, validate_indices, validate_sparsity_layout, validate_dtype_supported, \
     validate_distribution_shape
 
 
-@torch.amp.custom_fwd(device_type="cuda")
+@public_op
 def gather(src: BlksprsTensor, sparsity_layout_src: Tensor,
            dim: int,
            idx: BlksprsTensor, sparsity_layout_idx: Tensor,
            sparsity_block_size: int, layout_cache: dict | None = None) -> BlksprsTensor:
     """Gathers values from a compressed block-sparse tensor.
+
+    Indices that point into inactive blocks of ``sparsity_layout_src`` gather ``0`` and propagate no gradient.
 
     Args:
         src (BlksprsTensor): The compressed source tensor.
@@ -68,6 +71,7 @@ def gather(src: BlksprsTensor, sparsity_layout_src: Tensor,
 
 
 @triton_op("blksprs::gather_forward", mutates_args={})
+@on_operand_device
 def gather_forward(x: Tensor, sparsity_layout_x: Tensor, packed_indices_x: Tensor,
                    dim: int, i: Tensor, _: Tensor, layout_indices_i: Tensor,
                    sparsity_block_size: int) -> Tensor:
@@ -122,10 +126,10 @@ def gather_wrapper_backward(ctx, grad_output):
     dim = ctx.dim
     sparsity_block_size = ctx.sparsity_block_size
 
-    return scatter_reduce(grad_output, sparsity_layout_i,
-                          dim, i,
-                          sparsity_layout_x, sparsity_block_size,
-                          reduce_op="sum"), None, None, None, None, None, None, None
+    return as_base_tensor(scatter_reduce(grad_output, sparsity_layout_i,
+                                         dim, i,
+                                         sparsity_layout_x, sparsity_block_size,
+                                         reduce_op="sum")), None, None, None, None, None, None, None
 
 
 @triton.autotune(
@@ -226,6 +230,7 @@ def gather_kernel(x,
     tl.store(o + blk_o_idx, blk_x, mask=blk_o_msk)
 
 
+@torch.compiler.disable
 def gather_build_layout_cache(layout_cache: dict | None, sparsity_layout_src: Tensor, sparsity_layout_idx: Tensor):
     layout_cache = prepare_layout_cache(
         layout_cache, "gather", sparsity_layout_src, sparsity_layout_idx)
@@ -257,12 +262,15 @@ gather_forward.register_autograd(
     gather_wrapper_backward, setup_context=gather_setup_context)
 
 
+@public_op
 def scatter(src: BlksprsTensor, sparsity_layout_src: Tensor,
             dim: int,
             idx: BlksprsTensor,
             sparsity_layout_tgt: Tensor,
             sparsity_block_size: int, layout_cache: dict | None = None) -> BlksprsTensor:
     """Scatters values without reducing overlapping writes.
+
+    Writes to positions in inactive blocks of ``sparsity_layout_tgt`` are discarded.
 
     This is a convenience wrapper around :func:`scatter_reduce` with ``reduce_op="none"``.
 
@@ -296,7 +304,7 @@ def scatter(src: BlksprsTensor, sparsity_layout_src: Tensor,
                           reduce_op="none", layout_cache=layout_cache)
 
 
-@torch.amp.custom_fwd(device_type="cuda")
+@public_op
 def scatter_reduce(src: BlksprsTensor, sparsity_layout_src: Tensor,
                    dim: int,
                    idx: BlksprsTensor,
@@ -304,6 +312,9 @@ def scatter_reduce(src: BlksprsTensor, sparsity_layout_src: Tensor,
                    sparsity_block_size: int,
                    reduce_op: str = "sum", layout_cache: dict | None = None) -> BlksprsTensor:
     """Scatters values from a compressed block-sparse tensor.
+
+    Writes to positions in inactive blocks of ``sparsity_layout_tgt`` are discarded, and the corresponding source
+    values receive no gradient.
 
     Args:
         src (BlksprsTensor): The compressed source tensor.
@@ -364,6 +375,7 @@ def scatter_reduce(src: BlksprsTensor, sparsity_layout_src: Tensor,
 
 
 @triton_op("blksprs::scatter_reduce_forward", mutates_args={})
+@on_operand_device
 def scatter_reduce_forward(x: Tensor, _: Tensor, layout_indices_x: Tensor,
                            dim: int, i: Tensor,
                            sparsity_layout_o: Tensor, packed_indices_o: Tensor,
@@ -392,10 +404,12 @@ def scatter_reduce_forward(x: Tensor, _: Tensor, layout_indices_x: Tensor,
         s_l_o_b, s_l_o_r, s_l_o_c = sparsity_layout_o.size()
         s_l_o_b_s, s_l_o_r_s, s_l_o_c_s = stride(sparsity_layout_o)
 
-        def triton_grid(meta): return [x_b,
-                                       triton.cdiv(
-                                           x_r, meta["TRITON_BLOCK_SIZE"]),
-                                       triton.cdiv(x_c, meta["TRITON_BLOCK_SIZE"])]
+        # The kernel accumulates into its output for the sum and therefore takes a fixed configuration, see
+        # ``get_fixed_config``
+        triton_block_size, num_warps, num_stages = get_fixed_config("scatter_reduce", sparsity_block_size)
+        triton_grid = [x_b,
+                       triton.cdiv(x_r, triton_block_size),
+                       triton.cdiv(x_c, triton_block_size)]
 
         reduce_op_ind = 0
         if reduce_op == "sum":
@@ -423,7 +437,10 @@ def scatter_reduce_forward(x: Tensor, _: Tensor, layout_indices_x: Tensor,
           packed_indices_o,
           reduce_op_ind,
           sparsity_block_size,
-          USE_INT64=use_int64))
+          USE_INT64=use_int64,
+          TRITON_BLOCK_SIZE=triton_block_size,
+          num_warps=num_warps,
+          num_stages=num_stages))
 
         return output_accumulator.to(x.dtype)
 
@@ -436,19 +453,13 @@ def scatter_reduce_wrapper_backward(ctx, grad_output):
     reduce_op = ctx.reduce_op
 
     if reduce_op == "sum":
-        return gather(grad_output, sparsity_layout_o, dim, i, sparsity_layout_x,
-                      sparsity_block_size), None, None, None, None, None, None, None, None, None
+        return as_base_tensor(gather(grad_output, sparsity_layout_o, dim, i, sparsity_layout_x,
+                                     sparsity_block_size)), None, None, None, None, None, None, None, None, None
     else:
         raise ValueError(
             f"Reduction operation '{reduce_op}' does not support backward pass")
 
 
-@triton.autotune(
-    configs=get_autotune_configs("distribution"),
-    key=["sparsity_block_size"],
-    prune_configs_by={"early_config_prune": prune_autotune_configs},
-    reset_to_zero=["o"]
-)
 @triton.jit
 def scatter_reduce_kernel(x,
                           x_b, x_b_s, x_r_s, x_c_s,
@@ -545,6 +556,7 @@ def scatter_reduce_kernel(x,
         tl.atomic_add(o + blk_o_idx, blk_x, mask=blk_o_msk)
 
 
+@torch.compiler.disable
 def scatter_reduce_build_layout_cache(layout_cache: dict | None, sparsity_layout_src: Tensor, sparsity_layout_tgt: Tensor):
     layout_cache = prepare_layout_cache(
         layout_cache, "scatter_reduce", sparsity_layout_src, sparsity_layout_tgt)

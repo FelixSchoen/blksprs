@@ -30,3 +30,19 @@ def setup(request):
     print("Seed:", seed)
 
     torch.Tensor.__repr__ = normal_repr
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skips the tests of CUDA-only modules and tests marked ``cuda`` on machines without a CUDA device.
+
+    A module is CUDA-only if its ``DEVICE`` is a CUDA device; the other tests, such as those of the layout builders,
+    also run on the CPU.
+
+    """
+    if torch.cuda.is_available():
+        return
+    skip = pytest.mark.skip(reason="requires a CUDA device")
+    for item in items:
+        device = getattr(item.module, "DEVICE", None)
+        if (isinstance(device, torch.device) and device.type == "cuda") or item.get_closest_marker("cuda"):
+            item.add_marker(skip)

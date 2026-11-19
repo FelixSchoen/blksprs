@@ -5,11 +5,13 @@ from torch._library import triton_op
 from torch._library.triton import wrap_triton
 from triton import language as tl
 
-from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
+from blksprs.utils.autotuning import get_autotune_configs, get_fixed_config, prune_autotune_configs
+from blksprs.utils.public_op import on_operand_device
 from blksprs.utils.tools import stride, can_use_int32_indexing
 
 
 @triton_op("blksprs::flow_pull_forward", mutates_args={})
+@on_operand_device
 def flow_pull_forward(x: Tensor, sparsity_layout_o: Tensor,
                       layout_indices: Tensor, packed_indices: Tensor,
                       sparsity_block_size: int, n_sparse_blocks: int) -> Tensor:
@@ -112,6 +114,7 @@ def flow_pull_kernel(x,
 
 
 @triton_op("blksprs::flow_push_forward", mutates_args={})
+@on_operand_device
 def flow_push_forward(x: Tensor, sparsity_layout_x: Tensor, layout_indices: Tensor, packed_indices: Tensor,
                       sparsity_block_size: int, n_sparse_blocks: int) -> Tensor:
     with torch.no_grad():
@@ -135,10 +138,11 @@ def flow_push_forward(x: Tensor, sparsity_layout_x: Tensor, layout_indices: Tens
         o_b, o_r, o_c = output_accumulator.size()
         o_b_s, o_r_s, o_c_s = stride(output_accumulator)
 
-        def triton_grid(meta): return [x_b,
-                                       triton.cdiv(
-                                           x_r, meta["TRITON_BLOCK_SIZE"]),
-                                       triton.cdiv(x_c, meta["TRITON_BLOCK_SIZE"])]
+        # The kernel accumulates into its output and therefore takes a fixed configuration, see ``get_fixed_config``
+        triton_block_size, num_warps, num_stages = get_fixed_config("flow_push", sparsity_block_size)
+        triton_grid = [x_b,
+                       triton.cdiv(x_r, triton_block_size),
+                       triton.cdiv(x_c, triton_block_size)]
 
         use_int64 = not can_use_int32_indexing(
             x,
@@ -157,18 +161,15 @@ def flow_push_forward(x: Tensor, sparsity_layout_x: Tensor, layout_indices: Tens
           output_accumulator,
           o_b, o_b_s, o_r_s, o_c_s,
           sparsity_block_size,
-          USE_INT64=use_int64))
+          USE_INT64=use_int64,
+          TRITON_BLOCK_SIZE=triton_block_size,
+          num_warps=num_warps,
+          num_stages=num_stages))
 
         return output_accumulator.to(x.dtype)
 
 
 # noinspection PyUnusedLocal
-@triton.autotune(
-    configs=get_autotune_configs("flow"),
-    key=["sparsity_block_size"],
-    prune_configs_by={"early_config_prune": prune_autotune_configs},
-    reset_to_zero=["o"]
-)
 @triton.jit
 def flow_push_kernel(x,
                      x_b, x_b_s, x_r_s, x_c_s,

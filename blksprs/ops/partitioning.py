@@ -4,6 +4,7 @@ from torch._library import triton_op
 
 from blksprs.ops.flow import flow_pull_forward
 from blksprs.utils.blksprs_tensor import BlksprsTensor
+from blksprs.utils.public_op import on_operand_device, public_op
 from blksprs.utils.tools import as_base_tensor, build_layout_indices, build_packed_indices, \
     prepare_layout_cache, finalize_layout_cache
 from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_device, \
@@ -11,7 +12,7 @@ from blksprs.utils.validation import validate_dimensions, validate_contiguous, v
     ensure_contiguous, validate_dimension, validate_dtype_supported
 
 
-@torch.amp.custom_fwd(device_type="cuda")
+@public_op
 def split(x: BlksprsTensor, sparsity_layout: Tensor, partitions: int,
           dim: int, sparsity_block_size: int, layout_cache: dict | None = None) -> tuple[BlksprsTensor, Tensor]:
     """Splits a compressed block-sparse tensor along its last dimension.
@@ -54,6 +55,7 @@ def split(x: BlksprsTensor, sparsity_layout: Tensor, partitions: int,
 
 
 @triton_op("blksprs::split_forward", mutates_args={})
+@on_operand_device
 def split_forward(x: Tensor, sparsity_layout_o: Tensor, layout_indices: Tensor, packed_indices: Tensor,
                   _: int, __: int, sparsity_block_size: int, n_sparse_blocks: int) -> Tensor:
     with torch.no_grad():
@@ -68,10 +70,11 @@ def split_wrapper_backward(ctx, grad_output):
     dim = ctx.dim
     sparsity_block_size = ctx.sparsity_block_size
 
-    return merge(grad_output, sparsity_layout, num_partitions, dim,
-                 sparsity_block_size)[0], None, None, None, None, None, None, None
+    return as_base_tensor(merge(grad_output, sparsity_layout, num_partitions, dim,
+                                sparsity_block_size)[0]), None, None, None, None, None, None, None
 
 
+@torch.compiler.disable
 def split_build_layout_cache(layout_cache: dict | None, sparsity_layout: Tensor, partitions: int):
     layout_cache = prepare_layout_cache(
         layout_cache, "split", sparsity_layout, partitions)
@@ -121,7 +124,7 @@ def split_setup_context(ctx, inputs, output):
 split_forward.register_autograd(split_wrapper_backward, setup_context=split_setup_context)
 
 
-@torch.amp.custom_fwd(device_type="cuda")
+@public_op
 def merge(x: BlksprsTensor, sparsity_layout: Tensor, partitions: int,
           dim: int, sparsity_block_size: int, layout_cache: dict | None = None) -> tuple[BlksprsTensor, Tensor]:
     """Merges compressed block-sparse partitions along the last dimension.
@@ -164,6 +167,7 @@ def merge(x: BlksprsTensor, sparsity_layout: Tensor, partitions: int,
 
 
 @triton_op("blksprs::merge_forward", mutates_args={})
+@on_operand_device
 def merge_forward(x: Tensor, sparsity_layout_o: Tensor, layout_indices: Tensor, packed_indices: Tensor,
                   _: int, __: int, sparsity_block_size: int, n_sparse_blocks: int) -> Tensor:
     with torch.no_grad():
@@ -178,10 +182,11 @@ def merge_wrapper_backward(ctx, grad_output):
     dim = ctx.dim
     sparsity_block_size = ctx.sparsity_block_size
 
-    return split(grad_output, sparsity_layout, num_partitions, dim,
-                 sparsity_block_size)[0], None, None, None, None, None, None, None
+    return as_base_tensor(split(grad_output, sparsity_layout, num_partitions, dim,
+                                sparsity_block_size)[0]), None, None, None, None, None, None, None
 
 
+@torch.compiler.disable
 def merge_build_layout_cache(layout_cache: dict | None, sparsity_layout: Tensor, partitions: int):
     layout_cache = prepare_layout_cache(
         layout_cache, "merge", sparsity_layout, partitions)

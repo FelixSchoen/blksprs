@@ -74,4 +74,8 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-markers = ["benchmark: high-memory or high-runtime regression tests"]
+markers = [
+    "benchmark: high-memory or high-runtime regression tests, deselected unless selected with -m benchmark",
+    "cuda: tests that require a CUDA device, skipped without one",
+]
+addopts = ["-m", "not benchmark"]

@@ -4,6 +4,7 @@ from torch._library import triton_op
 
 from blksprs.ops.flow import flow_pull_forward, flow_push_forward
 from blksprs.utils.blksprs_tensor import BlksprsTensor
+from blksprs.utils.public_op import on_operand_device, public_op
 from blksprs.utils.tools import as_base_tensor, build_layout_indices, build_packed_indices, \
     prepare_layout_cache, finalize_layout_cache
 from blksprs.utils.validation import validate_dimensions, validate_contiguous, validate_device, \
@@ -11,7 +12,7 @@ from blksprs.utils.validation import validate_dimensions, validate_contiguous, v
     validate_non_negative_integer, validate_non_negative_integer_tuple, ensure_contiguous, validate_dtype_supported
 
 
-@torch.amp.custom_fwd(device_type="cuda")
+@public_op
 def repeat(x: BlksprsTensor, sparsity_layout_x: Tensor, repeats: tuple[int, int, int],
            sparsity_block_size: int, sparsity_layout_output: Tensor | None = None, layout_cache: dict | None = None) -> tuple[BlksprsTensor, Tensor]:
     """Repeats a compressed block-sparse tensor along each dimension.
@@ -66,7 +67,7 @@ def repeat(x: BlksprsTensor, sparsity_layout_x: Tensor, repeats: tuple[int, int,
         layout_cache["packed_indices"], sparsity_block_size, layout_cache["n_sparse_blocks"])), layout_cache["sparsity_layout_o"]
 
 
-@torch.amp.custom_fwd(device_type="cuda")
+@public_op
 def repeat_interleave(x: BlksprsTensor, sparsity_layout_x: Tensor, repeats: int,
                       sparsity_block_size: int, sparsity_layout_output: Tensor | None = None, layout_cache: dict | None = None) -> tuple[BlksprsTensor, Tensor]:
     """Repeats and interleaves compressed matrices along the batch dimension.
@@ -122,6 +123,7 @@ def repeat_interleave(x: BlksprsTensor, sparsity_layout_x: Tensor, repeats: int,
 
 
 @triton_op("blksprs::repeat_forward", mutates_args={})
+@on_operand_device
 def repeat_forward(x: Tensor, _: Tensor, sparsity_layout_o: Tensor, layout_indices: Tensor,
                    packed_indices: Tensor,
                    sparsity_block_size: int, n_sparse_blocks: int) -> Tensor:
@@ -136,11 +138,12 @@ def repeat_wrapper_backward(ctx, grad_output):
     sparsity_block_size = ctx.sparsity_block_size
     n_sparse_blocks = torch.sum(sparsity_layout_x.to(torch.int)).item()
 
-    return flow_push_forward(grad_output, sparsity_layout_o, layout_indices,
-                             packed_indices, sparsity_block_size,
-                             n_sparse_blocks), None, None, None, None, None, None
+    return as_base_tensor(flow_push_forward(grad_output, sparsity_layout_o, layout_indices,
+                                            packed_indices, sparsity_block_size,
+                                            n_sparse_blocks)), None, None, None, None, None, None
 
 
+@torch.compiler.disable
 def repeat_build_layout_cache(layout_cache: dict | None, sparsity_layout_x: Tensor, repeats: tuple[int, int, int],
                      sparsity_layout_output: Tensor | None):
     layout_cache = prepare_layout_cache(
@@ -176,6 +179,7 @@ def repeat_build_layout_cache(layout_cache: dict | None, sparsity_layout_x: Tens
     return finalize_layout_cache(layout_cache)
 
 
+@torch.compiler.disable
 def repeat_interleave_build_layout_cache(layout_cache: dict | None, sparsity_layout_x: Tensor, repeats: int,
                                 sparsity_layout_output: Tensor | None):
     layout_cache = prepare_layout_cache(

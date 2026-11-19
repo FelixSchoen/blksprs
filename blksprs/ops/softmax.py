@@ -10,17 +10,30 @@ from triton import language as tl
 from blksprs.ops.misc.row_wise import row_wise_sum, row_wise_max, row_wise_sub
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import build_layout_indices, stride, ceil_pow2, build_packed_indices, \
+from blksprs.utils.public_op import on_operand_device, public_op
+from blksprs.utils.tools import as_base_tensor, build_layout_indices, stride, ceil_pow2, build_packed_indices, \
     can_use_int32_indexing, prepare_layout_cache, finalize_layout_cache
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
-    validate_sparsity, validate_sparsity_block_size, validate_dtype_float_32, ensure_contiguous
+    validate_sparsity, validate_sparsity_block_size, validate_dtype_float_32, ensure_contiguous, TensorT
 
 
 _FUSED_SOFTMAX_MAX_ROW_ELEMENTS = 131_072
 _REGULAR_SOFTMAX_TILE_SIZE = 32
 
 
-@torch.amp.custom_fwd(device_type="cuda")
+def _cast_for_softmax_autocast(x: TensorT) -> TensorT:
+    """Casts half-precision CUDA inputs to ``float32`` while CUDA autocast is enabled.
+
+    PyTorch's autocast policy computes softmax in ``float32``. Outside autocast, inputs are left unchanged so that
+    validation rejects dtypes other than ``float32``.
+
+    """
+    if torch.is_autocast_enabled("cuda") and x.is_cuda and x.dtype in (torch.float16, torch.bfloat16):
+        return cast(TensorT, x.to(torch.float32))
+    return x
+
+
+@public_op
 def softmax(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
             flag_fused: bool = True, layout_cache: dict | None = None) -> BlksprsTensor:
     """Computes a row-wise block-sparse softmax.
@@ -29,6 +42,11 @@ def softmax(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
     vector contains at most 131,072 elements. Larger rows automatically use
     :func:`softmax_regular` to avoid pathological Triton compilation and
     execution costs.
+
+    Note:
+        The softmax is computed in ``float32``. Under CUDA autocast, ``float16`` and ``bfloat16`` inputs are cast to
+        ``float32`` and the output is ``float32``, as for :func:`torch.softmax`. Outside autocast, inputs must be
+        ``float32``.
 
     Args:
         x (BlksprsTensor): The compressed input tensor.
@@ -50,7 +68,7 @@ def softmax(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
     return softmax_regular(x, sparsity_layout, sparsity_block_size, layout_cache)
 
 
-@torch.amp.custom_fwd(device_type="cuda")
+@public_op
 def softmax_regular(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
                     layout_cache: dict | None = None) -> BlksprsTensor:
     """Computes the row-wise softmax of a block-sparse tensor in compressed form.
@@ -59,6 +77,11 @@ def softmax_regular(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_si
 
     Note:
         Inactive blocks do not participate in the softmax and are equivalent to values of ``-inf``.
+
+    Note:
+        The softmax is computed in ``float32``. Under CUDA autocast, ``float16`` and ``bfloat16`` inputs are cast to
+        ``float32`` and the output is ``float32``, as for :func:`torch.softmax`. Outside autocast, inputs must be
+        ``float32``.
 
     Args:
         x (BlksprsTensor): The compressed input tensor.
@@ -71,6 +94,7 @@ def softmax_regular(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_si
 
     """
     x = ensure_contiguous(x)
+    x = _cast_for_softmax_autocast(x)
 
     validate_dimensions(x)
     validate_contiguous(x)
@@ -91,6 +115,7 @@ def softmax_regular(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_si
 
 
 @triton_op("blksprs::softmax_forward", mutates_args={})
+@on_operand_device
 def softmax_forward(x: Tensor, sparsity_layout: Tensor,
                     layout_indices: Tensor,
                     packed_indices_rws: Tensor,
@@ -149,11 +174,12 @@ def softmax_backward_wrapper(ctx, grad_output):
     o, sparsity_layout, layout_indices = ctx.saved_tensors
     sparsity_block_size = ctx.sparsity_block_size
 
-    return softmax_backward(grad_output, o, layout_indices, sparsity_layout,
-                            sparsity_block_size), None, None, None, None
+    return as_base_tensor(softmax_backward(grad_output, o, layout_indices, sparsity_layout,
+                                           sparsity_block_size)), None, None, None, None
 
 
 @triton_op("blksprs::softmax_backward", mutates_args={})
+@on_operand_device
 def softmax_backward(grad_output: Tensor, o: Tensor, layout_indices: Tensor, sparsity_layout: Tensor,
                      sparsity_block_size: int) -> Tensor:
     with torch.no_grad():
@@ -339,6 +365,7 @@ def softmax_kernel_grad(g,
         tl.store(o + blk_o_idx, buf, mask=blk_o_msk)
 
 
+@torch.compiler.disable
 def softmax_build_layout_cache(layout_cache: dict | None, sparsity_layout: Tensor):
     layout_cache = prepare_layout_cache(layout_cache, "softmax", sparsity_layout)
 
@@ -370,7 +397,7 @@ softmax_forward.register_autograd(
     softmax_backward_wrapper, setup_context=softmax_setup_context)
 
 
-@torch.amp.custom_fwd(device_type="cuda")
+@public_op
 def softmax_fused(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size: int,
                   layout_cache: dict | None = None) -> BlksprsTensor:
     """Computes the row-wise softmax of a block-sparse tensor in compressed form using a fused kernel.
@@ -379,6 +406,11 @@ def softmax_fused(x: BlksprsTensor, sparsity_layout: Tensor, sparsity_block_size
     power-of-two-padded work vector. It supports padded vectors of at most
     131,072 elements; call :func:`softmax` for automatic fallback on larger
     rows.
+
+    Note:
+        The softmax is computed in ``float32``. Under CUDA autocast, ``float16`` and ``bfloat16`` inputs are cast to
+        ``float32`` and the output is ``float32``, as for :func:`torch.softmax`. Outside autocast, inputs must be
+        ``float32``.
 
     Args:
         x (BlksprsTensor): The compressed input tensor.
@@ -403,6 +435,7 @@ def _softmax_fused(x: BlksprsTensor, sparsity_layout: Tensor,
                    sparsity_block_size: int, layout_cache: dict | None,
                    fallback_to_regular: bool) -> BlksprsTensor:
     x = ensure_contiguous(x)
+    x = _cast_for_softmax_autocast(x)
 
     validate_dimensions(x)
     validate_contiguous(x)
@@ -435,6 +468,7 @@ def _softmax_fused(x: BlksprsTensor, sparsity_layout: Tensor,
 
 
 @triton_op("blksprs::softmax_fused_forward", mutates_args={})
+@on_operand_device
 def softmax_fused_forward(x: Tensor, sparsity_layout: Tensor,
                           packed_indices_sorted: Tensor,
                           max_blocks_line: int,
@@ -446,8 +480,8 @@ def softmax_fused_forward(x: Tensor, sparsity_layout: Tensor,
     s_l_b, s_l_r, s_l_c = sparsity_layout.size()
     s_l_b_s, s_l_r_s, s_l_c_s = stride(sparsity_layout)
 
-    def triton_grid(meta): return [s_l_b,
-                                   s_l_r,
+    # Batches and block rows share the first grid axis, whose size is not limited to 65,535.
+    def triton_grid(meta): return [s_l_b * s_l_r,
                                    sparsity_block_size]
 
     use_int64 = not can_use_int32_indexing(x, output, sparsity_layout, packed_indices_sorted)
@@ -456,7 +490,7 @@ def softmax_fused_forward(x: Tensor, sparsity_layout: Tensor,
      (x,
       x_b, x_b_s, x_r_s, x_c_s,
       output,
-      s_l_b, s_l_b_s, s_l_r_s, s_l_c, s_l_c_s,
+      s_l_b, s_l_b_s, s_l_r, s_l_r_s, s_l_c, s_l_c_s,
       packed_indices_sorted,
       max_blocks_line,
       sparsity_block_size,
@@ -471,11 +505,12 @@ def softmax_fused_backward_wrapper(ctx, grad_output):
     max_blocks_line = ctx.max_blocks_line
     sparsity_block_size = ctx.sparsity_block_size
 
-    return softmax_fused_backward(grad_output, o, packed_indices_sorted, sparsity_layout,
-                                  max_blocks_line, sparsity_block_size), None, None, None, None
+    return as_base_tensor(softmax_fused_backward(grad_output, o, packed_indices_sorted, sparsity_layout,
+                                                 max_blocks_line, sparsity_block_size)), None, None, None, None
 
 
 @triton_op("blksprs::softmax_fused_backward", mutates_args={})
+@on_operand_device
 def softmax_fused_backward(grad_output: Tensor,
                            o: Tensor,
                            packed_indices_sorted: Tensor,
@@ -492,8 +527,8 @@ def softmax_fused_backward(grad_output: Tensor,
         s_l_b, s_l_r, s_l_c = sparsity_layout.size()
         s_l_b_s, s_l_r_s, s_l_c_s = stride(sparsity_layout)
 
-        def triton_grid(meta): return [s_l_b,
-                                       s_l_r,
+        # Batches and block rows share the first grid axis, whose size is not limited to 65,535.
+        def triton_grid(meta): return [s_l_b * s_l_r,
                                        sparsity_block_size]
 
         use_int64 = not can_use_int32_indexing(grad_output, o, sparsity_layout, packed_indices_sorted, grad_x)
@@ -503,7 +538,7 @@ def softmax_fused_backward(grad_output: Tensor,
           g_b, g_b_s, g_r_s, g_c_s,
           o,
           o_b, o_b_s, o_r_s, o_c_s,
-          s_l_b, s_l_b_s, s_l_r_s, s_l_c, s_l_c_s,
+          s_l_b, s_l_b_s, s_l_r, s_l_r_s, s_l_c, s_l_c_s,
           packed_indices_sorted,
           grad_x,
           max_blocks_line,
@@ -524,7 +559,7 @@ def softmax_fused_backward(grad_output: Tensor,
 def softmax_fused_kernel(x,
                          x_b, x_b_s, x_r_s, x_c_s,
                          o,
-                         s_l_b, s_l_b_s, s_l_r_s, s_l_c, s_l_c_s,
+                         s_l_b, s_l_b_s, s_l_r, s_l_r_s, s_l_c, s_l_c_s,
                          pidx_s,
                          mbs: tl.constexpr,
                          sparsity_block_size: tl.constexpr,
@@ -532,9 +567,10 @@ def softmax_fused_kernel(x,
                          TRITON_BLOCK_SIZE: tl.constexpr) -> None:
     # Get triton block indices
     index_dtype = tl.int64 if USE_INT64 else tl.int32
-    pid_bat = tl.cast(tl.program_id(axis=0), index_dtype)
-    pid_row = tl.cast(tl.program_id(axis=1), index_dtype)
-    pid_lin = tl.cast(tl.program_id(axis=2), index_dtype)
+    pid_bat_row = tl.cast(tl.program_id(axis=0), index_dtype)
+    pid_bat = pid_bat_row // s_l_r
+    pid_row = pid_bat_row % s_l_r
+    pid_lin = tl.cast(tl.program_id(axis=1), index_dtype)
 
     line_offsets = tl.arange(0, mbs)
     element_offsets = tl.arange(0, mbs * sparsity_block_size)
@@ -582,7 +618,7 @@ def softmax_fused_kernel_grad(g,
                               g_b, g_b_s, g_r_s, g_c_s,
                               x,
                               x_b, x_b_s, x_r_s, x_c_s,
-                              s_l_b, s_l_b_s, s_l_r_s, s_l_c, s_l_c_s,
+                              s_l_b, s_l_b_s, s_l_r, s_l_r_s, s_l_c, s_l_c_s,
                               pidx_s,
                               o,
                               mbs: tl.constexpr,
@@ -591,9 +627,10 @@ def softmax_fused_kernel_grad(g,
                               TRITON_BLOCK_SIZE: tl.constexpr) -> None:
     # Get triton block indices
     index_dtype = tl.int64 if USE_INT64 else tl.int32
-    pid_bat = tl.cast(tl.program_id(axis=0), index_dtype)
-    pid_row = tl.cast(tl.program_id(axis=1), index_dtype)
-    pid_lin = tl.cast(tl.program_id(axis=2), index_dtype)
+    pid_bat_row = tl.cast(tl.program_id(axis=0), index_dtype)
+    pid_bat = pid_bat_row // s_l_r
+    pid_row = pid_bat_row % s_l_r
+    pid_lin = tl.cast(tl.program_id(axis=1), index_dtype)
 
     line_offsets = tl.arange(0, mbs)
     element_offsets = tl.arange(0, mbs * sparsity_block_size)
@@ -638,6 +675,7 @@ def softmax_fused_kernel_grad(g,
         tl.store(o + blk_x_idx, blk_grad, mask=blk_x_mask)
 
 
+@torch.compiler.disable
 def softmax_fused_build_layout_cache(layout_cache: dict | None, sparsity_layout: Tensor):
     """Builds layout cache data for the fused softmax operation.
 

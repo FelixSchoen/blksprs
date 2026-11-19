@@ -9,6 +9,7 @@ from triton import language as tl
 
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.blksprs_tensor import BlksprsTensor
+from blksprs.utils.public_op import on_operand_device, public_op
 from blksprs.utils.tools import build_layout_indices, stride, can_use_int32_indexing
 from blksprs.utils.validation import validate_dimensions, validate_device, \
     validate_contiguous, validate_sparsity, validate_sparsity_block_size, \
@@ -16,7 +17,7 @@ from blksprs.utils.validation import validate_dimensions, validate_device, \
     validate_non_negative_integer_tuple
 
 
-@torch.amp.custom_fwd(device_type="cuda")
+@public_op
 def build_distribution_layout(indices: BlksprsTensor, sparsity_layout_indices: Tensor,
                               dim: int, size_target: torch.Size,
                               sparsity_block_size: int) -> Tensor:
@@ -61,6 +62,7 @@ def build_distribution_layout(indices: BlksprsTensor, sparsity_layout_indices: T
 
 
 @triton_op("blksprs::build_distribution_layout", mutates_args={})
+@on_operand_device
 def build_distribution_layout_operation(indices: Tensor, layout_indices_i: Tensor,
                                         adjusted_dim: int, size_target: typing.List[int],
                                         sparsity_block_size: int) -> Tensor:

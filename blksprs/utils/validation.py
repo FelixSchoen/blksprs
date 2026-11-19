@@ -1,27 +1,18 @@
 import operator
-import threading
 from typing import TypeVar, overload
 
 import torch
 from torch import Tensor
 
-_thread_local = threading.local()
-
-_CONTIGUOUS_DEFAULT = True
-_VALIDATION_DEFAULT = True
+# The switches are process-global rather than thread-local, since autograd runs backward passes on its own worker
+# threads, which must observe the same settings as the forward pass.
+_contiguous = True
+_validation = True
 
 TensorT = TypeVar("TensorT", bound=Tensor)
 TensorT2 = TypeVar("TensorT2", bound=Tensor)
 TensorT3 = TypeVar("TensorT3", bound=Tensor)
 TensorT4 = TypeVar("TensorT4", bound=Tensor)
-
-
-def _get_contiguous():
-    return getattr(_thread_local, "contiguous", _CONTIGUOUS_DEFAULT)
-
-
-def _get_validation():
-    return getattr(_thread_local, "validation", _VALIDATION_DEFAULT)
 
 
 @overload
@@ -445,28 +436,42 @@ def validate_distribution_shape(index_size: torch.Size | tuple[int, ...],
 
 
 def _check_contiguous():
-    return _get_contiguous()
+    return _contiguous
 
 
 def disable_contiguous() -> None:
-    """Disables automatic contiguous conversion for the current thread."""
-    _thread_local.contiguous = False
+    """Disables automatic contiguous conversion for the whole process.
+
+    The setting is shared by all threads, including the autograd threads that run backward passes, and applies to every
+    operation that runs before :func:`enable_contiguous` is called.
+
+    """
+    global _contiguous
+    _contiguous = False
 
 
 def enable_contiguous() -> None:
-    """Enables automatic contiguous conversion for the current thread."""
-    _thread_local.contiguous = True
+    """Enables automatic contiguous conversion for the whole process."""
+    global _contiguous
+    _contiguous = True
 
 
 def _check_skip_validation():
-    return not _get_validation()
+    return not _validation
 
 
 def disable_validation() -> None:
-    """Disables input validation for the current thread."""
-    _thread_local.validation = False
+    """Disables input validation for the whole process.
+
+    The setting is shared by all threads, including the autograd threads that run backward passes, and applies to every
+    operation that runs before :func:`enable_validation` is called.
+
+    """
+    global _validation
+    _validation = False
 
 
 def enable_validation() -> None:
-    """Enables input validation for the current thread."""
-    _thread_local.validation = True
+    """Enables input validation for the whole process."""
+    global _validation
+    _validation = True

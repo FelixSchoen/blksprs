@@ -7,14 +7,15 @@ from triton import language as tl
 from blksprs.ops.transpose import transpose
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import build_layout_indices, stride, build_packed_indices, can_use_int32_indexing, \
-    cast_for_autocast, prepare_layout_cache, finalize_layout_cache
+from blksprs.utils.public_op import on_operand_device, public_op
+from blksprs.utils.tools import as_base_tensor, build_layout_indices, stride, build_packed_indices, \
+    can_use_int32_indexing, cast_for_autocast, prepare_layout_cache, finalize_layout_cache
 from blksprs.utils.validation import validate_contiguous, validate_dimensions, validate_device, \
     validate_sparsity, validate_sparsity_layout, validate_sparsity_block_size, validate_dtype_float, \
     validate_shape, ensure_contiguous
 
 
-@torch.amp.custom_fwd(device_type="cuda")
+@public_op
 def matmul(x: BlksprsTensor, sparsity_layout_x: Tensor,
            y: BlksprsTensor, sparsity_layout_y: Tensor,
            sparsity_layout_output: Tensor,
@@ -22,6 +23,11 @@ def matmul(x: BlksprsTensor, sparsity_layout_x: Tensor,
     """Multiplies two compressed block-sparse tensors.
 
     Only blocks marked active by ``sparsity_layout_output`` are calculated.
+
+    Note:
+        Like :func:`torch.matmul`, ``float32`` products use TF32 only if PyTorch permits it for CUDA matrix
+        multiplications, see :func:`torch.set_float32_matmul_precision`. Otherwise, they are computed in full
+        ``float32`` precision, which is PyTorch's default.
 
     Args:
         x (BlksprsTensor): The compressed left operand.
@@ -68,6 +74,7 @@ def matmul(x: BlksprsTensor, sparsity_layout_x: Tensor,
 
 
 @triton_op("blksprs::matmul_forward", mutates_args={})
+@on_operand_device
 def matmul_forward(x: Tensor, y: Tensor,
                    sparsity_layout_x: Tensor, packed_indices_x: Tensor,
                    sparsity_layout_y: Tensor, packed_indices_y: Tensor,
@@ -105,6 +112,7 @@ def matmul_forward(x: Tensor, y: Tensor,
             output,
             layout_indices_o,
         )
+        input_precision = _dot_input_precision(x)
 
         (wrap_triton(matmul_kernel)[triton_grid]
          (x,
@@ -122,9 +130,35 @@ def matmul_forward(x: Tensor, y: Tensor,
           layout_indices_o,
           lidx_o_r, lidx_o_r_s, lidx_o_c_s,
           sparsity_block_size,
-          USE_INT64=use_int64))
+          USE_INT64=use_int64,
+          INPUT_PRECISION=input_precision))
 
         return output
+
+
+def _float32_matmul_allows_tf32() -> bool:
+    """Returns whether PyTorch currently permits TF32 for ``float32`` CUDA matrix multiplications."""
+    matmul_backend = torch.backends.cuda.matmul
+    try:
+        precision = matmul_backend.fp32_precision
+    except AttributeError:
+        # PyTorch versions without the precision API only provide the legacy flag.
+        return bool(matmul_backend.allow_tf32)
+    # Reading the legacy flag fails once both APIs have been used, so the precision API takes precedence.
+    if precision == "none":
+        precision = getattr(torch.backends, "fp32_precision", precision)
+    return precision == "tf32"
+
+
+def _dot_input_precision(x: Tensor) -> str:
+    """Selects the precision of ``float32`` products as :func:`torch.matmul` does.
+
+    Half-precision products are unaffected by the precision, so they keep a single compiled variant.
+
+    """
+    if x.dtype == torch.float32 and not _float32_matmul_allows_tf32():
+        return "ieee"
+    return "tf32"
 
 
 def matmul_wrapper_backward(ctx, grad_output):
@@ -142,12 +176,12 @@ def matmul_wrapper_backward(ctx, grad_output):
     grad_y = matmul(x_t, sparsity_layout_x_t, grad_output, sparsity_layout_o, sparsity_layout_y,
                     sparsity_block_size)
 
-    return grad_x, grad_y, None, None, None, None, None, None, None, None
+    return as_base_tensor(grad_x), as_base_tensor(grad_y), None, None, None, None, None, None, None, None
 
 
 @triton.autotune(
     configs=get_autotune_configs("matmul"),
-    key=["sparsity_block_size"],
+    key=["sparsity_block_size", "INPUT_PRECISION"],
     prune_configs_by={"early_config_prune": prune_autotune_configs},
     reset_to_zero=["o"]
 )
@@ -167,6 +201,7 @@ def matmul_kernel(x,
                   lidx_o_c_s,
                   sparsity_block_size,
                   USE_INT64: tl.constexpr,
+                  INPUT_PRECISION: tl.constexpr,
                   TRITON_BLOCK_SIZE: tl.constexpr) -> None:
     # Get triton block indices
     index_dtype = tl.int64 if USE_INT64 else tl.int32
@@ -239,7 +274,7 @@ def matmul_kernel(x,
             blk_y = tl.load(y + blk_y_idx, mask=blk_y_msk, other=0)
 
             # Perform matrix multiplication
-            buf += tl.dot(blk_x, blk_y)
+            buf += tl.dot(blk_x, blk_y, input_precision=INPUT_PRECISION)
 
     # Cast buffer
     buf = tl.cast(buf, o.dtype.element_ty)
@@ -253,6 +288,7 @@ def matmul_kernel(x,
     tl.store(o + blk_o_idx, buf, mask=blk_o_msk)
 
 
+@torch.compiler.disable
 def matmul_build_layout_cache(layout_cache: dict | None, sparsity_layout_x: Tensor, sparsity_layout_y: Tensor, sparsity_layout_output: Tensor):
     layout_cache = prepare_layout_cache(
         layout_cache, "matmul", sparsity_layout_x, sparsity_layout_y, sparsity_layout_output)

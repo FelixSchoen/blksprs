@@ -2166,10 +2166,9 @@ def test_blksprs_large_index_build_sparsity_layout_adaption(config: tuple):
     )
     torch.cuda.synchronize()
 
-    expected = torch.zeros((b, n_row_blocks_to, n_col_blocks_to), dtype=torch.bool, device=DEVICE)
-    for batch_idx in sample_batches:
-        for row_idx in sample_rows:
-            expected[batch_idx, row_idx * 2:(row_idx + 1) * 2, :] = True
+    # The adaption is structural: every target block overlapping an active source block is active, whatever the
+    # values, so a full source layout gives a full target layout although most blocks hold zeros.
+    expected = torch.ones((b, n_row_blocks_to, n_col_blocks_to), dtype=torch.bool, device=DEVICE)
 
     assert torch.equal(actual, expected)
 

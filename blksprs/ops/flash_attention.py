@@ -1,9 +1,11 @@
+import inspect
 import math
 import operator
 import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from numbers import Real
+from typing import cast
 
 import torch
 import triton
@@ -18,6 +20,7 @@ from blksprs.ops.relative_score_blocks import ReferencedScoreBlocks, allocate_re
 from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs, \
     prune_autotune_configs_spanning, SUPPORTED_AUTOTUNE_MODES
 from blksprs.utils.blksprs_tensor import BlksprsTensor
+from blksprs.utils.public_op import opaque_public_op
 from blksprs.utils.tools import as_base_tensor, build_packed_indices, can_use_int32_indexing, cast_for_autocast, \
     prepare_layout_cache, finalize_layout_cache, INT32_INDEX_MAX
 from blksprs.utils.validation import validate_contiguous, validate_device, validate_dtype_float, \
@@ -64,6 +67,9 @@ _VARIANT_ARGUMENTS = frozenset(("BLOCK_SPARSE_SCORES", "grid", "warmup"))
 # kernel fit into shared memory.
 _MAX_HEAD_TILE_BYTES = 256
 
+# The largest number of programs along the second and third axes of a CUDA grid, see ``_folds_grid``.
+_GRID_AXIS_LIMIT = 65535
+
 
 def _largest_program_tile() -> int:
     """Returns the largest tile that a program owns in any Flash Attention autotuning configuration of any mode."""
@@ -81,7 +87,7 @@ def _largest_program_tile() -> int:
 _SCHEDULE_TILE_SIZE = _largest_program_tile()
 
 
-@torch.amp.custom_fwd(device_type="cuda")
+@opaque_public_op
 def flash_attention(q: BlksprsTensor, sparsity_layout_q: Tensor,
                     k: BlksprsTensor, sparsity_layout_k: Tensor,
                     v: BlksprsTensor, sparsity_layout_v: Tensor,
@@ -441,7 +447,10 @@ class _FlashAttentionAutograd(torch.autograd.Function):
                     arguments.sparsity_block_size)
             drelative_embeddings = dpadded_embeddings.index_select(1, relations.embedding_columns)
 
-        return dq, dk, dv, dbias, drelative_query, drelative_embeddings, None
+        # Gradients are base tensors, also for operands of a tensor subclass, so that compiled code that produced the
+        # operands receives the gradient type it traced.
+        return tuple(None if gradient is None else as_base_tensor(gradient)
+                     for gradient in (dq, dk, dv, dbias, drelative_query, drelative_embeddings)) + (None,)
 
 
 def _project_relative_scores(relative_query: Tensor | None, relative_embeddings: Tensor | None,
@@ -567,20 +576,25 @@ def _launch(kernel, grid, args: tuple, kwargs: dict, flags: dict, variants: list
     arguments and the dtypes of its tensors, compiles all configurations of all its ``variants`` concurrently instead,
     so that no later call of the configuration compiles, whichever of the variants its data select. Configurations
     that exceed the resources of the GPU for some variant are excluded from the tuning of the call configuration, see
-    ``_prune_configs``, so that the configuration tuned on one variant also serves the others.
+    ``_prune_configs``, so that the configuration tuned on one variant also serves the others. Triton versions without
+    concurrent compilation, see ``_compiles_concurrently``, compile the configurations one after the other instead.
 
     """
     configuration = _call_configuration(kernel, args, kwargs | variants[0])
     if configuration not in _UNFIT_CONFIGS:
         configs = prune_autotune_configs_spanning(kernel.configs, {"sparsity_block_size": kwargs.get(
             "sparsity_block_size", args[kernel.arg_names.index("sparsity_block_size")])})
-        compiled = []
-        with ThreadPoolExecutor(min(len(configs) * len(variants), _available_cpus())) as executor, \
-                triton.AsyncCompileMode(executor, ignore_errors=True):
-            for variant in variants:
-                for config in configs:
-                    compiled.append((config, kernel.fn.warmup(*args, grid=(1,), **kwargs, **variant,
-                                                              **config.all_kwargs())))
+        if _CONCURRENT_COMPILATION:
+            compiled = []
+            with ThreadPoolExecutor(min(len(configs) * len(variants), _available_cpus())) as executor, \
+                    triton.AsyncCompileMode(executor, ignore_errors=True):
+                for variant in variants:
+                    for config in configs:
+                        compiled.append((config, kernel.fn.warmup(*args, grid=(1,), **kwargs, **variant,
+                                                                  **config.all_kwargs())))
+        else:
+            compiled = [(config, _compile_sequentially(kernel, args, kwargs, variant, config))
+                        for variant in variants for config in configs]
         unfit = set()
         for config, future in compiled:
             # Compiled kernels found in memory are returned as such, all others as futures.
@@ -589,12 +603,50 @@ def _launch(kernel, grid, args: tuple, kwargs: dict, flags: dict, variants: list
                 # The autotuner reports the error of a configuration that does not compile.
                 unfit.add(config)
                 continue
+            # Without this check, the configurations that exceed the resources of the GPU are only skipped by the
+            # autotuner while benchmarking them.
+            initialise = getattr(compiled_kernel, "_init_handles", None)
+            if initialise is None:
+                continue
             try:
-                compiled_kernel._init_handles()
+                initialise()
             except OutOfResources:
                 unfit.add(config)
         _UNFIT_CONFIGS[configuration] = unfit
     kernel[grid](*args, **kwargs, **flags)
+
+
+def _compiles_concurrently() -> bool:
+    """Returns whether Triton compiles kernels concurrently and returns failed compilations as None, see ``_launch``.
+
+    Both hold from Triton 3.6 on. Triton 3.5 compiles concurrently but raises the first error of any compilation, and
+    earlier versions compile one kernel at a time.
+
+    """
+    compile_mode = getattr(triton, "AsyncCompileMode", None)
+    future_kernel = getattr(triton, "FutureKernel", None)
+    if compile_mode is None or future_kernel is None:
+        return False
+    try:
+        return all("ignore_errors" in inspect.signature(function).parameters
+                   for function in (compile_mode, future_kernel.result))
+    except (TypeError, ValueError):
+        return False
+
+
+_CONCURRENT_COMPILATION = _compiles_concurrently()
+
+
+def _compile_sequentially(kernel, args: tuple, kwargs: dict, variant: dict, config):
+    """Compiles one configuration of a variant of a call, or returns None if it does not compile.
+
+    Errors are ignored as by concurrent compilation, see ``_launch``.
+
+    """
+    try:
+        return kernel.fn.warmup(*args, grid=(1,), **kwargs, **variant, **config.all_kwargs())
+    except Exception:
+        return None
 
 
 def _available_cpus() -> int:
@@ -665,7 +717,8 @@ def _variant_launches(score_flags: dict, relations: "_RelativeAttentionArguments
         return score_flags, [score_flags]
     variants = [{**score_flags, "BLOCK_SPARSE_SCORES": all_intervals}, score_flags]
     # Only the referenced blocks have a layout other than the complete one, so that ``relations`` holds them.
-    return variants[0 if relations.score_blocks.complete_intervals else 1], variants
+    score_blocks = cast(ReferencedScoreBlocks, cast(_RelativeAttentionArguments, relations).score_blocks)
+    return variants[0 if score_blocks.complete_intervals else 1], variants
 
 
 def _head_settings(arguments: _FlashAttentionArguments, element_size: int) -> tuple[dict, int, int]:
@@ -675,6 +728,34 @@ def _head_settings(arguments: _FlashAttentionArguments, element_size: int) -> tu
     settings = dict(HEAD_TILE_QK=head_tile_qk, HEAD_TILE_V=head_tile_v,
                     N_CHUNKS_QK=n_chunks_qk, N_CHUNKS_V=n_chunks_v)
     return settings, n_chunks_qk, n_chunks_v
+
+
+def _folds_grid(kernel, length: int, sparsity_block_size: int, tile_name: str, prune) -> bool:
+    """Returns whether a kernel folds the sequence tiles into the batch axis of its grid, see ``_tile_grid``.
+
+    The grids of the kernels hold the attention batches along their first and the sequence tiles of ``length`` rows
+    along their second axis, which holds at most 65,535 programs, see ``_tile_grid``. Sequences with more tiles for
+    some configuration that autotuning may select, those that ``prune`` keeps, are folded for every configuration, so
+    that the decision precedes autotuning. All other calls keep their grid.
+
+    """
+    if triton.cdiv(length, min(config.kwargs[tile_name] for config in kernel.configs)) <= _GRID_AXIS_LIMIT:
+        return False
+    configs = prune(kernel.configs, {"sparsity_block_size": sparsity_block_size})
+    return triton.cdiv(length, min(config.kwargs[tile_name] for config in configs)) > _GRID_AXIS_LIMIT
+
+
+def _tile_grid(n_batches: int, length: int, tile_size: int, folded: bool, *axes: int) -> list[int]:
+    """Returns the grid of a kernel over the attention batches, the sequence tiles, and further ``axes``.
+
+    With ``folded``, see ``_folds_grid``, the batches and tiles share the first axis, which holds the tiles of
+    consecutive batches next to each other, so that the programs keep the order of the unfolded grid.
+
+    """
+    n_tiles = triton.cdiv(length, tile_size)
+    if folded:
+        return [n_batches * n_tiles, 1, *axes]
+    return [n_batches, n_tiles, *axes]
 
 
 def _indexing_extents(arguments: _FlashAttentionArguments, score_operands: list) -> list[Tensor | int]:
@@ -706,11 +787,12 @@ def _flash_attention_forward(q: Tensor, k: Tensor, v: Tensor, attention_bias: Te
     score_operands, score_flags = _score_operands(arguments, attention_bias, relative_scores, q.device)
     head_settings, _, n_chunks_v = _head_settings(arguments, q.element_size())
     use_int64 = not can_use_int32_indexing(q, k, v, output, lse, *_indexing_extents(arguments, score_operands))
+    q_length = arguments.n_seq_blocks_q * sparsity_block_size
+    folded = _folds_grid(flash_attention_kernel, q_length, sparsity_block_size, "TRITON_BLOCK_SIZE_Q",
+                         prune_autotune_configs_spanning)
 
     def triton_grid(meta):
-        return [arguments.n_batches,
-                triton.cdiv(arguments.n_seq_blocks_q * sparsity_block_size, meta["TRITON_BLOCK_SIZE_Q"]),
-                n_chunks_v]
+        return _tile_grid(arguments.n_batches, q_length, meta["TRITON_BLOCK_SIZE_Q"], folded, n_chunks_v)
 
     _launch(flash_attention_kernel, triton_grid,
             (q, k, v, output, lse,
@@ -724,6 +806,7 @@ def _flash_attention_forward(q: Tensor, k: Tensor, v: Tensor, attention_bias: Te
             dict(SCHEDULE_BLOCKS=arguments.query_schedule["group_blocks"],
                  ROW_COMPLETE=arguments.row_complete,
                  USE_INT64=use_int64,
+                 FOLDED_GRID=folded,
                  **head_settings),
             *_variant_launches(score_flags, arguments.relations))
 
@@ -744,9 +827,11 @@ def _flash_attention_backward(q: Tensor, k: Tensor, v: Tensor, output: Tensor, l
     # The row-wise sums of the output and its gradient, which recover the softmax gradient from probabilities.
     delta = torch.empty((n_batches, q_length), dtype=torch.float32, device=q.device)
     use_int64_preprocess = not can_use_int32_indexing(output, grad_output, delta, arguments.packed_indices_o)
+    folded_preprocess = _folds_grid(flash_attention_kernel_bwd_preprocess, q_length, sparsity_block_size,
+                                    "TRITON_BLOCK_SIZE", prune_autotune_configs)
 
     def triton_grid_preprocess(meta):
-        return [n_batches, triton.cdiv(q_length, meta["TRITON_BLOCK_SIZE"])]
+        return _tile_grid(n_batches, q_length, meta["TRITON_BLOCK_SIZE"], folded_preprocess)
 
     flash_attention_kernel_bwd_preprocess[triton_grid_preprocess](
         output, grad_output, delta,
@@ -755,7 +840,8 @@ def _flash_attention_backward(q: Tensor, k: Tensor, v: Tensor, output: Tensor, l
         sparsity_block_size,
         HEAD_TILE_V=head_settings["HEAD_TILE_V"],
         ROW_COMPLETE=arguments.row_complete,
-        USE_INT64=use_int64_preprocess)
+        USE_INT64=use_int64_preprocess,
+        FOLDED_GRID=folded_preprocess)
 
     dq = torch.empty_like(q)
     dk = torch.empty_like(k)
@@ -772,10 +858,12 @@ def _flash_attention_backward(q: Tensor, k: Tensor, v: Tensor, output: Tensor, l
         q, k, v, grad_output, lse, delta, dq, dk, dv, dbias, drelative_scores,
         *_indexing_extents(arguments, score_operands))
 
+    k_length = arguments.n_seq_blocks_k * sparsity_block_size
+    folded_dkdv = _folds_grid(flash_attention_kernel_bwd_dkdv, k_length, sparsity_block_size, "TRITON_BLOCK_SIZE_K",
+                              prune_autotune_configs_spanning)
+
     def triton_grid_dkdv(meta):
-        return [n_batches,
-                triton.cdiv(arguments.n_seq_blocks_k * sparsity_block_size, meta["TRITON_BLOCK_SIZE_K"]),
-                max(n_chunks_qk, n_chunks_v)]
+        return _tile_grid(n_batches, k_length, meta["TRITON_BLOCK_SIZE_K"], folded_dkdv, max(n_chunks_qk, n_chunks_v))
 
     _launch(flash_attention_kernel_bwd_dkdv, triton_grid_dkdv,
             (q, k, v, grad_output, dk, dv, lse, delta,
@@ -789,13 +877,15 @@ def _flash_attention_backward(q: Tensor, k: Tensor, v: Tensor, output: Tensor, l
             dict(SCHEDULE_BLOCKS=arguments.key_schedule["group_blocks"],
                  ROW_COMPLETE=arguments.row_complete,
                  USE_INT64=use_int64,
+                 FOLDED_GRID=folded_dkdv,
                  **head_settings),
             *_variant_launches(score_flags, relations))
 
+    folded_dq = _folds_grid(flash_attention_kernel_bwd_dq, q_length, sparsity_block_size, "TRITON_BLOCK_SIZE_Q",
+                            prune_autotune_configs_spanning)
+
     def triton_grid_dq(meta):
-        return [n_batches,
-                triton.cdiv(q_length, meta["TRITON_BLOCK_SIZE_Q"]),
-                n_chunks_qk]
+        return _tile_grid(n_batches, q_length, meta["TRITON_BLOCK_SIZE_Q"], folded_dq, n_chunks_qk)
 
     _launch(flash_attention_kernel_bwd_dq, triton_grid_dq,
             (q, k, v, grad_output, dq, lse, delta,
@@ -811,6 +901,7 @@ def _flash_attention_backward(q: Tensor, k: Tensor, v: Tensor, output: Tensor, l
             dict(SCHEDULE_BLOCKS=arguments.query_schedule["group_blocks"],
                  ROW_COMPLETE=arguments.row_complete,
                  USE_INT64=use_int64,
+                 FOLDED_GRID=folded_dq,
                  RELATION_BLOCK_SIZE=max(1, triton.next_power_of_2(score_flags["N_RELATIONS"])),
                  MERGED_RELATIONS=0 if relations is None else relations.merged_relations,
                  UNIQUE_KEY_RELATIONS=0 if relations is None else relations.unique_key_relations,
@@ -1622,17 +1713,24 @@ def flash_attention_kernel(q, k, v, o, lse,
                            SCHEDULE_BLOCKS: tl.constexpr,
                            HEAD_TILE_QK: tl.constexpr, HEAD_TILE_V: tl.constexpr,
                            N_CHUNKS_QK: tl.constexpr, N_CHUNKS_V: tl.constexpr,
-                           ROW_COMPLETE: tl.constexpr, USE_INT64: tl.constexpr,
+                           ROW_COMPLETE: tl.constexpr, USE_INT64: tl.constexpr, FOLDED_GRID: tl.constexpr,
                            HAS_MASK: tl.constexpr, HAS_BIAS: tl.constexpr, HAS_CAUSAL: tl.constexpr,
                            HAS_RELATIVE: tl.constexpr, HAS_RELATION_VALIDITY: tl.constexpr,
                            BLOCK_SPARSE_SCORES: tl.constexpr, N_RELATIONS: tl.constexpr,
                            CLIPPED_RELATIONS: tl.constexpr, SCORE_LAYOUT: tl.constexpr,
                            TRITON_BLOCK_SIZE_Q: tl.constexpr, TRITON_BLOCK_SIZE_K: tl.constexpr) -> None:
     index_dtype = tl.int64 if USE_INT64 else tl.int32
-    pid_bat = tl.cast(tl.program_id(axis=0), index_dtype)
+    # A folded grid holds the batches and tiles along its first axis, see ``_tile_grid``.
+    if FOLDED_GRID:
+        pid_bat = tl.cast(tl.program_id(axis=0) % n_batches, index_dtype)
+    else:
+        pid_bat = tl.cast(tl.program_id(axis=0), index_dtype)
     # Start with the last query tiles, which attend to the most keys under causal layouts.
     n_tiles = tl.cdiv(n_seq_blocks_q * sparsity_block_size, TRITON_BLOCK_SIZE_Q)
-    pid_tile = n_tiles - 1 - tl.cast(tl.program_id(axis=1), index_dtype)
+    if FOLDED_GRID:
+        pid_tile = n_tiles - 1 - tl.cast(tl.program_id(axis=0) // n_batches, index_dtype)
+    else:
+        pid_tile = n_tiles - 1 - tl.cast(tl.program_id(axis=1), index_dtype)
     pid_chunk = tl.program_id(axis=2)
 
     query_blocks, query_positions, query_valid = _sequence_tile(pid_tile, n_seq_blocks_q, TRITON_BLOCK_SIZE_Q,
@@ -1760,10 +1858,18 @@ def flash_attention_kernel_bwd_preprocess(o, do, delta,
                                           HEAD_TILE_V: tl.constexpr,
                                           ROW_COMPLETE: tl.constexpr,
                                           USE_INT64: tl.constexpr,
+                                          FOLDED_GRID: tl.constexpr,
                                           TRITON_BLOCK_SIZE: tl.constexpr) -> None:
     index_dtype = tl.int64 if USE_INT64 else tl.int32
-    pid_bat = tl.cast(tl.program_id(axis=0), index_dtype)
-    pid_tile = tl.program_id(axis=1)
+    if FOLDED_GRID:
+        # A folded grid holds the batches and tiles along its first axis, see ``_tile_grid``. The kernel takes no
+        # number of batches, which follows from the size of the grid.
+        n_batches = tl.num_programs(axis=0) // tl.cdiv(n_seq_blocks_q * sparsity_block_size, TRITON_BLOCK_SIZE)
+        pid_bat = tl.cast(tl.program_id(axis=0) % n_batches, index_dtype)
+        pid_tile = tl.program_id(axis=0) // n_batches
+    else:
+        pid_bat = tl.cast(tl.program_id(axis=0), index_dtype)
+        pid_tile = tl.program_id(axis=1)
 
     query_blocks, query_positions, query_valid = _sequence_tile(pid_tile, n_seq_blocks_q, TRITON_BLOCK_SIZE,
                                                                 sparsity_block_size, USE_INT64)
@@ -1866,7 +1972,7 @@ def flash_attention_kernel_bwd_dkdv(q, k, v, do, dk, dv, lse, delta,
                                     SCHEDULE_BLOCKS: tl.constexpr,
                                     HEAD_TILE_QK: tl.constexpr, HEAD_TILE_V: tl.constexpr,
                                     N_CHUNKS_QK: tl.constexpr, N_CHUNKS_V: tl.constexpr,
-                                    ROW_COMPLETE: tl.constexpr, USE_INT64: tl.constexpr,
+                                    ROW_COMPLETE: tl.constexpr, USE_INT64: tl.constexpr, FOLDED_GRID: tl.constexpr,
                                     HAS_MASK: tl.constexpr, HAS_BIAS: tl.constexpr, HAS_CAUSAL: tl.constexpr,
                                     HAS_RELATIVE: tl.constexpr, HAS_RELATION_VALIDITY: tl.constexpr,
                                     BLOCK_SPARSE_SCORES: tl.constexpr, N_RELATIONS: tl.constexpr,
@@ -1874,9 +1980,14 @@ def flash_attention_kernel_bwd_dkdv(q, k, v, do, dk, dv, lse, delta,
                                     TRITON_BLOCK_SIZE_Q: tl.constexpr,
                                     TRITON_BLOCK_SIZE_K: tl.constexpr) -> None:
     index_dtype = tl.int64 if USE_INT64 else tl.int32
-    pid_bat = tl.cast(tl.program_id(axis=0), index_dtype)
-    # Start with the first key tiles, which are attended by the most queries under causal layouts.
-    pid_tile = tl.cast(tl.program_id(axis=1), index_dtype)
+    if FOLDED_GRID:
+        # A folded grid holds the batches and tiles along its first axis, see ``_tile_grid``.
+        pid_bat = tl.cast(tl.program_id(axis=0) % n_batches, index_dtype)
+        pid_tile = tl.cast(tl.program_id(axis=0) // n_batches, index_dtype)
+    else:
+        pid_bat = tl.cast(tl.program_id(axis=0), index_dtype)
+        # Start with the first key tiles, which are attended by the most queries under causal layouts.
+        pid_tile = tl.cast(tl.program_id(axis=1), index_dtype)
     pid_chunk = tl.program_id(axis=2)
     # The programs of a key tile cover the chunks of both head dimensions, one of which may have fewer.
     chunk_qk = tl.minimum(pid_chunk, N_CHUNKS_QK - 1)
@@ -2143,7 +2254,7 @@ def flash_attention_kernel_bwd_dq(q, k, v, do, dq, lse, delta, dbias, drelative_
                                   SCHEDULE_BLOCKS: tl.constexpr,
                                   HEAD_TILE_QK: tl.constexpr, HEAD_TILE_V: tl.constexpr,
                                   N_CHUNKS_QK: tl.constexpr, N_CHUNKS_V: tl.constexpr,
-                                  ROW_COMPLETE: tl.constexpr, USE_INT64: tl.constexpr,
+                                  ROW_COMPLETE: tl.constexpr, USE_INT64: tl.constexpr, FOLDED_GRID: tl.constexpr,
                                   HAS_MASK: tl.constexpr, HAS_BIAS: tl.constexpr, HAS_CAUSAL: tl.constexpr,
                                   HAS_RELATIVE: tl.constexpr, HAS_RELATION_VALIDITY: tl.constexpr,
                                   BLOCK_SPARSE_SCORES: tl.constexpr, N_RELATIONS: tl.constexpr,
@@ -2153,10 +2264,17 @@ def flash_attention_kernel_bwd_dq(q, k, v, do, dq, lse, delta, dbias, drelative_
                                   TRITON_BLOCK_SIZE_Q: tl.constexpr,
                                   TRITON_BLOCK_SIZE_K: tl.constexpr) -> None:
     index_dtype = tl.int64 if USE_INT64 else tl.int32
-    pid_bat = tl.cast(tl.program_id(axis=0), index_dtype)
+    # A folded grid holds the batches and tiles along its first axis, see ``_tile_grid``.
+    if FOLDED_GRID:
+        pid_bat = tl.cast(tl.program_id(axis=0) % n_batches, index_dtype)
+    else:
+        pid_bat = tl.cast(tl.program_id(axis=0), index_dtype)
     # Start with the last query tiles, which attend to the most keys under causal layouts.
     n_tiles = tl.cdiv(n_seq_blocks_q * sparsity_block_size, TRITON_BLOCK_SIZE_Q)
-    pid_tile = n_tiles - 1 - tl.cast(tl.program_id(axis=1), index_dtype)
+    if FOLDED_GRID:
+        pid_tile = n_tiles - 1 - tl.cast(tl.program_id(axis=0) // n_batches, index_dtype)
+    else:
+        pid_tile = n_tiles - 1 - tl.cast(tl.program_id(axis=1), index_dtype)
     pid_chunk = tl.program_id(axis=2)
 
     query_blocks, query_positions, query_valid = _sequence_tile(pid_tile, n_seq_blocks_q, TRITON_BLOCK_SIZE_Q,
@@ -2314,6 +2432,7 @@ def flash_attention_kernel_bwd_dq(q, k, v, do, dq, lse, delta, dbias, drelative_
         tl.store(drelative_scores + maximum_offsets, maximum_gradients, mask=maximum_present)
 
 
+@opaque_public_op
 def flash_attention_build_layout_cache(attention_layout: Tensor,
                                        sparsity_layout_q: Tensor | None = None,
                                        sparsity_layout_k: Tensor | None = None,

@@ -1,20 +1,19 @@
-import math
-
 import torch
 import triton
 from torch import Tensor
 from torch._library.triton import wrap_triton, triton_op
 from triton import language as tl
 
-from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs, prune_autotune_configs_conversion
+from blksprs.utils.autotuning import get_autotune_configs, prune_autotune_configs
 from blksprs.utils.blksprs_tensor import BlksprsTensor
-from blksprs.utils.tools import build_layout_indices, stride, can_use_int32_indexing
+from blksprs.utils.public_op import on_operand_device, public_op
+from blksprs.utils.tools import stride, can_use_int32_indexing
 from blksprs.utils.validation import validate_dimensions, validate_device, \
     validate_contiguous, validate_sparsity, validate_sparsity_block_size, \
     validate_sparsity_layout, validate_dtype_supported, ensure_contiguous
 
 
-@torch.amp.custom_fwd(device_type="cuda")
+@public_op
 def build_sparsity_layout(x: Tensor, sparsity_block_size: int) -> Tensor:
     """Builds the sparsity layout of a three-dimensional dense tensor.
 
@@ -38,6 +37,7 @@ def build_sparsity_layout(x: Tensor, sparsity_block_size: int) -> Tensor:
 
 
 @triton_op("blksprs::build_sparsity_layout", mutates_args={})
+@on_operand_device
 def build_sparsity_layout_operation(x: Tensor, sparsity_block_size: int) -> Tensor:
     with torch.no_grad():
         output = torch.zeros(x.size(0), x.size(1) // sparsity_block_size, x.size(2) // sparsity_block_size,
@@ -48,8 +48,10 @@ def build_sparsity_layout_operation(x: Tensor, sparsity_block_size: int) -> Tens
         o_b, o_r, o_c = output.size()
         o_b_s, o_r_s, o_c_s = stride(output)
 
-        triton_grid = lambda meta: [x_b,
-                                    triton.cdiv(x_r, meta["TRITON_BLOCK_SIZE"]),
+        # All tiles share grid axis 0. The other grid axes are limited to 65535 programs, which would restrict the
+        # row and column extents of ``x``.
+        triton_grid = lambda meta: [x_b *
+                                    triton.cdiv(x_r, meta["TRITON_BLOCK_SIZE"]) *
                                     triton.cdiv(x_c, meta["TRITON_BLOCK_SIZE"])]
 
         use_int64 = not can_use_int32_indexing(x, output)
@@ -80,10 +82,13 @@ def build_sparsity_layout_kernel(x,
                                  USE_INT64: tl.constexpr,
                                  TRITON_BLOCK_SIZE: tl.constexpr) -> None:
     index_dtype = tl.int64 if USE_INT64 else tl.int32
-    # Get triton block indices
-    pid_bat = tl.cast(tl.program_id(axis=0), index_dtype)
-    pid_row = tl.cast(tl.program_id(axis=1), index_dtype)
-    pid_col = tl.cast(tl.program_id(axis=2), index_dtype)
+    # Get triton block indices from the flattened grid
+    pid = tl.cast(tl.program_id(axis=0), index_dtype)
+    n_tiles_row = tl.cdiv(x_r, TRITON_BLOCK_SIZE)
+    n_tiles_col = tl.cdiv(x_c, TRITON_BLOCK_SIZE)
+    pid_bat = pid // (n_tiles_row * n_tiles_col)
+    pid_row = (pid // n_tiles_col) % n_tiles_row
+    pid_col = pid % n_tiles_col
 
     # Load x values
     row_offsets = pid_row * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)
@@ -109,139 +114,70 @@ def build_sparsity_layout_kernel(x,
         tl.store(o + blk_o_idx, 1, mask=blk_o_msk)
 
 
-@torch.amp.custom_fwd(device_type="cuda")
+@public_op
 def build_sparsity_layout_adaption(x: BlksprsTensor, sparsity_layout_from: Tensor,
                                    sparsity_block_size_from: int, sparsity_block_size_to: int) -> Tensor:
-    """Builds the sparsity layout for a compressed tensor at a different block size.
+    """Builds the structural sparsity layout of a compressed tensor at a different block size.
+
+    A block of the returned layout is active if and only if it overlaps at least one active block of
+    ``sparsity_layout_from``. The layout therefore depends only on ``sparsity_layout_from`` and the two block sizes:
+    active blocks that contain only zeros remain covered, and the values of ``x`` never change the result. When the
+    logical row or column extent is not divisible by a larger target block size, the layout covers the next complete
+    block. :func:`blksprs.ops.adapt_layout` uses this layout when no target layout is given.
+
+    Note:
+        To omit target blocks that contain only zeros, build a value-based layout explicitly from the dense tensor,
+        for example ``build_sparsity_layout(to_dense(x, sparsity_layout_from, sparsity_block_size_from),
+        sparsity_block_size_to)`` if the dense extent is divisible by ``sparsity_block_size_to``, and pass it as the
+        target layout.
 
     Args:
-        x (BlksprsTensor): The compressed input tensor.
+        x (BlksprsTensor): The compressed input tensor. Only its shape, dtype, and device are validated.
         sparsity_layout_from (Tensor): The sparsity layout of ``x``.
         sparsity_block_size_from (int): The current size of the sparsity blocks.
         sparsity_block_size_to (int): The desired size of the sparsity blocks.
 
     Returns:
-        Tensor: The sparsity layout of ``x`` at the target block size.
+        Tensor: A Boolean sparsity layout at the target block size marking every block that overlaps an active block
+            of ``sparsity_layout_from``.
 
     """
-    x = ensure_contiguous(x)
-
     validate_dimensions(x)
-    validate_contiguous(x, sparsity_layout_from)
+    validate_contiguous(sparsity_layout_from)
     validate_dtype_supported(x)
     validate_device(x)
     validate_sparsity(sparsity_block_size_from, (x, sparsity_layout_from))
     validate_sparsity_block_size(sparsity_block_size_from, x)
     validate_sparsity_block_size(sparsity_block_size_to)
 
-    layout_indices = build_layout_indices(sparsity_layout_from)
+    sparsity_layout_from = sparsity_layout_from != 0
+    n_batches, n_rows_from, n_cols_from = sparsity_layout_from.size()
 
-    validate_contiguous(sparsity_layout_from, layout_indices)
+    # Both block sizes are powers of two, so the smaller one divides the larger one.
+    if sparsity_block_size_to <= sparsity_block_size_from:
+        ratio = sparsity_block_size_from // sparsity_block_size_to
+        return Tensor(sparsity_layout_from
+                      .repeat_interleave(ratio, dim=1)
+                      .repeat_interleave(ratio, dim=2))
 
-    return Tensor(build_sparsity_layout_adaption_operation(
-        x, sparsity_layout_from, layout_indices, sparsity_block_size_from, sparsity_block_size_to))
+    ratio = sparsity_block_size_to // sparsity_block_size_from
+    n_rows_to = triton.cdiv(n_rows_from, ratio)
+    n_cols_to = triton.cdiv(n_cols_from, ratio)
 
+    if n_rows_to * ratio != n_rows_from or n_cols_to * ratio != n_cols_from:
+        # Inactive padding blocks extend the source layout to complete target blocks
+        sparsity_layout_padded = torch.zeros((n_batches, n_rows_to * ratio, n_cols_to * ratio),
+                                             dtype=torch.bool, device=sparsity_layout_from.device)
+        sparsity_layout_padded[:, :n_rows_from, :n_cols_from] = sparsity_layout_from
+        sparsity_layout_from = sparsity_layout_padded
 
-@triton_op("blksprs::build_sparsity_layout_adaption", mutates_args={})
-def build_sparsity_layout_adaption_operation(x: Tensor, sparsity_layout_from: Tensor, layout_indices: Tensor,
-                                             sparsity_block_size_from: int, sparsity_block_size_to: int) -> Tensor:
-    with torch.no_grad():
-        o_b = sparsity_layout_from.size(0)
-        o_r = math.ceil(sparsity_layout_from.size(1) * sparsity_block_size_from / sparsity_block_size_to)
-        o_c = math.ceil(sparsity_layout_from.size(2) * sparsity_block_size_from / sparsity_block_size_to)
-
-        output = torch.zeros(o_b, o_r, o_c, dtype=torch.bool, device=x.device)
-
-        x_b, x_r, x_c = x.size()
-        x_b_s, x_r_s, x_c_s = stride(x)
-        lidx_r, lidx_c = layout_indices.size()
-        lidx_r_s, lidx_c_s = stride(layout_indices)
-        o_b_s, o_r_s, o_c_s = stride(output)
-
-        triton_grid = lambda meta: [x_b,
-                                    triton.cdiv(x_r, meta["TRITON_BLOCK_SIZE"]),
-                                    triton.cdiv(x_c, meta["TRITON_BLOCK_SIZE"])]
-
-        use_int64 = not can_use_int32_indexing(x, layout_indices, output)
-
-        (wrap_triton(build_sparsity_layout_adaption_kernel)[triton_grid]
-         (x,
-          x_b, x_r, x_c, x_b_s, x_r_s, x_c_s,
-          layout_indices, lidx_r, lidx_r_s, lidx_c_s,
-          output,
-          o_b, o_r, o_c, o_b_s, o_r_s, o_c_s,
-          sparsity_block_size_from,
-          sparsity_block_size_to,
-          USE_INT64=use_int64))
-
-        return output
+    return Tensor(sparsity_layout_from
+                  .reshape(n_batches, n_rows_to, ratio, n_cols_to, ratio)
+                  .any(dim=4)
+                  .any(dim=2))
 
 
-@triton.autotune(
-    configs=get_autotune_configs(),
-    key=["sparsity_block_size_from", "sparsity_block_size_to"],
-    prune_configs_by={"early_config_prune": prune_autotune_configs_conversion},
-    reset_to_zero=["o"]
-)
-@triton.jit
-def build_sparsity_layout_adaption_kernel(x,
-                                          x_b, x_r, x_c, x_b_s, x_r_s, x_c_s,
-                                          lidx, lidx_r, lidx_r_s, lidx_c_s,
-                                          o,
-                                          o_b, o_r, o_c, o_b_s, o_r_s, o_c_s,
-                                          sparsity_block_size_from,
-                                          sparsity_block_size_to,
-                                          USE_INT64: tl.constexpr,
-                                          TRITON_BLOCK_SIZE: tl.constexpr) -> None:
-    index_dtype = tl.int64 if USE_INT64 else tl.int32
-    # Get triton block indices
-    pid_blk = tl.cast(tl.program_id(axis=0), index_dtype)
-    pid_row = tl.cast(tl.program_id(axis=1), index_dtype)
-    pid_col = tl.cast(tl.program_id(axis=2), index_dtype)
-
-    # Get sparsity index of current output block consisting of its batch, row, and column index
-    spa_bat_idx = (pid_blk * lidx_r_s + 0 * lidx_c_s)
-    spa_bat_msk = ((spa_bat_idx >= 0) &
-                   (spa_bat_idx < tl.cast(lidx_r, index_dtype) * lidx_r_s))
-    spa_bat = tl.cast(tl.load(lidx + spa_bat_idx, mask=spa_bat_msk, other=0), index_dtype)
-
-    spa_row_idx = (pid_blk * lidx_r_s + 1 * lidx_c_s)
-    spa_row_msk = ((spa_row_idx >= 0) &
-                   (spa_row_idx < tl.cast(lidx_r, index_dtype) * lidx_r_s))
-    spa_row = tl.cast(tl.load(lidx + spa_row_idx, mask=spa_row_msk, other=0), index_dtype)
-
-    spa_col_idx = (pid_blk * lidx_r_s + 2 * lidx_c_s)
-    spa_col_msk = ((spa_col_idx >= 0) &
-                   (spa_col_idx < tl.cast(lidx_r, index_dtype) * lidx_r_s))
-    spa_col = tl.cast(tl.load(lidx + spa_col_idx, mask=spa_col_msk, other=0), index_dtype)
-
-    # Load x values
-    row_offsets = pid_row * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)
-    col_offsets = pid_col * TRITON_BLOCK_SIZE + tl.cast(tl.arange(0, TRITON_BLOCK_SIZE), index_dtype)
-    blk_x_idx = ((pid_blk * x_b_s) +
-                 (row_offsets * x_r_s)[:, None] +
-                 (col_offsets * x_c_s)[None, :])
-    blk_x_msk = ((pid_blk < tl.cast(x_b, index_dtype)) &
-                 (row_offsets[:, None] < tl.cast(x_r, index_dtype)) &
-                 (col_offsets[None, :] < tl.cast(x_c, index_dtype)))
-    blk_x = tl.load(x + blk_x_idx, mask=blk_x_msk, other=0)
-
-    # Store sparsity layout value
-    if tl.max(blk_x != 0):
-        out_row = ((pid_row * TRITON_BLOCK_SIZE + spa_row * sparsity_block_size_from)
-                   // sparsity_block_size_to)
-        out_col = ((pid_col * TRITON_BLOCK_SIZE + spa_col * sparsity_block_size_from)
-                   // sparsity_block_size_to)
-        blk_o_idx = ((spa_bat * o_b_s) +
-                     (out_row * o_r_s) +
-                     (out_col * o_c_s))
-        blk_o_msk = ((spa_bat < tl.cast(o_b, index_dtype)) &
-                     (out_row < tl.cast(o_r, index_dtype)) &
-                     (out_col < tl.cast(o_c, index_dtype)))
-        tl.store(o + blk_o_idx, 1, mask=blk_o_msk)
-
-
-@torch.amp.custom_fwd(device_type="cuda")
+@public_op
 def build_sparsity_layout_matmul(sparsity_layout_x: Tensor, sparsity_layout_y: Tensor) -> Tensor:
     """Builds the exact structural layout product for matrix multiplication.
 
@@ -258,7 +194,7 @@ def build_sparsity_layout_matmul(sparsity_layout_x: Tensor, sparsity_layout_y: T
         sparsity_layout_x.to(torch.float), sparsity_layout_y.to(torch.float)).to(torch.bool))
 
 
-@torch.amp.custom_fwd(device_type="cuda")
+@public_op
 def build_sparsity_layout_matmul_fast(sparsity_layout_x: Tensor, sparsity_layout_y: Tensor) -> Tensor:
     """Builds a fast conservative layout approximation for matrix multiplication.
 
@@ -282,7 +218,7 @@ def build_sparsity_layout_matmul_fast(sparsity_layout_x: Tensor, sparsity_layout
     return Tensor(torch.logical_and(sparsity_layout_x_slice, sparsity_layout_y_slice))
 
 
-@torch.amp.custom_fwd(device_type="cuda")
+@public_op
 def build_sparsity_layout_matmul_outer(sparsity_layout_x: Tensor, sparsity_layout_y: Tensor) -> Tensor:
     """Builds an outer layout approximation for matrix multiplication.
 
@@ -319,6 +255,7 @@ def _validate_sparsity_layout_matmul_inputs(sparsity_layout_x: Tensor, sparsity_
         raise ValueError("Inner dimensions of sparsity layouts must match")
 
 
+@public_op
 def build_sparsity_layout_full(x: Tensor, sparsity_block_size: int) -> Tensor:
     """Builds a fully populated sparsity layout for a dense tensor.
 
